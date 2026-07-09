@@ -220,5 +220,5 @@ __marimo__/
 # agentic
 .claude/
 .code-audit/
-
+.agents/
 sample-data/

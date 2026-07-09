@@ -18,7 +18,7 @@ Trivial, low-risk edits (a typo, a one-line fix) can skip the ceremony — but w
 
 ### Python follows python-engineering-standards
 
-All Python — services, CLIs, parsing, tests — follows the `python-engineering-standards` skill. Invoke it building python code.
+All Python — services, CLIs, parsing, tests — follows the `python-engineering-standards` skill. Invoke it if building python code.
 
 ### Local development uses uv with a virtual environment
 
