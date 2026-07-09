@@ -251,10 +251,10 @@ Same pattern as a static GitHub Pages dashboard reading a data blob: date-range 
 
 Each phase is independently valuable and testable — one focused Claude Code session (or a small OpenSpec change) each. `⟂` = can run in parallel.
 
-### Phase 0 — Scaffold & contracts
+### Phase 0 — Scaffold & contracts (*COMPLETED*)
 Repo init, language/runtime decision (see Open Decisions), CLI skeleton with `session`/`report` stubs, the SQLite schema DDL, and the verdict-JSON shape. **Exit:** empty pipeline runs end-to-end and writes an empty store.
 
-### Phase 1 — Parser core (deterministic, no LLM)
+### Phase 1 — Parser core (deterministic, no LLM) (*COMPLETED*)
 Discover main sessions (`projects/**/*.jsonl`), subagent runs (`projects/**/<sid>/subagents/agent-*.jsonl`) + their `.meta.json` sidecars, and agent defs (`.claude/agents/**`). Parse into `fact_tool_event` + `dim_agent`, persist to SQLite. Path-based parent linkage + `.meta.json` pairing + name-resolution fallback chain. Ingest `main` sessions too (`session_kind`), even though they aren't scored until v2. Single-session path first. **Exit:** point it at the sample `agent-*.jsonl` (+ meta) and get a correctly populated store with parent lineage resolved. ~60% of the value ships here.
 
 ### Phase 2 — Deterministic signals & aggregation
