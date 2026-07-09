@@ -1,7 +1,3 @@
-# CLAUDE.md
-
-Guidance for Claude Code (and humans) working in this repo.
-
 ## What this project is
 
 agentlens reads Claude Code session logs (JSONL under `~/.claude/projects/`) and turns them into deterministic facts, LLM-judged scores, and actionable fix proposals for custom subagents. The full design lives in [`docs/agentlens-design.md`](docs/agentlens-design.md); read it before making structural changes.
@@ -22,7 +18,7 @@ Trivial, low-risk edits (a typo, a one-line fix) can skip the ceremony — but w
 
 ### Python follows python-engineering-standards
 
-All Python — services, CLIs, parsing, tests — follows the `python-engineering-standards` skill: layout, typing, error handling, logging, testing, and tooling. Type everything; the project runs `mypy` in **strict** mode.
+All Python — services, CLIs, parsing, tests — follows the `python-engineering-standards` skill. Invoke it building python code.
 
 ### Local development uses uv with a virtual environment
 
@@ -61,4 +57,4 @@ uv run mypy
 
 ## Commits
 
-Don't commit or push unless asked. When committing, work on a branch (not `main`) and end commit messages with the standard `Co-Authored-By: Claude` trailer.
+Don't commit or push unless asked.
