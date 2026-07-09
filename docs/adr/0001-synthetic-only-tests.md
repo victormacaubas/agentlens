@@ -14,8 +14,6 @@ Those tests were removed, for reasons that generalize beyond the one change:
 
 The forces on the other side: we do want confidence the parser handles *real* shapes, not just our idealized fixtures. The resolution is to get that confidence from a **manual** one-off run, not an automated test, and to defer strict real-log validation to a later, dedicated effort (v2) once the schema and dataclasses have stabilized.
 
-This decision was first recorded as decision D7 in the `scaffold-and-parser-core` change (`openspec/changes/archive/2026-07-09-scaffold-and-parser-core/design.md`). It is promoted here because it binds every future change that writes tests (Phases 2, 3, 5), which is exactly the kind of cross-change constraint an ADR exists to hold.
-
 ## Decision
 
 **All automated tests are synthetic. No test reads the real `~/.claude` tree.**
