@@ -1,20 +1,3 @@
-"""SQLite store: DDL for the full dimensional schema and the persistence layer.
-
-This module owns table creation and the write path. Per the design (D2), all
-seven tables are created on first run so the schema is frozen early, but this
-change only *populates* ``fact_tool_event`` and ``dim_agent`` — the rest stay
-empty until later phases (``fact_session``/``bridge_session_skill`` in
-Phase 2, ``fact_verdict`` in Phase 3).
-
-Store location resolution (D9): defaults to ``~/.cache/agentlens/agentlens.db``,
-overridable via the ``AGENTLENS_STORE`` env var or an explicit path (wired to
-the CLI's ``--store`` flag). Writing inside a ``.claude/`` directory is
-refused — the store must never be mistaken for pipeline input.
-
-Verdict-JSON shape stub (``VERDICT_SHAPE_STUB``): the fixed contract that
-Phase 3's ``fact_verdict`` rows will follow. Documented here, not populated.
-"""
-
 from __future__ import annotations
 
 import json
@@ -28,10 +11,6 @@ from typing import Any, Final
 STORE_PATH_ENV_VAR: Final[str] = "AGENTLENS_STORE"
 DEFAULT_STORE_DIR: Final[Path] = Path.home() / ".cache" / "agentlens"
 DEFAULT_STORE_FILENAME: Final[str] = "agentlens.db"
-
-#: Fixed contract for `fact_verdict.verdict_json` (Phase 3). Not populated by
-#: this change — per-dimension scores, an overall score, evidence quotes,
-#: suggested fixes, and the judge's own run-cost fields.
 VERDICT_SHAPE_STUB: Final[dict[str, Any]] = {
     "session_id": "",
     "rubric_version": "",

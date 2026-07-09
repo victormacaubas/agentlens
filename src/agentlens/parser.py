@@ -1,12 +1,3 @@
-"""Deterministic parser core: JSONL transcripts -> `fact_tool_event` rows and
-`dim_agent` rows, plus the guarded name-resolution fallback chain.
-
-No LLM calls here — this is Phase 1's raw-events-land-correctly layer.
-Reads are defensive throughout: malformed lines, unknown record types, and
-unpaired tool_use/tool_result blocks are skipped rather than aborting the
-whole session (per design's JSONL-schema-drift risk acceptance).
-"""
-
 from __future__ import annotations
 
 import hashlib
@@ -30,11 +21,6 @@ NAME_SOURCE_PARENT_TASK = "parent_task_subagent_type"
 NAME_SOURCE_AGENT_ID_HASH = "agent_id_hash"
 
 _FRONTMATTER_DELIM = "---"
-
-
-# --------------------------------------------------------------------------
-# JSONL transcript reading
-# --------------------------------------------------------------------------
 
 
 def read_jsonl_records(path: Path) -> list[dict[str, Any]]:
@@ -177,12 +163,6 @@ def extract_transcript_facts(
                     task_subagent_types[task_signal[0]] = task_signal[1]
 
         elif record_type == "user":
-            # `toolDenialKind` is a record-level field in Claude Code's
-            # protocol (set on the enclosing "user" record, not per
-            # tool_result item) — it is applied to every tool_result paired
-            # in this message. Deliberate grain assumption; revisit if a
-            # transcript is observed with multiple tool_results carrying
-            # different denial kinds in one user record.
             denial_kind = record.get("toolDenialKind")
             ts = record.get("timestamp")
             for item in _content_items(message):
@@ -205,20 +185,12 @@ def extract_transcript_facts(
                         output_bytes=_estimate_output_bytes(item.get("content")),
                     )
                 )
-        # Unknown record types (mode, permission-mode, file-history-snapshot,
-        # attachment, ...) fall through untouched.
 
     return TranscriptFacts(
         tool_events=events,
         attribution_agents=attribution_agents,
         task_subagent_types=task_subagent_types,
     )
-
-
-# --------------------------------------------------------------------------
-# Name resolution (D4)
-# --------------------------------------------------------------------------
-
 
 @dataclass(frozen=True)
 class NameResolution:
@@ -262,12 +234,6 @@ def resolve_name(
             ambiguous=ambiguous,
         )
     return NameResolution(name=agent_id, name_source=NAME_SOURCE_AGENT_ID_HASH, ambiguous=False)
-
-
-# --------------------------------------------------------------------------
-# Session-level parsing
-# --------------------------------------------------------------------------
-
 
 @dataclass(frozen=True)
 class ParsedSession:
@@ -363,12 +329,6 @@ def parse_subagent_run(
         spawn_tool_use_id=spawn_tool_use_id,
         events=facts.tool_events,
     )
-
-
-# --------------------------------------------------------------------------
-# Agent definitions (-> dim_agent)
-# --------------------------------------------------------------------------
-
 
 def parse_agent_definition(path: Path) -> AgentDefRecord | None:
     """Parse a `.claude/agents/**.md` file's YAML-style frontmatter.

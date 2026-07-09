@@ -27,11 +27,6 @@ from agentlens.parser import (
     resolve_name,
 )
 
-# --------------------------------------------------------------------------
-# 5.1 / 5.2 — resolve_name fallback chain (plain dicts)
-# --------------------------------------------------------------------------
-
-
 def test_resolve_name_meta_agent_type_wins() -> None:
     resolution = resolve_name(
         meta_agent_type="researcher",
@@ -331,12 +326,6 @@ def test_parse_subagent_run_never_drops_session_with_no_signals(tmp_path: Path) 
     assert parsed.session_id == "deadbeef"
     assert parsed.name == "deadbeef"
     assert parsed.name_source == NAME_SOURCE_AGENT_ID_HASH
-
-
-# --------------------------------------------------------------------------
-# 4.5 — agent definition parsing
-# --------------------------------------------------------------------------
-
 
 def test_parse_agent_definition_extracts_frontmatter(tmp_path: Path) -> None:
     path = tmp_path / "implementer.md"

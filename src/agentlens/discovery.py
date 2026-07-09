@@ -1,17 +1,3 @@
-"""Filesystem discovery for session logs and agent definitions.
-
-Read-only against `~/.claude/`: this module only lists and pairs files, it
-never writes. Three surfaces:
-
-- Main sessions: ``projects/<project>/<sid>.jsonl`` at the top level of a
-  project folder.
-- Subagent runs: ``projects/<project>/<sid>/subagents/agent-<id>.jsonl``,
-  paired with the sibling ``agent-<id>.meta.json`` sidecar when present.
-- Agent definitions: ``.claude/agents/**`` at user level (``~/.claude``) and,
-  optionally, project level — both flat (``<name>.md``) and nested
-  (``<name>/<name>.md``) layouts.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass

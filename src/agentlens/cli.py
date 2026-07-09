@@ -1,11 +1,3 @@
-"""Command-line entry point for agentlens.
-
-This module is the composition root: it wires discovery, the parser core,
-and the store together, and stays thin — no parsing/persistence logic lives
-here. ``session`` ingests a single target end-to-end; ``report`` is a stub
-pending Phase 2's aggregation.
-"""
-
 from __future__ import annotations
 
 import json
@@ -77,10 +69,6 @@ def session(ctx: click.Context, session_id: str | None, file_path: Path | None) 
 
     conn = create_store(store_path)
     try:
-        # Phase 1 only discovers user-level (`~/.claude/agents`) definitions:
-        # `session` has no project inference yet, so `project_claude_dir` is
-        # intentionally left unwired here (ARCH-02). Wire it through once
-        # Phase 2 adds project inference for bulk ingestion.
         _sync_agent_definitions(conn, claude_home=claude_home)
 
         if file_path is None and session_id is None:
