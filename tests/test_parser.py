@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from agentlens.parser import (
     NAME_SOURCE_AGENT_ID_HASH,
     NAME_SOURCE_ATTRIBUTION,
@@ -16,6 +18,7 @@ from agentlens.parser import (
     NAME_SOURCE_PARENT_TASK,
     SESSION_KIND_MAIN,
     SESSION_KIND_SUBAGENT,
+    extract_task_subagent_types,
     extract_transcript_facts,
     parse_agent_definition,
     parse_main_session,
@@ -183,6 +186,51 @@ def test_extract_transcript_facts_collects_task_subagent_types() -> None:
     records = [_assistant_tool_use("t1", "Task", {"subagent_type": "researcher"})]
     facts = extract_transcript_facts(records, session_id="parent-sid")
     assert facts.task_subagent_types == {"t1": "researcher"}
+
+
+def test_extract_task_subagent_types_returns_mapping() -> None:
+    records = [
+        _assistant_tool_use("t1", "Task", {"subagent_type": "researcher"}),
+        _assistant_tool_use("t2", "Read", {"file_path": "a.py"}),
+        _assistant_tool_use("t3", "Task", {"subagent_type": "code-reviewer"}),
+    ]
+    assert extract_task_subagent_types(records) == {
+        "t1": "researcher",
+        "t3": "code-reviewer",
+    }
+
+
+def test_extract_task_subagent_types_ignores_non_string_and_missing_subagent_type() -> None:
+    records: list[dict[str, object]] = [
+        _assistant_tool_use("t1", "Task", {"subagent_type": 123}),
+        _assistant_tool_use("t2", "Task", {}),
+        {"type": "assistant", "message": {"role": "assistant", "content": []}},
+    ]
+    assert extract_task_subagent_types(records) == {}
+
+
+def test_extract_task_subagent_types_never_hashes_inputs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`extract_task_subagent_types` must never build a `ToolEventRecord`,
+
+    which would require hashing the tool_use input. Force `_hash_input` to
+    blow up if it's called, then run the helper over a transcript that has
+    both a spawning `Task` and ordinary paired tool_use/tool_result events
+    (the path that would otherwise trigger hashing in
+    `extract_transcript_facts`).
+    """
+
+    def _boom(_: object) -> str:
+        raise AssertionError("extract_task_subagent_types must not hash tool inputs")
+
+    monkeypatch.setattr("agentlens.parser._hash_input", _boom)
+
+    records = [
+        _assistant_tool_use("t1", "Task", {"subagent_type": "researcher"}),
+        _assistant_tool_use("t2", "Read", {"file_path": "a.py"}),
+        _user_tool_result("t2"),
+    ]
+
+    assert extract_task_subagent_types(records) == {"t1": "researcher"}
 
 
 def test_extract_transcript_facts_collects_distinct_attribution_agents() -> None:

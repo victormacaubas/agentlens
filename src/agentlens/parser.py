@@ -94,6 +94,47 @@ class TranscriptFacts:
     task_subagent_types: dict[str, str]  # tool_use_id -> Task's subagent_type
 
 
+def _task_subagent_type_from_item(item: dict[str, Any]) -> tuple[str, str] | None:
+    """Return `(tool_use_id, subagent_type)` if `item` is a `Task` tool_use
+    with a string `subagent_type`, else `None`."""
+    if item.get("type") != "tool_use" or item.get("name") != "Task":
+        return None
+    tool_use_id = item.get("id")
+    tool_input = item.get("input")
+    if not isinstance(tool_use_id, str) or not isinstance(tool_input, dict):
+        return None
+    subagent_type = tool_input.get("subagent_type")
+    if not isinstance(subagent_type, str):
+        return None
+    return tool_use_id, subagent_type
+
+
+def extract_task_subagent_types(records: Iterable[dict[str, Any]]) -> dict[str, str]:
+    """Collect `{tool_use_id: subagent_type}` for every `Task` tool_use in
+    assistant records.
+
+    Lightweight counterpart to `extract_transcript_facts` for callers that
+    only need the Task -> subagent_type map (e.g. subagent name resolution
+    looking up the parent's spawning `Task`). Iterates only assistant
+    records and allocates no `ToolEventRecord`s, hashes no inputs, and pairs
+    no `tool_result`s — this is the cheap path for the parent transcript,
+    which bulk ingestion (Phase 2) would otherwise re-parse in full once per
+    sibling subagent (see ARCH-01).
+    """
+    task_subagent_types: dict[str, str] = {}
+    for record in records:
+        if record.get("type") != "assistant":
+            continue
+        message = record.get("message")
+        if not isinstance(message, dict):
+            continue
+        for item in _content_items(message):
+            task_signal = _task_subagent_type_from_item(item)
+            if task_signal is not None:
+                task_subagent_types[task_signal[0]] = task_signal[1]
+    return task_subagent_types
+
+
 def extract_transcript_facts(
     records: Iterable[dict[str, Any]],
     *,
@@ -131,12 +172,17 @@ def extract_transcript_facts(
                     continue
                 tool_input = item.get("input")
                 tool_uses[tool_use_id] = (tool_name, tool_input)
-                if tool_name == "Task" and isinstance(tool_input, dict):
-                    subagent_type = tool_input.get("subagent_type")
-                    if isinstance(subagent_type, str):
-                        task_subagent_types[tool_use_id] = subagent_type
+                task_signal = _task_subagent_type_from_item(item)
+                if task_signal is not None:
+                    task_subagent_types[task_signal[0]] = task_signal[1]
 
         elif record_type == "user":
+            # `toolDenialKind` is a record-level field in Claude Code's
+            # protocol (set on the enclosing "user" record, not per
+            # tool_result item) — it is applied to every tool_result paired
+            # in this message. Deliberate grain assumption; revisit if a
+            # transcript is observed with multiple tool_results carrying
+            # different denial kinds in one user record.
             denial_kind = record.get("toolDenialKind")
             ts = record.get("timestamp")
             for item in _content_items(message):
@@ -295,8 +341,9 @@ def parse_subagent_run(
 
     parent_task_subagent_type: str | None = None
     if spawn_tool_use_id:
-        parent_facts = extract_transcript_facts(parent_records, session_id=parent_session_id)
-        parent_task_subagent_type = parent_facts.task_subagent_types.get(spawn_tool_use_id)
+        parent_task_subagent_type = extract_task_subagent_types(parent_records).get(
+            spawn_tool_use_id
+        )
 
     resolution = resolve_name(
         meta_agent_type=meta_agent_type,
@@ -370,7 +417,8 @@ def _parse_frontmatter(text: str) -> dict[str, str] | None:
             continue
         key, _, value = stripped.partition(":")
         fields[key.strip()] = value.strip()
-    return None  # unterminated frontmatter block
+    logger.debug("Unterminated frontmatter (no closing '---') in agent definition")
+    return None
 
 
 def _split_list(raw: str | None) -> list[str]:
