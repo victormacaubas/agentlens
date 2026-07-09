@@ -2,6 +2,8 @@
 
   <h1>agentlens</h1>
 
+  <img src="assets/agentlens-logo-v2.png" alt="agentlens cyberpunk lens logo" width="260" />
+
   <p>Analyze, score, and improve your Claude Code subagents from their session logs.</p>
 
   [![License](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
