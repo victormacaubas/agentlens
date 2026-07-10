@@ -16,7 +16,7 @@ import pytest
 from click.testing import CliRunner
 
 from agentlens.cli import main
-from agentlens.store import REQUIRED_TABLES
+from agentlens.store.schema import REQUIRED_TABLES
 
 
 @pytest.fixture

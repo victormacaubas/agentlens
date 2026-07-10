@@ -12,8 +12,10 @@ from pathlib import Path
 
 import pytest
 
-from agentlens.ingest import ingest_all
-from agentlens.store import AgentDefRecord, create_store, upsert_agent_definition
+from agentlens.ingest.orchestrator import ingest_all
+from agentlens.store.models import AgentDefRecord
+from agentlens.store.operations import upsert_agent_definition
+from agentlens.store.schema import create_store
 
 _DEFAULT_TIMESTAMP = "2026-07-06T18:56:19.617Z"
 

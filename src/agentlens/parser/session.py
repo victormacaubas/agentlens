@@ -13,7 +13,7 @@ from agentlens.parser.extraction import (
     read_jsonl_records,
 )
 from agentlens.parser.naming import resolve_name
-from agentlens.store import AgentDefRecord, ToolEventRecord
+from agentlens.store.models import AgentDefRecord, ToolEventRecord
 
 logger = logging.getLogger(__name__)
 

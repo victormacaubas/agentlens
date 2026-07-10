@@ -7,13 +7,13 @@ not read from real transcripts.
 
 from __future__ import annotations
 
-from agentlens.aggregation import (
+from agentlens.aggregation.derivation import (
     count_duplicate_tool_calls,
     derive_fact_session,
     derive_skill_bridge,
 )
 from agentlens.parser.session import SESSION_KIND_SUBAGENT, ParsedSession
-from agentlens.store import ToolEventRecord
+from agentlens.store.models import ToolEventRecord
 
 
 def _event(
