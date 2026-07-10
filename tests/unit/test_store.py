@@ -7,23 +7,27 @@ from pathlib import Path
 
 import pytest
 
-from agentlens.store import (
-    REQUIRED_TABLES,
-    STORE_PATH_ENV_VAR,
+from agentlens.errors import StoreLocationError
+from agentlens.store.models import (
     AgentDefRecord,
     SessionRecord,
     SkillBridgeRecord,
-    StoreLocationError,
     ToolEventRecord,
-    create_store,
+)
+from agentlens.store.operations import (
     fetch_declared_skills,
-    resolve_store_path,
     upsert_agent_definition,
     upsert_dim_date,
     upsert_dim_tool,
     upsert_session,
     upsert_session_events,
     upsert_session_skills,
+)
+from agentlens.store.schema import (
+    REQUIRED_TABLES,
+    STORE_PATH_ENV_VAR,
+    create_store,
+    resolve_store_path,
 )
 
 

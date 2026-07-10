@@ -1,27 +1,28 @@
 from __future__ import annotations
 
 import json
+from contextlib import closing
 from pathlib import Path
 
 import click
 
 from agentlens import __version__
-from agentlens.discovery import discover_available_skills
-from agentlens.ingest import (
+from agentlens.discovery.walker import discover_available_skills
+from agentlens.errors import WindowResolutionError
+from agentlens.ingest.orchestrator import (
     ingest_all,
     ingest_target,
     persist_parsed_session,
     resolve_target,
     sync_agent_definitions,
 )
-from agentlens.reporting import (
+from agentlens.reporting.queries import (
     DEFAULT_MIN_SESSIONS_FOR_TREND,
-    WindowResolutionError,
     build_report,
-    render_terminal_summary,
-    resolve_window,
 )
-from agentlens.store import create_store, resolve_store_path
+from agentlens.reporting.rendering import render_terminal_summary
+from agentlens.reporting.window import resolve_window
+from agentlens.store.schema import create_store, resolve_store_path
 
 
 @click.group()
@@ -70,8 +71,7 @@ def session(
     store_path = resolve_store_path(store_override=ctx.obj.get("store"))
     claude_home = claude_home_override or Path.home() / ".claude"
 
-    conn = create_store(store_path)
-    try:
+    with closing(create_store(store_path)) as conn:
         sync_agent_definitions(conn, claude_home=claude_home)
 
         if file_path is None and session_id is None:
@@ -92,8 +92,6 @@ def session(
             f"ingested {parsed.session_kind} session {parsed.session_id} "
             f"({len(parsed.events)} tool events, name_source={parsed.name_source})"
         )
-    finally:
-        conn.close()
 
 
 @main.command()
@@ -120,13 +118,10 @@ def ingest(
     store_path = resolve_store_path(store_override=ctx.obj.get("store"))
     claude_home = claude_home_override or Path.home() / ".claude"
 
-    conn = create_store(store_path)
-    try:
+    with closing(create_store(store_path)) as conn:
         sync_agent_definitions(conn, claude_home=claude_home)
         summary = ingest_all(conn, claude_home=claude_home, limit=limit)
         click.echo(f"ingested {summary.n_ingested} sessions from {claude_home}")
-    finally:
-        conn.close()
 
 
 @main.command()
@@ -152,13 +147,13 @@ def report(
     no window flag is given.
     """
     store_path = resolve_store_path(store_override=ctx.obj.get("store"))
-    conn = create_store(store_path)
-    try:
-        try:
-            window = resolve_window(since=since, from_=from_, to=to, today=today)
-        except WindowResolutionError as exc:
-            raise click.ClickException(str(exc)) from exc
 
+    try:
+        window = resolve_window(since=since, from_=from_, to=to, today=today)
+    except WindowResolutionError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    with closing(create_store(store_path)) as conn:
         result = build_report(
             conn,
             window=window,
@@ -169,8 +164,6 @@ def report(
             click.echo(json.dumps(result.to_verdict_slice()))
         else:
             click.echo(render_terminal_summary(result))
-    finally:
-        conn.close()
 
 
 if __name__ == "__main__":

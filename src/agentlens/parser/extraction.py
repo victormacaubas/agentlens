@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Final
 
-from agentlens.store import ToolEventRecord
+from agentlens.store.models import ToolEventRecord
 
 logger = logging.getLogger(__name__)
 

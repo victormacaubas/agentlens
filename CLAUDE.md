@@ -4,14 +4,25 @@ agentlens reads Claude Code session logs (JSONL under `~/.claude/projects/`) and
 
 ## Project structure
 
-`src/agentlens/` is organized by responsibility. Keep only `cli.py` and `__init__.py` at the package root — everything else lives in a subpackage:
+`src/agentlens/` is organized by responsibility. The package root holds only `cli.py`, `errors.py`, and `__init__.py` — everything else lives in a named module inside a subpackage:
 
-- **`discovery/`** — find files on disk (main sessions, subagent runs, agent definitions under `.claude/`). No parsing, no I/O beyond `Path`/`glob`. `models.py` holds its result dataclasses (`MainSessionFile`, `SubagentRun`, `AgentDefFile`); import them from `agentlens.discovery.models`, not the package root.
+- **`errors.py`** — all custom exception classes (`WindowResolutionError`, `StoreLocationError`). Import exceptions from here, not from the subpackage that raises them.
+- **`discovery/`** — find files on disk (main sessions, subagent runs, agent definitions under `.claude/`). No parsing, no I/O beyond `Path`/`glob`.
+  - `walker.py` — filesystem discovery functions (`discover_main_sessions`, `discover_subagent_runs`, `discover_agent_defs`, `discover_available_skills`)
+  - `models.py` — result dataclasses (`MainSessionFile`, `SubagentRun`, `AgentDefFile`)
 - **`parser/`** — turn raw JSONL records into structured facts, split by concern: `extraction.py` (tool-event pairing, transcript facts), `naming.py` (subagent name resolution), `session.py` (session assembly, agent-definition frontmatter parsing).
 - **`store/`** — SQLite schema/DDL, store-path resolution, record dataclasses, and upserts. The only subpackage allowed to touch the database.
+  - `schema.py` — DDL, `create_store`, `resolve_store_path`, path constants
+  - `models.py` — frozen dataclasses (`ToolEventRecord`, `AgentDefRecord`, `SessionRecord`, `SkillBridgeRecord`)
+  - `operations.py` — all upsert/query functions
 - **`ingest/`** — orchestration: resolves a CLI target, then calls into `parser` to parse it and `store` to persist it. Also owns the bulk `ingest_all` walk over `projects/**`. Cross-cutting by design — don't fold it into `discovery/`, `parser/`, or `store/`.
+  - `orchestrator.py` — `IngestRunner` class (owns connection + caches for bulk runs), `resolve_target`, `ingest_target`, `persist_parsed_session`, `ingest_all`
 - **`aggregation/`** — derive the `fact_session` per-spawn grain from parsed sessions: event-derived tool counts joined with transcript-read usage/turn/duration, the `n_duplicate_tool_calls` rule, and the declared-vs-fired skill bridge. Reads facts; emits counts and booleans, never verdicts ([ADR 0003](docs/adr/0003-deterministic-layer-emits-counts-not-verdicts.md)).
+  - `derivation.py` — `derive_fact_session`, `count_duplicate_tool_calls`, `derive_skill_bridge`
 - **`reporting/`** — windowed rollups over the store: window resolution, prior-window deltas, low-volume guard, intra-session parent lens, and the deterministic verdict-JSON slice. Reads the store only; never ingests.
+  - `window.py` — `WindowRange` dataclass, `resolve_window`, date-parsing helpers
+  - `queries.py` — `build_report`, aggregate dataclasses (`AgentAggregate`, `ParentLensRow`, `AgentWindowResult`, `ReportResult`)
+  - `rendering.py` — `render_terminal_summary`
 
 New code that doesn't fit an existing folder (Phase 3 judge/rubric, Phase 5 renderers) gets its own subpackage when that phase actually starts — don't pre-create empty folders for phases that haven't landed yet.
 
@@ -44,6 +55,34 @@ uv run mypy              # type-check (strict)
 ```
 
 Adding a dependency means declaring it in `pyproject.toml` and running `uv sync` — never `pip install` into the venv directly.
+
+## Test structure
+
+Tests live under `tests/unit/` (all current tests are synthetic-only unit tests). pytest discovers them via `testpaths = ["tests"]` in `pyproject.toml`.
+
+```
+tests/
+├── __init__.py
+└── unit/
+    ├── __init__.py
+    ├── test_aggregation.py
+    ├── test_cli.py
+    ├── test_discovery.py
+    ├── test_ingest.py
+    ├── test_parser.py
+    ├── test_reporting.py
+    └── test_store.py
+```
+
+When integration tests arrive (Phase 3 judge, real filesystem), they'll go in `tests/integration/` with a `@pytest.mark.integration` marker.
+
+## Module conventions
+
+- **`__init__.py` is always empty (0 bytes).** Never put code in `__init__.py`. Every function, class, and constant lives in a named module.
+- **Import from the named module**, not the package root: `from agentlens.store.operations import upsert_session`, not `from agentlens.store import upsert_session`.
+- **Custom exceptions live in `errors.py`** at the package root. Don't define exception classes inside subpackage modules.
+- **Stateful orchestration uses a class** (e.g., `IngestRunner`). Pass dependencies in `__init__`, hold caches as instance state. Stateless transforms stay as free functions.
+- **Use `contextlib.closing()`** for `sqlite3.Connection` lifecycle in CLI commands, not bare `try/finally`.
 
 ## Project guardrails
 
