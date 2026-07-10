@@ -5,7 +5,6 @@ import logging
 import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -27,11 +26,7 @@ from agentlens.parser.session import (
 from agentlens.store import (
     fetch_declared_skills,
     upsert_agent_definition,
-    upsert_dim_date,
-    upsert_dim_tool,
-    upsert_session,
-    upsert_session_events,
-    upsert_session_skills,
+    upsert_session_grain,
 )
 
 logger = logging.getLogger(__name__)
@@ -142,29 +137,11 @@ def persist_parsed_session(
         parsed, declared_skills=declared_skills, available_skills=available_skills
     )
 
-    upsert_session_events(conn, parsed.session_id, parsed.events)
-    upsert_session(conn, session_record)
-    upsert_session_skills(conn, parsed.session_id, skill_records)
-
-    for tool_name in {event.tool_name for event in parsed.events}:
-        upsert_dim_tool(conn, tool_name)
-    if session_record.session_date is not None:
-        _backfill_dim_date(conn, session_record.session_date)
-
-
-def _backfill_dim_date(conn: sqlite3.Connection, date_str: str) -> None:
-    try:
-        parsed_date = date.fromisoformat(date_str)
-    except ValueError:
-        return
-    _, iso_week, _ = parsed_date.isocalendar()
-    upsert_dim_date(
+    upsert_session_grain(
         conn,
-        date_str,
-        year=parsed_date.year,
-        month=parsed_date.month,
-        day=parsed_date.day,
-        iso_week=iso_week,
+        record=session_record,
+        events=parsed.events,
+        skills=skill_records,
     )
 
 
