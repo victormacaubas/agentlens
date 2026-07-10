@@ -2,6 +2,19 @@
 
 agentlens reads Claude Code session logs (JSONL under `~/.claude/projects/`) and turns them into deterministic facts, LLM-judged scores, and actionable fix proposals for custom subagents. The full design lives in [`docs/agentlens-design.md`](docs/agentlens-design.md); read it before making structural changes.
 
+## Project structure
+
+`src/agentlens/` is organized by responsibility. Keep only `cli.py` and `__init__.py` at the package root — everything else lives in a subpackage:
+
+- **`discovery/`** — find files on disk (main sessions, subagent runs, agent definitions under `.claude/`). No parsing, no I/O beyond `Path`/`glob`.
+- **`parser/`** — turn raw JSONL records into structured facts, split by concern: `extraction.py` (tool-event pairing, transcript facts), `naming.py` (subagent name resolution), `session.py` (session assembly, agent-definition frontmatter parsing).
+- **`store/`** — SQLite schema/DDL, store-path resolution, record dataclasses, and upserts. The only subpackage allowed to touch the database.
+- **`ingest/`** — orchestration: resolves a CLI target, then calls into `parser` to parse it and `store` to persist it. Cross-cutting by design — don't fold it into `discovery/`, `parser/`, or `store/`.
+
+New code that doesn't fit an existing folder (Phase 2 aggregation, Phase 3 judge/rubric, Phase 5 renderers) gets its own subpackage when that phase actually starts — don't pre-create empty folders for phases that haven't landed yet.
+
+**Editing or creating any `.py` file under `src/agentlens/` → invoke the `python-engineering-standards` skill first.**
+
 ## Workflow
 
 ### Non-trivial changes go through OpenSpec

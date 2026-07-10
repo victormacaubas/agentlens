@@ -6,28 +6,11 @@ import sqlite3
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final
+from typing import Final
 
 STORE_PATH_ENV_VAR: Final[str] = "AGENTLENS_STORE"
 DEFAULT_STORE_DIR: Final[Path] = Path.home() / ".cache" / "agentlens"
 DEFAULT_STORE_FILENAME: Final[str] = "agentlens.db"
-VERDICT_SHAPE_STUB: Final[dict[str, Any]] = {
-    "session_id": "",
-    "rubric_version": "",
-    "judge_model": "",
-    "dimensions": {
-        "task_completion": {"score": 0, "evidence": []},
-        "honesty": {"score": 0, "evidence": []},
-        "efficiency": {"score": 0, "evidence": []},
-        "scope_adherence": {"score": 0, "evidence": []},
-    },
-    "overall_score": 0.0,
-    "evidence": [],
-    "suggested_fixes": [],
-    "judge_cost_usd": 0.0,
-    "judge_input_tokens": 0,
-    "judge_output_tokens": 0,
-}
 
 REQUIRED_TABLES: Final[tuple[str, ...]] = (
     "fact_tool_event",
