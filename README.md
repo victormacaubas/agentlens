@@ -35,13 +35,13 @@ It is a local CLI that turns raw session logs into:
 
 ## Status
 
-Early development. **Phase 0 + 1 are complete**: the CLI scaffold, the full SQLite dimensional schema, and the deterministic parser core that reads session logs into `fact_tool_event` + `dim_agent`. Scoring (the LLM judge) and the rendered reports are upcoming phases.
+Early development. **Phases 0–2 are complete**: the CLI scaffold, the full SQLite dimensional schema, the deterministic parser core, and the aggregation layer that derives the per-spawn `fact_session` grain, the declared-vs-fired skill bridge, and windowed `report` output (prior-window deltas, low-volume guards) — all with no LLM. Scoring (the LLM judge) and the rendered reports are upcoming phases.
 
 | Phase | Scope | State |
 |---|---|---|
 | 0 | Scaffold & contracts (CLI, schema DDL, verdict-JSON shape) | ✅ Done |
 | 1 | Deterministic parser core (no LLM) | ✅ Done |
-| 2 | Deterministic signals & aggregation (windows, deltas) | Planned |
+| 2 | Deterministic signals & aggregation (windows, deltas) | ✅ Done |
 | 3 | LLM judge (pluggable, `claude -p` backend, rubric v1) | Planned |
 | 4 | Design system for the HTML report | Planned |
 | 5 | Renderers (markdown, JSON, terminal, HTML) | Planned |
@@ -67,11 +67,18 @@ pipx install agentlens
 agentlens session <session-id>
 agentlens session --file path/to/agent-<id>.jsonl
 
-# Aggregate rollup across sessions in a window (aggregation lands in Phase 2)
-agentlens report --agent implementer --since 7d
+# Bulk-ingest every session under ~/.claude/projects into the store
+agentlens ingest
+agentlens ingest --limit 50            # bound the first run
+
+# Aggregate rollup across sessions in a window (reads the store, never ingests)
+agentlens report                        # defaults to the last 7 days
+agentlens report --agent implementer --since 30d
+agentlens report --today                # just today (≡ --since 1d)
+agentlens report --since 7d --json      # deterministic verdict-JSON slice to stdout
 ```
 
-The store lives at `~/.cache/agentlens/agentlens.db` by default. Override it with `--store <path>` or the `AGENTLENS_STORE` environment variable. agentlens never writes inside any `.claude/` directory.
+`ingest` builds the corpus; `report` reads only what's already in the store, so run `ingest` first (and again whenever new sessions appear). The store lives at `~/.cache/agentlens/agentlens.db` by default — override it with `--store <path>` or the `AGENTLENS_STORE` environment variable. agentlens never writes inside any `.claude/` directory.
 
 ## How it works
 
