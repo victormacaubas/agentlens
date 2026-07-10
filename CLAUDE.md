@@ -8,9 +8,9 @@ agentlens reads Claude Code session logs (JSONL under `~/.claude/projects/`) and
 
 - **`errors.py`** — all custom exception classes (`WindowResolutionError`, `StoreLocationError`). Import exceptions from here, not from the subpackage that raises them.
 - **`discovery/`** — find files on disk (main sessions, subagent runs, agent definitions under `.claude/`). No parsing, no I/O beyond `Path`/`glob`.
-  - `walker.py` — filesystem discovery functions (`discover_main_sessions`, `discover_subagent_runs`, `discover_agent_defs`, `discover_available_skills`)
+  - `filesystem.py` — filesystem discovery functions (`discover_main_sessions`, `discover_subagent_runs`, `discover_agent_defs`, `discover_available_skills`)
   - `models.py` — result dataclasses (`MainSessionFile`, `SubagentRun`, `AgentDefFile`)
-- **`parser/`** — turn raw JSONL records into structured facts, split by concern: `extraction.py` (tool-event pairing, transcript facts), `naming.py` (subagent name resolution), `session.py` (session assembly, agent-definition frontmatter parsing).
+- **`parser/`** — turn raw JSONL records into structured facts, split by concern: `extraction.py` (tool-event pairing, transcript facts), `name_resolution.py` (subagent name resolution), `session.py` (session assembly, agent-definition frontmatter parsing).
 - **`store/`** — SQLite schema/DDL, store-path resolution, record dataclasses, and upserts. The only subpackage allowed to touch the database.
   - `schema.py` — DDL, `create_store`, `resolve_store_path`, path constants
   - `models.py` — frozen dataclasses (`ToolEventRecord`, `AgentDefRecord`, `SessionRecord`, `SkillBridgeRecord`)
@@ -20,7 +20,7 @@ agentlens reads Claude Code session logs (JSONL under `~/.claude/projects/`) and
 - **`aggregation/`** — derive the `fact_session` per-spawn grain from parsed sessions: event-derived tool counts joined with transcript-read usage/turn/duration, the `n_duplicate_tool_calls` rule, and the declared-vs-fired skill bridge. Reads facts; emits counts and booleans, never verdicts ([ADR 0003](docs/adr/0003-deterministic-layer-emits-counts-not-verdicts.md)).
   - `derivation.py` — `derive_fact_session`, `count_duplicate_tool_calls`, `derive_skill_bridge`
 - **`reporting/`** — windowed rollups over the store: window resolution, prior-window deltas, low-volume guard, intra-session parent lens, and the deterministic verdict-JSON slice. Reads the store only; never ingests.
-  - `window.py` — `WindowRange` dataclass, `resolve_window`, date-parsing helpers
+  - `date_window.py` — `WindowRange` dataclass, `resolve_window`, date-parsing helpers
   - `queries.py` — `build_report`, aggregate dataclasses (`AgentAggregate`, `ParentLensRow`, `AgentWindowResult`, `ReportResult`)
   - `rendering.py` — `render_terminal_summary`
 

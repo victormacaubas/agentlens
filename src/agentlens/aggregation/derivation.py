@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from datetime import date
+from typing import Final
 
 from agentlens.parser.session import ParsedSession
 from agentlens.store.models import SessionRecord, SkillBridgeRecord, ToolEventRecord
@@ -19,9 +20,9 @@ from agentlens.store.models import SessionRecord, SkillBridgeRecord, ToolEventRe
 # touched. `input_hash` is a hash of the full tool input (path-keyed for
 # these tools), so distinct hashes are a reasonable proxy for distinct
 # files without needing to retain raw (unhashed) tool inputs.
-FILE_TOUCHING_TOOLS = frozenset({"Read", "Edit", "Write"})
+FILE_TOUCHING_TOOLS: Final[frozenset[str]] = frozenset({"Read", "Edit", "Write"})
 
-_ISO_DATE_LEN = len("YYYY-MM-DD")
+_ISO_DATE_LEN: Final[int] = len("YYYY-MM-DD")
 
 
 def _safe_date_from_ts(ts: str | None) -> str | None:

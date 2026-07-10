@@ -14,16 +14,6 @@ from agentlens.store.models import ToolEventRecord
 
 logger = logging.getLogger(__name__)
 
-# Marker set for `final_report_flagged_partial` (D2): a small, conservative,
-# documented list of phrases in a final assistant text block that suggest
-# incomplete work. This is a raw marker, NOT a completion verdict — every
-# observed transcript ends `stop_reason: end_turn` regardless of whether the
-# work was actually finished, so `stop_reason` cannot substitute for this.
-#
-# `_PARTIAL_CHECKBOX_MARKER` is matched as a plain substring (it has no
-# word-boundary concept); every other marker is matched with `\b` word
-# boundaries so e.g. `partial` does not fire on `partially` and `blocked`
-# does not fire on `unblocked` (BUG-01).
 _PARTIAL_CHECKBOX_MARKER: Final[str] = "- [ ]"
 PARTIAL_MARKERS: Final[tuple[str, ...]] = (
     _PARTIAL_CHECKBOX_MARKER,
@@ -41,9 +31,6 @@ _PARTIAL_WORD_RE: Final[re.Pattern[str]] = re.compile(
     re.IGNORECASE,
 )
 
-# Tools whose fired-skill signal comes from a `Skill` tool_use naming a skill
-# in its input. The exact input key is not pinned by any known schema, so
-# every plausible key is checked defensively.
 _SKILL_TOOL_NAME: Final[str] = "Skill"
 _SKILL_TOOL_INPUT_KEYS: Final[tuple[str, ...]] = ("name", "skill_name", "skill", "command")
 

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agentlens.discovery.walker import (
+from agentlens.discovery.filesystem import (
     discover_agent_defs,
     discover_main_sessions,
     discover_subagent_runs,

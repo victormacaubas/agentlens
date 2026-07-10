@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Final
 
 from agentlens.discovery.models import AgentDefFile, MainSessionFile, SubagentRun
 
-AGENT_JSONL_GLOB = "agent-*.jsonl"
-SUBAGENTS_DIRNAME = "subagents"
-AGENTS_DIRNAME = "agents"
-SKILLS_DIRNAME = "skills"
+AGENT_JSONL_GLOB: Final[str] = "agent-*.jsonl"
+SUBAGENTS_DIRNAME: Final[str] = "subagents"
+AGENTS_DIRNAME: Final[str] = "agents"
+SKILLS_DIRNAME: Final[str] = "skills"
 
 
 def discover_main_sessions(projects_root: Path) -> list[MainSessionFile]:

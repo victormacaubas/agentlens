@@ -7,7 +7,7 @@ from pathlib import Path
 import click
 
 from agentlens import __version__
-from agentlens.discovery.walker import discover_available_skills
+from agentlens.discovery.filesystem import discover_available_skills
 from agentlens.errors import WindowResolutionError
 from agentlens.ingest.orchestrator import (
     ingest_all,
@@ -16,12 +16,12 @@ from agentlens.ingest.orchestrator import (
     resolve_target,
     sync_agent_definitions,
 )
+from agentlens.reporting.date_window import resolve_window
 from agentlens.reporting.queries import (
     DEFAULT_MIN_SESSIONS_FOR_TREND,
     build_report,
 )
 from agentlens.reporting.rendering import render_terminal_summary
-from agentlens.reporting.window import resolve_window
 from agentlens.store.schema import create_store, resolve_store_path
 
 

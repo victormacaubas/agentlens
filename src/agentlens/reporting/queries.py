@@ -11,11 +11,10 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Any, Final
 
-from agentlens.reporting.window import WindowRange
+from agentlens.reporting.date_window import WindowRange
 
 DEFAULT_MIN_SESSIONS_FOR_TREND: Final[int] = 5
 
-# Fields compared between the current and prior window for the trend delta.
 _DELTA_FIELDS: Final[tuple[str, ...]] = (
     "n_spawns",
     "n_failures",
