@@ -9,13 +9,13 @@ from pathlib import Path
 from typing import Any
 
 from agentlens.aggregation.derivation import derive_fact_session, derive_skill_bridge
-from agentlens.discovery.models import MainSessionFile, SubagentRun
-from agentlens.discovery.walker import (
+from agentlens.discovery.filesystem import (
     discover_agent_defs,
     discover_available_skills,
     discover_main_sessions,
     discover_subagent_runs,
 )
+from agentlens.discovery.models import MainSessionFile, SubagentRun
 from agentlens.parser.extraction import extract_task_subagent_types, read_jsonl_records
 from agentlens.parser.session import (
     ParsedSession,
@@ -33,12 +33,14 @@ logger = logging.getLogger(__name__)
 
 IngestTarget = MainSessionFile | SubagentRun
 
+
 @dataclass(frozen=True)
 class IngestSummary:
     """Result of one `ingest_all` run."""
 
     n_ingested: int
     n_skipped: int = 0
+
 
 class IngestRunner:
     """Owns the connection, caches, and iteration state for a bulk ingest run.
@@ -105,19 +107,13 @@ class IngestRunner:
         if isinstance(target, MainSessionFile):
             return parse_main_session(target.path, session_id=target.session_id)
 
-        meta = _read_meta(target.meta_path) if target.meta_path is not None else None
         parent_path = target.project_dir / f"{target.parent_session_id}.jsonl"
         if parent_path not in self._parent_task_maps:
-            parent_records = read_jsonl_records(parent_path) if parent_path.is_file() else []
-            self._parent_task_maps[parent_path] = extract_task_subagent_types(parent_records)
-
-        return parse_subagent_run(
-            target.jsonl_path,
-            agent_id=target.agent_id,
-            parent_session_id=target.parent_session_id,
-            meta=meta,
-            parent_task_subagent_types=self._parent_task_maps[parent_path],
+            self._parent_task_maps[parent_path] = _read_parent_task_map(parent_path)
+        return _parse_subagent_run(
+            target, parent_task_subagent_types=self._parent_task_maps[parent_path]
         )
+
 
 def resolve_target(
     *,
@@ -163,15 +159,40 @@ def ingest_target(target: IngestTarget) -> ParsedSession:
     if isinstance(target, MainSessionFile):
         return parse_main_session(target.path, session_id=target.session_id)
 
-    meta = _read_meta(target.meta_path) if target.meta_path is not None else None
     parent_path = target.project_dir / f"{target.parent_session_id}.jsonl"
+    return _parse_subagent_run(
+        target, parent_task_subagent_types=_read_parent_task_map(parent_path)
+    )
+
+
+def _read_parent_task_map(parent_path: Path) -> dict[str, str]:
+    """Read the parent transcript's `{tool_use_id: subagent_type}` map.
+
+    Empty when the parent transcript is missing — name resolution still
+    proceeds via the remaining fallbacks and never drops a session.
+    """
     parent_records = read_jsonl_records(parent_path) if parent_path.is_file() else []
+    return extract_task_subagent_types(parent_records)
+
+
+def _parse_subagent_run(
+    target: SubagentRun,
+    *,
+    parent_task_subagent_types: dict[str, str],
+) -> ParsedSession:
+    """Parse one `SubagentRun` into a `ParsedSession`, reading its sidecar.
+
+    Shared by the single-target (`ingest_target`) and bulk (`IngestRunner`)
+    paths; they differ only in how the parent task map is sourced (fresh
+    read vs. per-parent cache).
+    """
+    meta = _read_meta(target.meta_path) if target.meta_path is not None else None
     return parse_subagent_run(
         target.jsonl_path,
         agent_id=target.agent_id,
         parent_session_id=target.parent_session_id,
         meta=meta,
-        parent_records=parent_records,
+        parent_task_subagent_types=parent_task_subagent_types,
     )
 
 

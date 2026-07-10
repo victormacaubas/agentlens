@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import Final
 
-NAME_SOURCE_META = "meta_agent_type"
-NAME_SOURCE_ATTRIBUTION = "attribution_agent"
-NAME_SOURCE_PARENT_TASK = "parent_task_subagent_type"
-NAME_SOURCE_AGENT_ID_HASH = "agent_id_hash"
+NAME_SOURCE_META: Final[str] = "meta_agent_type"
+NAME_SOURCE_ATTRIBUTION: Final[str] = "attribution_agent"
+NAME_SOURCE_PARENT_TASK: Final[str] = "parent_task_subagent_type"
+NAME_SOURCE_AGENT_ID_HASH: Final[str] = "agent_id_hash"
 
 
 @dataclass(frozen=True)

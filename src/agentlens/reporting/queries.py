@@ -11,7 +11,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Any, Final
 
-from agentlens.reporting.window import WindowRange
+from agentlens.reporting.date_window import WindowRange
 
 DEFAULT_MIN_SESSIONS_FOR_TREND: Final[int] = 5
 

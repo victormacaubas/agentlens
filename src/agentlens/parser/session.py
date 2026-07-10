@@ -5,22 +5,22 @@ import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from agentlens.parser.extraction import (
     extract_task_subagent_types,
     extract_transcript_facts,
     read_jsonl_records,
 )
-from agentlens.parser.naming import resolve_name
+from agentlens.parser.name_resolution import resolve_name
 from agentlens.store.models import AgentDefRecord, ToolEventRecord
 
 logger = logging.getLogger(__name__)
 
-SESSION_KIND_MAIN = "main"
-SESSION_KIND_SUBAGENT = "subagent"
+SESSION_KIND_MAIN: Final[str] = "main"
+SESSION_KIND_SUBAGENT: Final[str] = "subagent"
 
-_FRONTMATTER_DELIM = "---"
+_FRONTMATTER_DELIM: Final[str] = "---"
 
 
 @dataclass(frozen=True)

@@ -13,12 +13,12 @@ from pathlib import Path
 import pytest
 
 from agentlens.errors import WindowResolutionError
+from agentlens.reporting.date_window import WindowRange, resolve_window
 from agentlens.reporting.queries import (
     DEFAULT_MIN_SESSIONS_FOR_TREND,
     build_report,
 )
 from agentlens.reporting.rendering import render_terminal_summary
-from agentlens.reporting.window import WindowRange, resolve_window
 from agentlens.store.models import SessionRecord
 from agentlens.store.operations import upsert_session
 from agentlens.store.schema import create_store

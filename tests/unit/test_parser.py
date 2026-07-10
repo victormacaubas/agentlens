@@ -17,7 +17,7 @@ from agentlens.parser.extraction import (
     flags_partial,
     read_jsonl_records,
 )
-from agentlens.parser.naming import (
+from agentlens.parser.name_resolution import (
     NAME_SOURCE_AGENT_ID_HASH,
     NAME_SOURCE_ATTRIBUTION,
     NAME_SOURCE_META,
