@@ -11,21 +11,26 @@ from pathlib import Path
 
 import pytest
 
-from agentlens.parser import (
+from agentlens.parser.extraction import (
+    extract_task_subagent_types,
+    extract_transcript_facts,
+    read_jsonl_records,
+)
+from agentlens.parser.naming import (
     NAME_SOURCE_AGENT_ID_HASH,
     NAME_SOURCE_ATTRIBUTION,
     NAME_SOURCE_META,
     NAME_SOURCE_PARENT_TASK,
+    resolve_name,
+)
+from agentlens.parser.session import (
     SESSION_KIND_MAIN,
     SESSION_KIND_SUBAGENT,
-    extract_task_subagent_types,
-    extract_transcript_facts,
     parse_agent_definition,
     parse_main_session,
     parse_subagent_run,
-    read_jsonl_records,
-    resolve_name,
 )
+
 
 def test_resolve_name_meta_agent_type_wins() -> None:
     resolution = resolve_name(
@@ -217,7 +222,7 @@ def test_extract_task_subagent_types_never_hashes_inputs(monkeypatch: pytest.Mon
     def _boom(_: object) -> str:
         raise AssertionError("extract_task_subagent_types must not hash tool inputs")
 
-    monkeypatch.setattr("agentlens.parser._hash_input", _boom)
+    monkeypatch.setattr("agentlens.parser.extraction._hash_input", _boom)
 
     records = [
         _assistant_tool_use("t1", "Task", {"subagent_type": "researcher"}),

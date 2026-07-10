@@ -157,7 +157,7 @@ Whether a *missing* fire was a mistake is a judgment call → belongs in the jud
 ### `fact_verdict` — LLM judge output (separate, never mixed with deterministic facts)
 
 - Key: `session_id` + `rubric_version` + `judge_model`
-- Per-dimension scores + overall + evidence quotes + suggested fixes (structured JSON)
+- `verdict_json` shape: `{session_id, rubric_version, judge_model, dimensions: {task_completion, honesty, efficiency, scope_adherence} (each {score, evidence[]}), overall_score, evidence[], suggested_fixes[], judge_cost_usd, judge_input_tokens, judge_output_tokens}`
 - **Judge run-cost:** `judge_cost_usd`, `judge_input_tokens`, `judge_output_tokens` (from the `claude -p` envelope's `total_cost_usd` / `usage`) — the tool's *own* footprint, so agentlens is honest about what a run costs.
 
 ### Token & cost reporting

@@ -1,7 +1,9 @@
 """Tests for `agentlens.cli`: wiring, empty pipeline, and error reporting.
 
-Every invocation redirects HOME to `tmp_path` (via monkeypatch) so tests
-never touch the real `~/.claude` or `~/.cache/agentlens`.
+Most invocations redirect HOME to `tmp_path` (via monkeypatch) so tests
+never touch the real `~/.claude` or `~/.cache/agentlens`. Some instead pass
+`--claude-home` explicitly, which achieves the same isolation without
+touching HOME at all.
 """
 
 from __future__ import annotations
@@ -155,3 +157,40 @@ def test_store_flag_refuses_dot_claude_location(isolated_home: Path, tmp_path: P
     bad_store = isolated_home / ".claude" / "agentlens.db"
     result = CliRunner().invoke(main, ["--store", str(bad_store), "session"])
     assert result.exit_code != 0
+
+
+def test_claude_home_flag_injects_target_without_touching_home(tmp_path: Path) -> None:
+    """`--claude-home` lets a caller point at a `.claude` dir directly, so tests
+    (or scripted runs) can isolate discovery without monkeypatching HOME."""
+    custom_claude_home = tmp_path / "custom-claude"
+    subagents_dir = custom_claude_home / "projects" / "-proj" / "parent-sid" / "subagents"
+    subagents_dir.mkdir(parents=True)
+
+    transcript = subagents_dir / "agent-a1.jsonl"
+    transcript.write_text(
+        '{"type": "assistant", "message": {"role": "assistant", "content": ['
+        '{"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": "a.py"}}]}}\n'
+        '{"type": "user", "timestamp": "2026-07-06T18:56:19.617Z", "message": {"role": "user", '
+        '"content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok", '
+        '"is_error": false}]}}\n'
+    )
+    (subagents_dir / "agent-a1.meta.json").write_text(
+        '{"agentType": "researcher", "toolUseId": "toolu_1", "spawnDepth": 1}'
+    )
+
+    store_path = tmp_path / "store.db"
+    result = CliRunner().invoke(
+        main,
+        [
+            "--store",
+            str(store_path),
+            "session",
+            "a1",
+            "--claude-home",
+            str(custom_claude_home),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "subagent" in result.output
+    assert "name_source=meta_agent_type" in result.output
