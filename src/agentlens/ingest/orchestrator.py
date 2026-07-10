@@ -33,6 +33,91 @@ logger = logging.getLogger(__name__)
 
 IngestTarget = MainSessionFile | SubagentRun
 
+@dataclass(frozen=True)
+class IngestSummary:
+    """Result of one `ingest_all` run."""
+
+    n_ingested: int
+    n_skipped: int = 0
+
+class IngestRunner:
+    """Owns the connection, caches, and iteration state for a bulk ingest run.
+
+    Accepts dependencies in `__init__` and holds them across the batch so
+    per-target methods don't thread `conn`/`claude_home` through every call.
+    """
+
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        claude_home: Path,
+    ) -> None:
+        self.conn = conn
+        self.claude_home = claude_home
+        self.available_skills: set[str] = discover_available_skills(claude_home)
+        self._parent_task_maps: dict[Path, dict[str, str]] = {}
+
+    def run(self, *, limit: int | None = None) -> IngestSummary:
+        """Walk `projects/**`, parse every discovered session, and upsert the
+        full grain for each. Idempotent by `session_id`.
+
+        Each parent transcript is read and run through
+        `extract_task_subagent_types` at most once per run, and that map is
+        reused across every sibling spawn under the same parent.
+        """
+        projects_root = self.claude_home / "projects"
+        targets: list[IngestTarget] = [
+            *discover_main_sessions(projects_root),
+            *discover_subagent_runs(projects_root),
+        ]
+        if limit is not None:
+            targets = targets[:limit]
+
+        n_ingested = 0
+        n_skipped = 0
+        for target in targets:
+            try:
+                parsed = self._parse_target(target)
+                persist_parsed_session(
+                    self.conn, parsed, available_skills=self.available_skills
+                )
+            except Exception:
+                n_skipped += 1
+                logger.warning(
+                    "Skipping ingest target %s due to an error",
+                    _target_path(target),
+                    exc_info=True,
+                )
+                continue
+            n_ingested += 1
+
+        if n_skipped:
+            logger.warning(
+                "ingest_all completed with %d of %d targets skipped due to errors",
+                n_skipped,
+                len(targets),
+            )
+
+        return IngestSummary(n_ingested=n_ingested, n_skipped=n_skipped)
+
+    def _parse_target(self, target: IngestTarget) -> ParsedSession:
+        if isinstance(target, MainSessionFile):
+            return parse_main_session(target.path, session_id=target.session_id)
+
+        meta = _read_meta(target.meta_path) if target.meta_path is not None else None
+        parent_path = target.project_dir / f"{target.parent_session_id}.jsonl"
+        if parent_path not in self._parent_task_maps:
+            parent_records = read_jsonl_records(parent_path) if parent_path.is_file() else []
+            self._parent_task_maps[parent_path] = extract_task_subagent_types(parent_records)
+
+        return parse_subagent_run(
+            target.jsonl_path,
+            agent_id=target.agent_id,
+            parent_session_id=target.parent_session_id,
+            meta=meta,
+            parent_task_subagent_types=self._parent_task_maps[parent_path],
+        )
 
 def resolve_target(
     *,
@@ -136,94 +221,6 @@ def persist_parsed_session(
         events=parsed.events,
         skills=skill_records,
     )
-
-
-@dataclass(frozen=True)
-class IngestSummary:
-    """Result of one `ingest_all` run."""
-
-    n_ingested: int
-    n_skipped: int = 0
-
-
-class IngestRunner:
-    """Owns the connection, caches, and iteration state for a bulk ingest run.
-
-    Accepts dependencies in `__init__` and holds them across the batch so
-    per-target methods don't thread `conn`/`claude_home` through every call.
-    """
-
-    def __init__(
-        self,
-        conn: sqlite3.Connection,
-        *,
-        claude_home: Path,
-    ) -> None:
-        self.conn = conn
-        self.claude_home = claude_home
-        self.available_skills: set[str] = discover_available_skills(claude_home)
-        self._parent_task_maps: dict[Path, dict[str, str]] = {}
-
-    def run(self, *, limit: int | None = None) -> IngestSummary:
-        """Walk `projects/**`, parse every discovered session, and upsert the
-        full grain for each. Idempotent by `session_id`.
-
-        Each parent transcript is read and run through
-        `extract_task_subagent_types` at most once per run, and that map is
-        reused across every sibling spawn under the same parent.
-        """
-        projects_root = self.claude_home / "projects"
-        targets: list[IngestTarget] = [
-            *discover_main_sessions(projects_root),
-            *discover_subagent_runs(projects_root),
-        ]
-        if limit is not None:
-            targets = targets[:limit]
-
-        n_ingested = 0
-        n_skipped = 0
-        for target in targets:
-            try:
-                parsed = self._parse_target(target)
-                persist_parsed_session(
-                    self.conn, parsed, available_skills=self.available_skills
-                )
-            except Exception:
-                n_skipped += 1
-                logger.warning(
-                    "Skipping ingest target %s due to an error",
-                    _target_path(target),
-                    exc_info=True,
-                )
-                continue
-            n_ingested += 1
-
-        if n_skipped:
-            logger.warning(
-                "ingest_all completed with %d of %d targets skipped due to errors",
-                n_skipped,
-                len(targets),
-            )
-
-        return IngestSummary(n_ingested=n_ingested, n_skipped=n_skipped)
-
-    def _parse_target(self, target: IngestTarget) -> ParsedSession:
-        if isinstance(target, MainSessionFile):
-            return parse_main_session(target.path, session_id=target.session_id)
-
-        meta = _read_meta(target.meta_path) if target.meta_path is not None else None
-        parent_path = target.project_dir / f"{target.parent_session_id}.jsonl"
-        if parent_path not in self._parent_task_maps:
-            parent_records = read_jsonl_records(parent_path) if parent_path.is_file() else []
-            self._parent_task_maps[parent_path] = extract_task_subagent_types(parent_records)
-
-        return parse_subagent_run(
-            target.jsonl_path,
-            agent_id=target.agent_id,
-            parent_session_id=target.parent_session_id,
-            meta=meta,
-            parent_task_subagent_types=self._parent_task_maps[parent_path],
-        )
 
 
 def ingest_all(
