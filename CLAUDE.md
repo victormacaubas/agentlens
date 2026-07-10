@@ -6,7 +6,7 @@ agentlens reads Claude Code session logs (JSONL under `~/.claude/projects/`) and
 
 `src/agentlens/` is organized by responsibility. Keep only `cli.py` and `__init__.py` at the package root — everything else lives in a subpackage:
 
-- **`discovery/`** — find files on disk (main sessions, subagent runs, agent definitions under `.claude/`). No parsing, no I/O beyond `Path`/`glob`.
+- **`discovery/`** — find files on disk (main sessions, subagent runs, agent definitions under `.claude/`). No parsing, no I/O beyond `Path`/`glob`. `models.py` holds its result dataclasses (`MainSessionFile`, `SubagentRun`, `AgentDefFile`); import them from `agentlens.discovery.models`, not the package root.
 - **`parser/`** — turn raw JSONL records into structured facts, split by concern: `extraction.py` (tool-event pairing, transcript facts), `naming.py` (subagent name resolution), `session.py` (session assembly, agent-definition frontmatter parsing).
 - **`store/`** — SQLite schema/DDL, store-path resolution, record dataclasses, and upserts. The only subpackage allowed to touch the database.
 - **`ingest/`** — orchestration: resolves a CLI target, then calls into `parser` to parse it and `store` to persist it. Cross-cutting by design — don't fold it into `discovery/`, `parser/`, or `store/`.
@@ -28,10 +28,6 @@ openspec archive <change-name>                   # archive once complete
 ```
 
 Trivial, low-risk edits (a typo, a one-line fix) can skip the ceremony — but when in doubt, propose.
-
-### Python follows python-engineering-standards
-
-All Python — services, CLIs, parsing, tests — follows the `python-engineering-standards` skill. Invoke it if building python code.
 
 ### Local development uses uv with a virtual environment
 

@@ -5,14 +5,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from agentlens.discovery import (
-    AgentDefFile,
-    MainSessionFile,
-    SubagentRun,
-    discover_agent_defs,
-    discover_main_sessions,
-    discover_subagent_runs,
-)
+from agentlens.discovery import discover_agent_defs, discover_main_sessions, discover_subagent_runs
+from agentlens.discovery.models import AgentDefFile, MainSessionFile, SubagentRun
 from agentlens.parser.extraction import read_jsonl_records
 from agentlens.parser.session import (
     ParsedSession,
