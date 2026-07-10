@@ -14,6 +14,7 @@ import pytest
 from agentlens.parser.extraction import (
     extract_task_subagent_types,
     extract_transcript_facts,
+    flags_partial,
     read_jsonl_records,
 )
 from agentlens.parser.naming import (
@@ -378,3 +379,275 @@ def test_parse_agent_definition_returns_none_without_frontmatter(tmp_path: Path)
 def test_parse_agent_definition_skips_unreadable_file(tmp_path: Path) -> None:
     missing = tmp_path / "does-not-exist.md"
     assert parse_agent_definition(missing) is None
+
+
+# --------------------------------------------------------------------------
+# Usage, turns, duration (session-parser spec: "Extract usage, turns, and
+# duration")
+# --------------------------------------------------------------------------
+
+
+def _assistant_message(
+    *,
+    text: str | None = None,
+    usage: dict[str, object] | None = None,
+    timestamp: str | None = None,
+    attribution_agent: str = "implementer",
+) -> dict[str, object]:
+    content: list[dict[str, object]] = []
+    if text is not None:
+        content.append({"type": "text", "text": text})
+    message: dict[str, object] = {"role": "assistant", "content": content}
+    if usage is not None:
+        message["usage"] = usage
+    record: dict[str, object] = {
+        "type": "assistant",
+        "attributionAgent": attribution_agent,
+        "message": message,
+    }
+    if timestamp is not None:
+        record["timestamp"] = timestamp
+    return record
+
+
+def _meta_injection_record(command_name: str, *, timestamp: str | None = None) -> dict[str, object]:
+    text = (
+        f"<command-message>{command_name}</command-message>\n"
+        f"<command-name>{command_name}</command-name>\n"
+        "<skill-format>true</skill-format>rest of the injected content"
+    )
+    record: dict[str, object] = {
+        "type": "user",
+        "isMeta": True,
+        "message": {"role": "user", "content": [{"type": "text", "text": text}]},
+    }
+    if timestamp is not None:
+        record["timestamp"] = timestamp
+    return record
+
+
+def test_extract_transcript_facts_sums_usage_across_turns() -> None:
+    records = [
+        _assistant_message(
+            usage={
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "cache_read_input_tokens": 100,
+                "cache_creation_input_tokens": 20,
+            }
+        ),
+        _assistant_message(
+            usage={
+                "input_tokens": 3,
+                "output_tokens": 1,
+                "cache_read_input_tokens": 50,
+                "cache_creation_input_tokens": 0,
+            }
+        ),
+    ]
+    facts = extract_transcript_facts(records, session_id="s1")
+    assert facts.input_tokens == 13
+    assert facts.output_tokens == 6
+    assert facts.cache_read_tokens == 150
+    assert facts.cache_creation_tokens == 20
+    assert facts.n_turns == 2
+
+
+def test_extract_transcript_facts_tolerates_missing_usage() -> None:
+    records: list[dict[str, object]] = [
+        _assistant_message(usage={"input_tokens": 10}),  # missing other usage fields
+        {"type": "assistant", "message": {"role": "assistant", "content": []}},  # no usage key
+    ]
+    facts = extract_transcript_facts(records, session_id="s1")
+    assert facts.input_tokens == 10
+    assert facts.output_tokens == 0
+    assert facts.cache_read_tokens == 0
+
+
+def test_extract_transcript_facts_clamps_negative_usage_to_zero() -> None:
+    # BUG-02: a corrupted JSONL can carry a negative usage field; it must
+    # not flow through as a negative sum.
+    records = [_assistant_message(usage={"input_tokens": -5, "output_tokens": 3})]
+    facts = extract_transcript_facts(records, session_id="s1")
+    assert facts.input_tokens == 0
+    assert facts.output_tokens == 3
+
+
+def test_extract_transcript_facts_computes_duration_from_first_and_last_timestamp() -> None:
+    records = [
+        _assistant_message(text="start", timestamp="2026-07-06T18:00:00.000Z"),
+        _assistant_message(text="end", timestamp="2026-07-06T18:05:30.000Z"),
+    ]
+    facts = extract_transcript_facts(records, session_id="s1")
+    assert facts.duration_sec == 330.0
+    assert facts.first_ts == "2026-07-06T18:00:00.000Z"
+
+
+def test_extract_transcript_facts_duration_zero_without_timestamps() -> None:
+    facts = extract_transcript_facts([_assistant_message(text="hi")], session_id="s1")
+    assert facts.duration_sec == 0.0
+    assert facts.first_ts is None
+
+
+# --------------------------------------------------------------------------
+# Skill-fire signals (session-parser spec: "Extract skill-fire signals")
+# --------------------------------------------------------------------------
+
+
+def test_extract_transcript_facts_injection_marker_yields_fired_skill() -> None:
+    facts = extract_transcript_facts([_meta_injection_record("code-audit")], session_id="s1")
+    assert facts.fired_skills == ["code-audit"]
+
+
+def test_extract_transcript_facts_skill_tool_use_yields_fired_skill() -> None:
+    records = [_assistant_tool_use("t1", "Skill", {"name": "openspec-sync-specs"})]
+    facts = extract_transcript_facts(records, session_id="s1")
+    assert facts.fired_skills == ["openspec-sync-specs"]
+
+
+def test_extract_transcript_facts_skill_md_read_does_not_fire() -> None:
+    records = [
+        _assistant_tool_use("t1", "Read", {"file_path": "/skills/code-audit/SKILL.md"}),
+        _user_tool_result("t1"),
+    ]
+    facts = extract_transcript_facts(records, session_id="s1")
+    assert facts.fired_skills == []
+
+
+# --------------------------------------------------------------------------
+# `final_report_flagged_partial` marker matching (D2, session-aggregation
+# spec: "Final-report partial marker")
+# --------------------------------------------------------------------------
+
+
+def test_flags_partial_matches_unchecked_checkbox() -> None:
+    assert flags_partial("Summary\n- [ ] follow-up task not done") is True
+
+
+def test_flags_partial_matches_blocked_phrase_case_insensitively() -> None:
+    assert flags_partial("I was BLOCKED by a permission denial.") is True
+
+
+def test_flags_partial_clean_completion_is_false() -> None:
+    assert flags_partial("All done. Every task is complete and verified.") is False
+
+
+def test_flags_partial_none_or_empty_text_is_false() -> None:
+    assert flags_partial(None) is False
+    assert flags_partial("") is False
+
+
+def test_flags_partial_does_not_match_partially_as_substring() -> None:
+    # BUG-01: bare substring matching made "partial" false-positive on
+    # "partially" (and "blocked" on "unblocked"); word-boundary matching
+    # must not fire on containing words.
+    assert flags_partial("I partially rewrote the code.") is False
+    assert flags_partial("The fix left the module unblocked for reviewers.") is False
+
+
+def test_flags_partial_still_matches_true_positives_after_word_boundary_fix() -> None:
+    assert flags_partial("The task was blocked.") is True
+    assert flags_partial("Summary\n- [ ] follow-up task not done") is True
+    assert flags_partial("I was unable to finish the last step.") is True
+
+
+def test_extract_transcript_facts_flags_partial_from_final_assistant_text_only() -> None:
+    records = [
+        _assistant_message(text="blocked earlier but recovered"),
+        _assistant_message(text="Finished successfully, nothing pending."),
+    ]
+    facts = extract_transcript_facts(records, session_id="s1")
+    assert facts.final_report_flagged_partial is False  # only the final text block counts
+
+
+def test_extract_transcript_facts_flags_partial_true_on_final_text() -> None:
+    records = [
+        _assistant_message(text="Finished successfully."),
+        _assistant_message(text="Actually I was unable to finish the last step."),
+    ]
+    facts = extract_transcript_facts(records, session_id="s1")
+    assert facts.final_report_flagged_partial is True
+
+
+# --------------------------------------------------------------------------
+# ParsedSession: usage/turns/duration/skill/partial fields pass through
+# --------------------------------------------------------------------------
+
+
+def test_parse_main_session_exposes_usage_turns_and_duration(tmp_path: Path) -> None:
+    path = tmp_path / "main-sid.jsonl"
+    path.write_text(
+        '{"type": "assistant", "timestamp": "2026-07-06T18:00:00.000Z", "message": '
+        '{"role": "assistant", "content": [], "usage": {"input_tokens": 5, "output_tokens": 2}}}\n'
+        '{"type": "assistant", "timestamp": "2026-07-06T18:01:00.000Z", "message": '
+        '{"role": "assistant", "content": [], "usage": {"input_tokens": 1, "output_tokens": 1}}}\n'
+    )
+    parsed = parse_main_session(path, session_id="main-sid")
+
+    assert parsed.n_turns == 2
+    assert parsed.input_tokens == 6
+    assert parsed.output_tokens == 3
+    assert parsed.duration_sec == 60.0
+    assert parsed.first_ts == "2026-07-06T18:00:00.000Z"
+
+
+def test_parse_subagent_run_extracts_task_description_and_spawn_depth(tmp_path: Path) -> None:
+    path = tmp_path / "agent-a1.jsonl"
+    path.write_text('{"type": "assistant", "message": {"role": "assistant", "content": []}}\n')
+
+    parsed = parse_subagent_run(
+        path,
+        agent_id="a1",
+        parent_session_id="parent-sid",
+        meta={
+            "agentType": "implementer",
+            "toolUseId": "toolu_1",
+            "description": "fix the bug",
+            "spawnDepth": 2,
+        },
+    )
+
+    assert parsed.task_description == "fix the bug"
+    assert parsed.spawn_depth == 2
+
+
+def test_parse_subagent_run_uses_precomputed_parent_task_subagent_types(tmp_path: Path) -> None:
+    path = tmp_path / "agent-a1.jsonl"
+    path.write_text('{"type": "assistant", "message": {"role": "assistant", "content": []}}\n')
+
+    parsed = parse_subagent_run(
+        path,
+        agent_id="a1",
+        parent_session_id="parent-sid",
+        meta={"toolUseId": "toolu_1"},
+        parent_task_subagent_types={"toolu_1": "researcher"},
+    )
+
+    assert parsed.name == "researcher"
+    assert parsed.name_source == NAME_SOURCE_PARENT_TASK
+
+
+def test_parse_subagent_run_precomputed_map_skips_parent_records_extraction(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Bulk ingest passes a precomputed map so `parse_subagent_run` needn't
+    re-derive it (or touch `parent_records`) per sibling spawn."""
+
+    def _boom(_: object) -> dict[str, str]:
+        raise AssertionError("extract_task_subagent_types must not run when a map is given")
+
+    monkeypatch.setattr("agentlens.parser.session.extract_task_subagent_types", _boom)
+
+    path = tmp_path / "agent-a1.jsonl"
+    path.write_text('{"type": "assistant", "message": {"role": "assistant", "content": []}}\n')
+
+    parsed = parse_subagent_run(
+        path,
+        agent_id="a1",
+        parent_session_id="parent-sid",
+        meta={"toolUseId": "toolu_1"},
+        parent_records=[{"bogus": "would trigger re-derivation if used"}],
+        parent_task_subagent_types={"toolu_1": "researcher"},
+    )
+
+    assert parsed.name == "researcher"

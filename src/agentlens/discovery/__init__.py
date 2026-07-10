@@ -7,6 +7,7 @@ from agentlens.discovery.models import AgentDefFile, MainSessionFile, SubagentRu
 AGENT_JSONL_GLOB = "agent-*.jsonl"
 SUBAGENTS_DIRNAME = "subagents"
 AGENTS_DIRNAME = "agents"
+SKILLS_DIRNAME = "skills"
 
 
 def discover_main_sessions(projects_root: Path) -> list[MainSessionFile]:
@@ -71,6 +72,20 @@ def discover_agent_defs(
     for agents_dir, scope in roots:
         results.extend(_discover_agent_defs_in(agents_dir, scope))
     return results
+
+
+def discover_available_skills(claude_home: Path) -> set[str]:
+    """Best-effort discovery of skill names under `.claude/skills/**`.
+
+    Returns the set of skill directory names found there; empty when the
+    tree is missing or unreadable. Advisory only (D3/`available`) — a
+    skill can be declared or fired without appearing here, e.g. one
+    provided by a plugin this scan does not resolve. Never raises.
+    """
+    skills_dir = claude_home / SKILLS_DIRNAME
+    if not skills_dir.is_dir():
+        return set()
+    return {entry.name for entry in skills_dir.iterdir() if entry.is_dir()}
 
 
 def _discover_agent_defs_in(agents_dir: Path, scope: str) -> list[AgentDefFile]:

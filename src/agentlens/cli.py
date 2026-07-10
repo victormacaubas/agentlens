@@ -1,12 +1,27 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import click
 
 from agentlens import __version__
-from agentlens.ingest import ingest_target, resolve_target, sync_agent_definitions
-from agentlens.store import create_store, resolve_store_path, upsert_session_events
+from agentlens.discovery import discover_available_skills
+from agentlens.ingest import (
+    ingest_all,
+    ingest_target,
+    persist_parsed_session,
+    resolve_target,
+    sync_agent_definitions,
+)
+from agentlens.reporting import (
+    DEFAULT_MIN_SESSIONS_FOR_TREND,
+    WindowResolutionError,
+    build_report,
+    render_terminal_summary,
+    resolve_window,
+)
+from agentlens.store import create_store, resolve_store_path
 
 
 @click.group()
@@ -71,7 +86,8 @@ def session(
             raise click.ClickException(f"could not find a session for {file_path or session_id}")
 
         parsed = ingest_target(target)
-        upsert_session_events(conn, parsed.session_id, parsed.events)
+        available_skills = discover_available_skills(claude_home)
+        persist_parsed_session(conn, parsed, available_skills=available_skills)
         click.echo(
             f"ingested {parsed.session_kind} session {parsed.session_id} "
             f"({len(parsed.events)} tool events, name_source={parsed.name_source})"
@@ -81,11 +97,80 @@ def session(
 
 
 @main.command()
-@click.option("--agent", default=None, help="Filter by agent_type (aggregation lands in Phase 2).")
-@click.option("--since", default=None, help="Window start, e.g. 7d (aggregation lands in Phase 2).")
-def report(agent: str | None, since: str | None) -> None:
-    """Aggregate rollup across sessions (stub — full aggregation is Phase 2)."""
-    click.echo("report: aggregation not yet implemented (Phase 2)")
+@click.option(
+    "--claude-home",
+    "claude_home_override",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Override the .claude directory to scan (default: ~/.claude).",
+)
+@click.option(
+    "--limit",
+    type=int,
+    default=None,
+    help="Ingest at most N sessions in this invocation.",
+)
+@click.pass_context
+def ingest(
+    ctx: click.Context,
+    claude_home_override: Path | None,
+    limit: int | None,
+) -> None:
+    """Walk projects/** and upsert every discovered session into the store."""
+    store_path = resolve_store_path(store_override=ctx.obj.get("store"))
+    claude_home = claude_home_override or Path.home() / ".claude"
+
+    conn = create_store(store_path)
+    try:
+        sync_agent_definitions(conn, claude_home=claude_home)
+        summary = ingest_all(conn, claude_home=claude_home, limit=limit)
+        click.echo(f"ingested {summary.n_ingested} sessions from {claude_home}")
+    finally:
+        conn.close()
+
+
+@main.command()
+@click.option("--agent", "agent_type", default=None, help="Filter by agent_type.")
+@click.option("--since", default=None, help="Window start: 7d, 30d, or an absolute date.")
+@click.option("--from", "from_", default=None, help="Explicit window start date (with --to).")
+@click.option("--to", default=None, help="Explicit window end date (with --from).")
+@click.option("--today", is_flag=True, default=False, help="Shortcut for --since 1d.")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Emit the verdict-JSON slice.")
+@click.pass_context
+def report(
+    ctx: click.Context,
+    agent_type: str | None,
+    since: str | None,
+    from_: str | None,
+    to: str | None,
+    today: bool,
+    as_json: bool,
+) -> None:
+    """Aggregate deterministic counts over the store for a window.
+
+    Reads the store only — never ingests. Defaults to the last 7 days when
+    no window flag is given.
+    """
+    store_path = resolve_store_path(store_override=ctx.obj.get("store"))
+    conn = create_store(store_path)
+    try:
+        try:
+            window = resolve_window(since=since, from_=from_, to=to, today=today)
+        except WindowResolutionError as exc:
+            raise click.ClickException(str(exc)) from exc
+
+        result = build_report(
+            conn,
+            window=window,
+            agent_type=agent_type,
+            min_sessions_for_trend=DEFAULT_MIN_SESSIONS_FOR_TREND,
+        )
+        if as_json:
+            click.echo(json.dumps(result.to_verdict_slice()))
+        else:
+            click.echo(render_terminal_summary(result))
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":
