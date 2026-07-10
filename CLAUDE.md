@@ -9,9 +9,11 @@ agentlens reads Claude Code session logs (JSONL under `~/.claude/projects/`) and
 - **`discovery/`** — find files on disk (main sessions, subagent runs, agent definitions under `.claude/`). No parsing, no I/O beyond `Path`/`glob`. `models.py` holds its result dataclasses (`MainSessionFile`, `SubagentRun`, `AgentDefFile`); import them from `agentlens.discovery.models`, not the package root.
 - **`parser/`** — turn raw JSONL records into structured facts, split by concern: `extraction.py` (tool-event pairing, transcript facts), `naming.py` (subagent name resolution), `session.py` (session assembly, agent-definition frontmatter parsing).
 - **`store/`** — SQLite schema/DDL, store-path resolution, record dataclasses, and upserts. The only subpackage allowed to touch the database.
-- **`ingest/`** — orchestration: resolves a CLI target, then calls into `parser` to parse it and `store` to persist it. Cross-cutting by design — don't fold it into `discovery/`, `parser/`, or `store/`.
+- **`ingest/`** — orchestration: resolves a CLI target, then calls into `parser` to parse it and `store` to persist it. Also owns the bulk `ingest_all` walk over `projects/**`. Cross-cutting by design — don't fold it into `discovery/`, `parser/`, or `store/`.
+- **`aggregation/`** — derive the `fact_session` per-spawn grain from parsed sessions: event-derived tool counts joined with transcript-read usage/turn/duration, the `n_duplicate_tool_calls` rule, and the declared-vs-fired skill bridge. Reads facts; emits counts and booleans, never verdicts ([ADR 0003](docs/adr/0003-deterministic-layer-emits-counts-not-verdicts.md)).
+- **`reporting/`** — windowed rollups over the store: window resolution, prior-window deltas, low-volume guard, intra-session parent lens, and the deterministic verdict-JSON slice. Reads the store only; never ingests.
 
-New code that doesn't fit an existing folder (Phase 2 aggregation, Phase 3 judge/rubric, Phase 5 renderers) gets its own subpackage when that phase actually starts — don't pre-create empty folders for phases that haven't landed yet.
+New code that doesn't fit an existing folder (Phase 3 judge/rubric, Phase 5 renderers) gets its own subpackage when that phase actually starts — don't pre-create empty folders for phases that haven't landed yet.
 
 **Editing or creating any `.py` file under `src/agentlens/` → invoke the `python-engineering-standards` skill first.**
 
