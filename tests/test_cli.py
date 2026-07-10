@@ -8,6 +8,7 @@ touching HOME at all.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -157,6 +158,147 @@ def test_store_flag_refuses_dot_claude_location(isolated_home: Path, tmp_path: P
     bad_store = isolated_home / ".claude" / "agentlens.db"
     result = CliRunner().invoke(main, ["--store", str(bad_store), "session"])
     assert result.exit_code != 0
+
+
+def test_session_command_persists_fact_session_and_skill_bridge(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    """The single-session path also upserts the full grain (not just
+    `fact_tool_event`), per the session-parser spec's "Idempotent ingest"
+    requirement."""
+    store_path = tmp_path / "store.db"
+    subagents_dir = isolated_home / ".claude" / "projects" / "-proj" / "parent-sid" / "subagents"
+    subagents_dir.mkdir(parents=True)
+
+    transcript = subagents_dir / "agent-a1.jsonl"
+    transcript.write_text(
+        '{"type": "assistant", "message": {"role": "assistant", "content": ['
+        '{"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": "a.py"}}]}}\n'
+        '{"type": "user", "timestamp": "2026-07-06T18:56:19.617Z", "message": {"role": "user", '
+        '"content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok", '
+        '"is_error": false}]}}\n'
+    )
+    (subagents_dir / "agent-a1.meta.json").write_text(
+        '{"agentType": "researcher", "toolUseId": "toolu_1", "spawnDepth": 1}'
+    )
+
+    result = CliRunner().invoke(
+        main, ["--store", str(store_path), "session", "--file", str(transcript)]
+    )
+    assert result.exit_code == 0
+
+    conn = sqlite3.connect(store_path)
+    try:
+        row = conn.execute(
+            "SELECT agent_type, n_reads FROM fact_session WHERE session_id = 'a1'"
+        ).fetchone()
+        assert row == ("researcher", 1)
+    finally:
+        conn.close()
+
+
+def test_ingest_command_populates_store_and_exits_zero(tmp_path: Path) -> None:
+    claude_home = tmp_path / "custom-claude"
+    project_dir = claude_home / "projects" / "-proj"
+    project_dir.mkdir(parents=True)
+    (project_dir / "main-sid.jsonl").write_text(
+        '{"type": "assistant", "message": {"role": "assistant", "content": []}}\n'
+    )
+
+    store_path = tmp_path / "store.db"
+    result = CliRunner().invoke(
+        main,
+        ["--store", str(store_path), "ingest", "--claude-home", str(claude_home)],
+    )
+
+    assert result.exit_code == 0
+    assert "1 sessions" in result.output
+
+    conn = sqlite3.connect(store_path)
+    try:
+        count = conn.execute("SELECT COUNT(*) FROM fact_session").fetchone()[0]
+        assert count == 1
+    finally:
+        conn.close()
+
+
+def test_ingest_command_limit_bounds_the_run(tmp_path: Path) -> None:
+    claude_home = tmp_path / "custom-claude"
+    project_dir = claude_home / "projects" / "-proj"
+    project_dir.mkdir(parents=True)
+    for i in range(3):
+        (project_dir / f"main-sid-{i}.jsonl").write_text(
+            '{"type": "assistant", "message": {"role": "assistant", "content": []}}\n'
+        )
+
+    store_path = tmp_path / "store.db"
+    result = CliRunner().invoke(
+        main,
+        [
+            "--store",
+            str(store_path),
+            "ingest",
+            "--claude-home",
+            str(claude_home),
+            "--limit",
+            "2",
+        ],
+    )
+
+    assert result.exit_code == 0
+    conn = sqlite3.connect(store_path)
+    try:
+        count = conn.execute("SELECT COUNT(*) FROM fact_session").fetchone()[0]
+        assert count == 2
+    finally:
+        conn.close()
+
+
+def test_report_json_emits_verdict_slice_with_no_scores(tmp_path: Path) -> None:
+    claude_home = tmp_path / "custom-claude"
+    project_dir = claude_home / "projects" / "-proj"
+    project_dir.mkdir(parents=True)
+    (project_dir / "main-sid.jsonl").write_text(
+        '{"type": "assistant", "message": {"role": "assistant", "content": []}}\n'
+    )
+
+    store_path = tmp_path / "store.db"
+    CliRunner().invoke(
+        main, ["--store", str(store_path), "ingest", "--claude-home", str(claude_home)]
+    )
+
+    result = CliRunner().invoke(
+        main, ["--store", str(store_path), "report", "--since", "7d", "--json"]
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert "score" not in json.dumps(payload).lower()
+    assert "window" in payload
+
+
+def test_report_does_not_ingest_uningested_sessions_on_disk(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    store_path = tmp_path / "store.db"
+    # Populate the store first so the store file/schema exists.
+    CliRunner().invoke(main, ["--store", str(store_path), "session"])
+
+    # Now sessions exist on disk but were never ingested.
+    project_dir = isolated_home / ".claude" / "projects" / "-proj"
+    project_dir.mkdir(parents=True)
+    (project_dir / "main-sid.jsonl").write_text(
+        '{"type": "assistant", "message": {"role": "assistant", "content": []}}\n'
+    )
+
+    result = CliRunner().invoke(main, ["--store", str(store_path), "report", "--since", "7d"])
+    assert result.exit_code == 0
+
+    conn = sqlite3.connect(store_path)
+    try:
+        count = conn.execute("SELECT COUNT(*) FROM fact_session").fetchone()[0]
+        assert count == 0  # report never ingested the on-disk session
+    finally:
+        conn.close()
 
 
 def test_claude_home_flag_injects_target_without_touching_home(tmp_path: Path) -> None:

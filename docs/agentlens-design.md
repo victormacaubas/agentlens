@@ -116,7 +116,7 @@ The grain is a single agent run, not an agent *type*. Four `implementer` spawns 
 - **Identity:** `session_id`, `agent_id` (per-spawn hash from the filename), `agent_type` (canonical name), `name_source`, `session_kind` (`subagent` \| `main`), `spawn_depth`
 - **Lineage:** `parent_session_id` (the `<sid>` folder the `subagents/` dir sits under), `spawn_tool_use_id` (from `.meta.json` — joins to the exact `Task` block in the parent), `task_description` (from `.meta.json`)
 - **Volume:** `n_turns`, `n_tool_calls`, `n_reads`, `n_edits`, `n_writes`, `n_bash`, `n_files_touched`
-- **Health:** `n_errors`, `n_permission_denials`, `n_retry_loops`, `claimed_status` (complete \| partial)
+- **Health:** `n_errors`, `n_permission_denials`, `n_duplicate_tool_calls`, `final_report_flagged_partial` (raw boolean marker — *not* a completion verdict; see [ADR 0003](adr/0003-deterministic-layer-emits-counts-not-verdicts.md))
 - **Cost/time:** `duration_sec`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_creation_tokens`
 - **Context:** `task_prompt_len`, `n_skills_fired`
 

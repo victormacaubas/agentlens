@@ -25,11 +25,10 @@ _FRONTMATTER_DELIM = "---"
 
 @dataclass(frozen=True)
 class ParsedSession:
-    """The parser's output for one session: events plus resolved identity/lineage.
-
-    Only `events` is persisted this change (into `fact_tool_event`); the
-    rest is returned for the caller to log/inspect now and will land in
-    `fact_session` in Phase 2.
+    """The parser's output for one session: events, identity/lineage, and
+    the transcript-read fields aggregation combines into `fact_session`
+    (D1) — usage/turns/duration are turn-level facts absent from
+    `fact_tool_event`, so the parser returns them directly.
     """
 
     session_id: str
@@ -40,7 +39,18 @@ class ParsedSession:
     ambiguous: bool
     parent_session_id: str | None
     spawn_tool_use_id: str | None
+    task_description: str | None
+    spawn_depth: int | None
     events: list[ToolEventRecord]
+    n_turns: int
+    duration_sec: float
+    first_ts: str | None
+    input_tokens: int
+    output_tokens: int
+    cache_read_tokens: int
+    cache_creation_tokens: int
+    fired_skills: list[str]
+    final_report_flagged_partial: bool
 
 
 def parse_main_session(path: Path, *, session_id: str) -> ParsedSession:
@@ -55,7 +65,18 @@ def parse_main_session(path: Path, *, session_id: str) -> ParsedSession:
         ambiguous=False,
         parent_session_id=None,
         spawn_tool_use_id=None,
+        task_description=None,
+        spawn_depth=None,
         events=facts.tool_events,
+        n_turns=facts.n_turns,
+        duration_sec=facts.duration_sec,
+        first_ts=facts.first_ts,
+        input_tokens=facts.input_tokens,
+        output_tokens=facts.output_tokens,
+        cache_read_tokens=facts.cache_read_tokens,
+        cache_creation_tokens=facts.cache_creation_tokens,
+        fired_skills=facts.fired_skills,
+        final_report_flagged_partial=facts.final_report_flagged_partial,
     )
 
 
@@ -66,6 +87,7 @@ def parse_subagent_run(
     parent_session_id: str,
     meta: dict[str, Any] | None = None,
     parent_records: Iterable[dict[str, Any]] = (),
+    parent_task_subagent_types: dict[str, str] | None = None,
 ) -> ParsedSession:
     """Parse a subagent transcript, resolving lineage and name.
 
@@ -83,7 +105,13 @@ def parse_subagent_run(
             the caller), used only to look up the spawning `Task`'s
             `subagent_type` for the name-resolution fallback chain. Omit if
             the parent transcript is unavailable — resolution still
-            proceeds (never drops a session).
+            proceeds (never drops a session). Ignored when
+            `parent_task_subagent_types` is given.
+        parent_task_subagent_types: A precomputed `{tool_use_id:
+            subagent_type}` map for the parent transcript. Bulk ingest
+            passes this once per parent and reuses it across sibling
+            spawns instead of re-deriving it from `parent_records` per
+            spawn (see `agentlens.ingest.ingest_all`).
     """
     facts = extract_transcript_facts(read_jsonl_records(jsonl_path), session_id=agent_id)
 
@@ -92,12 +120,19 @@ def parse_subagent_run(
     meta_agent_type = meta_agent_type if isinstance(meta_agent_type, str) else None
     spawn_tool_use_id = meta.get("toolUseId")
     spawn_tool_use_id = spawn_tool_use_id if isinstance(spawn_tool_use_id, str) else None
+    task_description = meta.get("description")
+    task_description = task_description if isinstance(task_description, str) else None
+    spawn_depth = meta.get("spawnDepth")
+    spawn_depth = spawn_depth if isinstance(spawn_depth, int) else None
 
-    parent_task_subagent_type: str | None = None
-    if spawn_tool_use_id:
-        parent_task_subagent_type = extract_task_subagent_types(parent_records).get(
-            spawn_tool_use_id
-        )
+    task_map = (
+        parent_task_subagent_types
+        if parent_task_subagent_types is not None
+        else extract_task_subagent_types(parent_records)
+    )
+    parent_task_subagent_type: str | None = (
+        task_map.get(spawn_tool_use_id) if spawn_tool_use_id else None
+    )
 
     resolution = resolve_name(
         meta_agent_type=meta_agent_type,
@@ -115,7 +150,18 @@ def parse_subagent_run(
         ambiguous=resolution.ambiguous,
         parent_session_id=parent_session_id,
         spawn_tool_use_id=spawn_tool_use_id,
+        task_description=task_description,
+        spawn_depth=spawn_depth,
         events=facts.tool_events,
+        n_turns=facts.n_turns,
+        duration_sec=facts.duration_sec,
+        first_ts=facts.first_ts,
+        input_tokens=facts.input_tokens,
+        output_tokens=facts.output_tokens,
+        cache_read_tokens=facts.cache_read_tokens,
+        cache_creation_tokens=facts.cache_creation_tokens,
+        fired_skills=facts.fired_skills,
+        final_report_flagged_partial=facts.final_report_flagged_partial,
     )
 
 

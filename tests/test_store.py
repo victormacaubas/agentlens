@@ -11,12 +11,19 @@ from agentlens.store import (
     REQUIRED_TABLES,
     STORE_PATH_ENV_VAR,
     AgentDefRecord,
+    SessionRecord,
+    SkillBridgeRecord,
     StoreLocationError,
     ToolEventRecord,
     create_store,
+    fetch_declared_skills,
     resolve_store_path,
     upsert_agent_definition,
+    upsert_dim_date,
+    upsert_dim_tool,
+    upsert_session,
     upsert_session_events,
+    upsert_session_skills,
 )
 
 
@@ -202,5 +209,165 @@ def test_upsert_agent_definition_upserts_by_agent_type(tmp_path: Path) -> None:
         upsert_agent_definition(conn, updated)
         rows = conn.execute("SELECT agent_type, definition_hash FROM dim_agent").fetchall()
         assert rows == [("implementer", "hash2")]
+    finally:
+        conn.close()
+
+
+def test_fetch_declared_skills_returns_list_for_known_agent(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "agentlens.db")
+    try:
+        agent = AgentDefRecord(
+            agent_type="implementer",
+            name="implementer",
+            model=None,
+            effort=None,
+            declared_tools=[],
+            declared_skills=["python-engineering-standards"],
+            definition_hash="hash1",
+        )
+        upsert_agent_definition(conn, agent)
+        assert fetch_declared_skills(conn, "implementer") == ["python-engineering-standards"]
+    finally:
+        conn.close()
+
+
+def test_fetch_declared_skills_unknown_agent_returns_empty(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "agentlens.db")
+    try:
+        assert fetch_declared_skills(conn, "no-such-agent") == []
+    finally:
+        conn.close()
+
+
+# --------------------------------------------------------------------------
+# fact_session: renamed/demoted columns (store-schema spec)
+# --------------------------------------------------------------------------
+
+
+def test_fact_session_has_renamed_and_demoted_columns(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "agentlens.db")
+    try:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(fact_session)")}
+        assert "n_duplicate_tool_calls" in columns
+        assert "final_report_flagged_partial" in columns
+        assert "n_retry_loops" not in columns
+        assert "claimed_status" not in columns
+    finally:
+        conn.close()
+
+
+def _session_record(session_id: str = "s1", **overrides: object) -> SessionRecord:
+    defaults: dict[str, object] = {
+        "session_id": session_id,
+        "agent_id": "a1",
+        "agent_type": "implementer",
+        "name_source": "meta_agent_type",
+        "session_kind": "subagent",
+        "spawn_depth": 1,
+        "parent_session_id": "parent-sid",
+        "spawn_tool_use_id": "toolu_1",
+        "task_description": "do the thing",
+        "session_date": "2026-07-06",
+        "n_turns": 3,
+        "n_tool_calls": 2,
+        "n_reads": 1,
+        "n_edits": 1,
+        "n_writes": 0,
+        "n_bash": 0,
+        "n_files_touched": 1,
+        "n_errors": 0,
+        "n_permission_denials": 0,
+        "n_duplicate_tool_calls": 0,
+        "final_report_flagged_partial": False,
+        "duration_sec": 12.5,
+        "input_tokens": 100,
+        "output_tokens": 50,
+        "cache_read_tokens": 10,
+        "cache_creation_tokens": 5,
+        "task_prompt_len": 12,
+        "n_skills_fired": 0,
+    }
+    defaults.update(overrides)
+    return SessionRecord(**defaults)  # type: ignore[arg-type]
+
+
+def test_upsert_session_replaces_row_by_session_id(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "agentlens.db")
+    try:
+        upsert_session(conn, _session_record(n_errors=0))
+        upsert_session(conn, _session_record(n_errors=3))  # re-ingest: full replace
+
+        rows = conn.execute(
+            "SELECT n_errors FROM fact_session WHERE session_id = ?", ("s1",)
+        ).fetchall()
+        assert rows == [(3,)]
+    finally:
+        conn.close()
+
+
+def test_upsert_session_stores_final_report_flagged_partial_as_boolean(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "agentlens.db")
+    try:
+        upsert_session(conn, _session_record(final_report_flagged_partial=True))
+        row = conn.execute(
+            "SELECT final_report_flagged_partial FROM fact_session WHERE session_id = ?", ("s1",)
+        ).fetchone()
+        assert row == (1,)
+    finally:
+        conn.close()
+
+
+def test_upsert_session_skills_is_idempotent_and_full_replace(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "agentlens.db")
+    try:
+        first = [
+            SkillBridgeRecord(
+                session_id="s1", skill_name="a", declared=True, available=False, fired=False
+            )
+        ]
+        upsert_session_skills(conn, "s1", first)
+        upsert_session_skills(conn, "s1", first)
+
+        rows = conn.execute(
+            "SELECT skill_name, declared, fired FROM bridge_session_skill WHERE session_id = ?",
+            ("s1",),
+        ).fetchall()
+        assert rows == [("a", 1, 0)]
+
+        second = [
+            SkillBridgeRecord(
+                session_id="s1", skill_name="b", declared=False, available=False, fired=True
+            )
+        ]
+        upsert_session_skills(conn, "s1", second)
+        rows = conn.execute(
+            "SELECT skill_name FROM bridge_session_skill WHERE session_id = ?", ("s1",)
+        ).fetchall()
+        assert rows == [("b",)]  # "a" row is gone: full replace, not merge
+    finally:
+        conn.close()
+
+
+def test_upsert_dim_date_is_idempotent(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "agentlens.db")
+    try:
+        upsert_dim_date(conn, "2026-07-06", year=2026, month=7, day=6, iso_week=28)
+        upsert_dim_date(conn, "2026-07-06", year=2026, month=7, day=6, iso_week=28)
+
+        rows = conn.execute("SELECT date, iso_week FROM dim_date").fetchall()
+        assert rows == [("2026-07-06", 28)]
+    finally:
+        conn.close()
+
+
+def test_upsert_dim_tool_is_idempotent(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "agentlens.db")
+    try:
+        upsert_dim_tool(conn, "Read")
+        upsert_dim_tool(conn, "Read")
+        upsert_dim_tool(conn, "Bash")
+
+        rows = {row[0] for row in conn.execute("SELECT tool_name FROM dim_tool").fetchall()}
+        assert rows == {"Read", "Bash"}
     finally:
         conn.close()
