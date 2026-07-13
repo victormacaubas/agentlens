@@ -276,3 +276,133 @@ def test_render_terminal_summary_mentions_spawns(tmp_path: Path) -> None:
         assert "spawns" in summary
     finally:
         conn.close()
+
+
+# --------------------------------------------------------------------------
+# fact_verdict integration (windowed-reporting spec: opportunistic verdict
+# inclusion when present, deterministic-only otherwise)
+# --------------------------------------------------------------------------
+
+
+def _verdict_json(overall_score: float = 4.0) -> dict[str, object]:
+    return {
+        "dimensions": {
+            "task_completion": {"score": 4, "evidence": ["did the task"]},
+            "honesty": {"score": 4, "evidence": ["accurate report"]},
+            "efficiency": {"score": 4, "evidence": ["no redundant calls"]},
+            "scope_adherence": {"score": 4, "evidence": ["stayed in scope"]},
+        },
+        "overall_score": overall_score,
+        "suggested_fixes": ["reduce redundant Read calls"],
+    }
+
+
+def _insert_verdict(
+    conn: sqlite3.Connection,
+    session_id: str,
+    *,
+    rubric_version: str = "v1",
+    judge_model: str = "sonnet",
+    overall_score: float = 4.0,
+) -> None:
+    with conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO fact_verdict
+                (session_id, rubric_version, judge_model, verdict_json,
+                 judge_cost_usd, judge_input_tokens, judge_output_tokens)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                rubric_version,
+                judge_model,
+                json.dumps(_verdict_json(overall_score)),
+                0.02,
+                1000,
+                200,
+            ),
+        )
+
+
+def test_report_with_no_verdicts_unchanged(tmp_path: Path) -> None:
+    conn = _store(tmp_path)
+    try:
+        upsert_session(conn, _session("s1"))
+        window = WindowRange(start=date(2026, 7, 4), end=date(2026, 7, 11))
+        report = build_report(conn, window=window)
+
+        assert report.verdicts == {}
+        assert report.agents[0].aggregate.avg_verdict_score is None
+        assert report.to_verdict_slice()["verdicts"] == {}
+    finally:
+        conn.close()
+
+
+def test_report_includes_verdicts_when_present(tmp_path: Path) -> None:
+    conn = _store(tmp_path)
+    try:
+        upsert_session(conn, _session("s1"))
+        _insert_verdict(conn, "s1", overall_score=4.0)
+
+        window = WindowRange(start=date(2026, 7, 4), end=date(2026, 7, 11))
+        report = build_report(conn, window=window)
+
+        assert "s1" in report.verdicts
+        assert report.verdicts["s1"]["overall_score"] == 4.0
+        assert report.verdicts["s1"]["suggested_fixes"] == ["reduce redundant Read calls"]
+        assert report.agents[0].aggregate.avg_verdict_score == 4.0
+    finally:
+        conn.close()
+
+
+def test_report_mixed_scored_and_unscored(tmp_path: Path) -> None:
+    conn = _store(tmp_path)
+    try:
+        upsert_session(conn, _session("s1"))
+        upsert_session(conn, _session("s2"))
+        upsert_session(conn, _session("s3"))
+        _insert_verdict(conn, "s2", overall_score=3.0)
+
+        window = WindowRange(start=date(2026, 7, 4), end=date(2026, 7, 11))
+        report = build_report(conn, window=window)
+
+        assert len(report.agents) == 1
+        assert report.agents[0].aggregate.n_spawns == 3
+        assert set(report.verdicts) == {"s2"}
+        assert report.agents[0].aggregate.avg_verdict_score == 3.0
+    finally:
+        conn.close()
+
+
+def test_terminal_summary_shows_avg_score(tmp_path: Path) -> None:
+    conn = _store(tmp_path)
+    try:
+        upsert_session(conn, _session("s1"))
+        _insert_verdict(conn, "s1", overall_score=4.2)
+
+        window = WindowRange(start=date(2026, 7, 4), end=date(2026, 7, 11))
+        report = build_report(conn, window=window)
+
+        summary = render_terminal_summary(report)
+        assert "avg score:" in summary
+    finally:
+        conn.close()
+
+
+def test_verdict_slice_json_includes_verdicts(tmp_path: Path) -> None:
+    conn = _store(tmp_path)
+    try:
+        upsert_session(conn, _session("s1"))
+        _insert_verdict(conn, "s1", overall_score=4.0)
+
+        window = WindowRange(start=date(2026, 7, 4), end=date(2026, 7, 11))
+        report = build_report(conn, window=window)
+
+        slice_dict = report.to_verdict_slice()
+        json.dumps(slice_dict)  # must remain JSON-serializable
+
+        assert "verdicts" in slice_dict
+        assert slice_dict["verdicts"]["s1"]["overall_score"] == 4.0
+    finally:
+        conn.close()

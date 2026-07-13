@@ -7,8 +7,10 @@ applies the low-volume guard, and rolls spawns up per `parent_session_id`
 
 from __future__ import annotations
 
+import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from statistics import mean
 from typing import Any, Final
 
 from agentlens.reporting.date_window import WindowRange
@@ -29,7 +31,13 @@ _DELTA_FIELDS: Final[tuple[str, ...]] = (
 
 @dataclass(frozen=True)
 class AgentAggregate:
-    """Window rollup for one `agent_type`, counted in spawns (D5)."""
+    """Window rollup for one `agent_type`, counted in spawns (D5).
+
+    `avg_verdict_score` is `None` when no session in this aggregate's window
+    has a judge verdict yet (verdict inclusion is opportunistic per the
+    windowed-reporting spec) — it is populated in `build_report`, not by the
+    deterministic-only `_query_agent_aggregates` query.
+    """
 
     agent_type: str
     n_spawns: int
@@ -40,6 +48,7 @@ class AgentAggregate:
     n_tool_calls: int
     total_tokens: int
     avg_duration_sec: float
+    avg_verdict_score: float | None = None
 
 
 @dataclass(frozen=True)
@@ -70,10 +79,15 @@ class ReportResult:
     min_sessions_for_trend: int
     agents: list[AgentWindowResult]
     parent_lens: list[ParentLensRow]
+    # session_id -> parsed verdict_json, for sessions in `window` with a judge
+    # verdict. Opportunistic: sessions without one simply have no entry
+    # (windowed-reporting spec).
+    verdicts: dict[str, dict[str, Any]]
 
     def to_verdict_slice(self) -> dict[str, Any]:
-        """The deterministic slice of the verdict JSON — counts and window
-        rollups, no LLM scores."""
+        """The verdict JSON — deterministic counts and window rollups, plus
+        judge verdicts for sessions that have one (opportunistic; absent
+        entirely when no verdicts exist in the window)."""
         return {
             "window": {
                 "start": self.window.start.isoformat(),
@@ -95,6 +109,11 @@ class ReportResult:
                     "avg_duration_sec": result.aggregate.avg_duration_sec,
                     "insufficient_data": result.insufficient_data,
                     "delta": result.delta,
+                    **(
+                        {"avg_verdict_score": result.aggregate.avg_verdict_score}
+                        if result.aggregate.avg_verdict_score is not None
+                        else {}
+                    ),
                 }
                 for result in self.agents
             ],
@@ -107,6 +126,7 @@ class ReportResult:
                 }
                 for row in self.parent_lens
             ],
+            "verdicts": self.verdicts,
         }
 
 
@@ -119,18 +139,24 @@ def build_report(
 ) -> ReportResult:
     """Query the store for one window and assemble the report (D5).
 
-    Reads `fact_session` only — never ingests. The prior-window delta
-    compares against the immediately preceding equal-length span; the
-    low-volume guard suppresses that delta when the current window holds
-    fewer than `min_sessions_for_trend` spawns for an `agent_type`.
+    Reads `fact_session` and, opportunistically, `fact_verdict` — never
+    ingests. The prior-window delta compares against the immediately
+    preceding equal-length span; the low-volume guard suppresses that delta
+    when the current window holds fewer than `min_sessions_for_trend`
+    spawns for an `agent_type`. Verdict scores (when present) never affect
+    the trend delta — only deterministic counts do.
     """
     current = _query_agent_aggregates(conn, window=window, agent_type=agent_type)
     prior = _query_agent_aggregates(conn, window=window.prior(), agent_type=agent_type)
     parent_lens = _query_parent_lens(conn, window=window, agent_type=agent_type)
+    verdicts, scores_by_agent_type = _query_verdicts(conn, window=window, agent_type=agent_type)
 
     agents: list[AgentWindowResult] = []
     for name in sorted(current):
         aggregate = current[name]
+        agent_scores = scores_by_agent_type.get(name)
+        if agent_scores:
+            aggregate = replace(aggregate, avg_verdict_score=mean(agent_scores))
         prior_aggregate = prior.get(name)
         insufficient_data = aggregate.n_spawns < min_sessions_for_trend
         delta: dict[str, float] | None = None
@@ -154,6 +180,7 @@ def build_report(
         min_sessions_for_trend=min_sessions_for_trend,
         agents=agents,
         parent_lens=parent_lens,
+        verdicts=verdicts,
     )
 
 
@@ -242,3 +269,49 @@ def _query_parent_lens(
         )
         for row in rows
     ]
+
+
+def _query_verdicts(
+    conn: sqlite3.Connection,
+    *,
+    window: WindowRange,
+    agent_type: str | None,
+) -> tuple[dict[str, dict[str, Any]], dict[str, list[float]]]:
+    """LEFT JOIN `fact_verdict` onto subagent sessions in `window`.
+
+    Returns the per-session verdict payload (parsed `verdict_json`, keyed
+    by `session_id`) plus each `agent_type`'s list of `overall_score`s, used
+    by `build_report` to compute the average score shown in the terminal
+    summary. Verdict inclusion is opportunistic (windowed-reporting spec):
+    a session with no verdict row simply contributes nothing to either
+    return value. If a session has verdicts under more than one
+    `(rubric_version, judge_model)`, the last one returned by the query
+    wins — the store doesn't track a "current" verdict beyond that key.
+    """
+    sql = """
+        SELECT fs.session_id, fs.agent_type, fv.verdict_json
+        FROM fact_session fs
+        LEFT JOIN fact_verdict fv ON fv.session_id = fs.session_id
+        WHERE fs.session_kind = 'subagent'
+          AND fs.session_date >= ?
+          AND fs.session_date < ?
+    """
+    params: list[str] = [window.start.isoformat(), window.end.isoformat()]
+    if agent_type is not None:
+        sql += " AND fs.agent_type = ?"
+        params.append(agent_type)
+
+    rows = conn.execute(sql, params).fetchall()
+
+    verdicts: dict[str, dict[str, Any]] = {}
+    scores_by_agent_type: dict[str, list[float]] = {}
+    for session_id, session_agent_type, verdict_json in rows:
+        if verdict_json is None:
+            continue
+        parsed = json.loads(verdict_json)
+        verdicts[str(session_id)] = parsed
+        if session_agent_type is not None:
+            scores_by_agent_type.setdefault(str(session_agent_type), []).append(
+                float(parsed["overall_score"])
+            )
+    return verdicts, scores_by_agent_type

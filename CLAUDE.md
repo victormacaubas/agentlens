@@ -6,7 +6,7 @@ agentlens reads Claude Code session logs (JSONL under `~/.claude/projects/`) and
 
 `src/agentlens/` is organized by responsibility. The package root holds only `cli.py`, `errors.py`, and `__init__.py` — everything else lives in a named module inside a subpackage:
 
-- **`errors.py`** — all custom exception classes (`WindowResolutionError`, `StoreLocationError`). Import exceptions from here, not from the subpackage that raises them.
+- **`errors.py`** — all custom exception classes (`WindowResolutionError`, `StoreLocationError`, `JudgeError`, `JudgeTimeoutError`, `JudgeUnavailableError`). Import exceptions from here, not from the subpackage that raises them.
 - **`discovery/`** — find files on disk (main sessions, subagent runs, agent definitions under `.claude/`). No parsing, no I/O beyond `Path`/`glob`.
   - `filesystem.py` — filesystem discovery functions (`discover_main_sessions`, `discover_subagent_runs`, `discover_agent_defs`, `discover_available_skills`)
   - `models.py` — result dataclasses (`MainSessionFile`, `SubagentRun`, `AgentDefFile`)
@@ -17,6 +17,12 @@ agentlens reads Claude Code session logs (JSONL under `~/.claude/projects/`) and
   - `operations.py` — all upsert/query functions
 - **`ingest/`** — orchestration: resolves a CLI target, then calls into `parser` to parse it and `store` to persist it. Also owns the bulk `ingest_all` walk over `projects/**`. Cross-cutting by design — don't fold it into `discovery/`, `parser/`, or `store/`.
   - `orchestrator.py` — `IngestRunner` class (owns connection + caches for bulk runs), `resolve_target`, `ingest_target`, `persist_parsed_session`, `ingest_all`
+- **`judge/`** — LLM judge layer (Phase 3): pluggable scoring interface, `claude -p` subprocess backend, rubric definition, transcript view preparation, and the scoring loop with verdict persistence.
+  - `protocol.py` — `DimensionScore` and `Verdict` frozen dataclasses, `Judge` Protocol (single `score()` method)
+  - `transcript_view.py` — `build_transcript_view(parsed, jsonl_path)` produces a ~10-12KB structured text from a session for the judge to score
+  - `rubric.py` — `RUBRIC_VERSION` (manual semver), `RUBRIC_PROMPT_TEMPLATE`, `VERDICT_JSON_SCHEMA`, `DIMENSION_NAMES`
+  - `claude_cli.py` — `ClaudeCliJudge` class (subprocess backend using `claude -p` headless mode)
+  - `scoring.py` — `ScoringLoop` class (find unscored sessions, call judge, persist verdicts), `ScoringResult` dataclass
 - **`aggregation/`** — derive the `fact_session` per-spawn grain from parsed sessions: event-derived tool counts joined with transcript-read usage/turn/duration, the `n_duplicate_tool_calls` rule, and the declared-vs-fired skill bridge. Reads facts; emits counts and booleans, never verdicts ([ADR 0003](docs/adr/0003-deterministic-layer-emits-counts-not-verdicts.md)).
   - `derivation.py` — `derive_fact_session`, `count_duplicate_tool_calls`, `derive_skill_bridge`
 - **`reporting/`** — windowed rollups over the store: window resolution, prior-window deltas, low-volume guard, intra-session parent lens, and the deterministic verdict-JSON slice. Reads the store only; never ingests.
@@ -66,15 +72,21 @@ tests/
 └── unit/
     ├── __init__.py
     ├── test_aggregation.py
+    ├── test_claude_cli.py
     ├── test_cli.py
     ├── test_discovery.py
     ├── test_ingest.py
+    ├── test_judge_protocol.py
     ├── test_parser.py
     ├── test_reporting.py
-    └── test_store.py
+    ├── test_rubric.py
+    ├── test_score_cli.py
+    ├── test_scoring.py
+    ├── test_store.py
+    └── test_transcript_view.py
 ```
 
-When integration tests arrive (Phase 3 judge, real filesystem), they'll go in `tests/integration/` with a `@pytest.mark.integration` marker.
+When integration tests arrive (real filesystem, live `claude -p` calls), they'll go in `tests/integration/` with a `@pytest.mark.integration` marker.
 
 ## Module conventions
 
