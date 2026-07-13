@@ -204,8 +204,121 @@ def test_bash_command_truncation(tmp_path: Path) -> None:
     assert long_command not in tool_sequence_section
 
 
+def test_large_final_report_stays_under_budget(tmp_path: Path) -> None:
+    jsonl_path = tmp_path / "session.jsonl"
+    huge_report = "x" * 1_000_000
+    _write_jsonl(
+        jsonl_path,
+        [
+            _first_user_record("Do the thing."),
+            _tool_use_record("tu_1", "Read", {"file_path": "src/foo.py"}),
+            _tool_result_record("tu_1", "file contents here"),
+            _final_text_record(huge_report),
+        ],
+    )
+    parsed = _parsed_session()
+
+    view = build_transcript_view(parsed, jsonl_path)
+
+    assert len(view.encode("utf-8")) <= MAX_VIEW_SIZE_BYTES
+    assert TRUNCATION_MARKER in view
+    for header in (
+        "## Task",
+        "## Agent Identity",
+        "## Deterministic Facts",
+        "## Tool Sequence",
+        "## Errors & Denials",
+        "## Final Report",
+    ):
+        assert header in view
+
+
+def test_huge_tool_history_stays_under_budget(tmp_path: Path) -> None:
+    n_tool_calls = 500
+    jsonl_path = tmp_path / "session.jsonl"
+    records: list[dict[str, object]] = [_first_user_record("Do a huge multi-step task.")]
+    events: list[ToolEventRecord] = []
+    for i in range(n_tool_calls):
+        tool_use_id = f"tu_{i}"
+        records.append(_tool_use_record(tool_use_id, "Read", {"file_path": f"src/file_{i}.py"}))
+        if i == 250:
+            records.append(
+                _tool_result_record(tool_use_id, "boom: permission denied", is_error=True)
+            )
+        else:
+            records.append(_tool_result_record(tool_use_id, f"contents of file {i}"))
+        events.append(
+            ToolEventRecord(
+                session_id="test-session",
+                seq=i,
+                tool_name="Read",
+                is_error=(i == 250),
+                denial_kind=None,
+                ts="2026-01-01T00:00:00Z",
+                input_hash=f"hash{i}",
+                output_bytes=100,
+            )
+        )
+    records.append(_final_text_record("## Summary\nAll files reviewed."))
+    _write_jsonl(jsonl_path, records)
+    parsed = _parsed_session(events=events)
+
+    view = build_transcript_view(parsed, jsonl_path)
+
+    assert len(view.encode("utf-8")) <= MAX_VIEW_SIZE_BYTES
+    for header in (
+        "## Task",
+        "## Agent Identity",
+        "## Deterministic Facts",
+        "## Tool Sequence",
+        "## Errors & Denials",
+        "## Final Report",
+    ):
+        assert header in view
+    errors_section = view.split("## Errors & Denials")[1].split("## Final Report")[0]
+    assert "boom: permission denied" in errors_section
+
+
+def test_errors_preserved_in_truncated_view(tmp_path: Path) -> None:
+    n_tool_calls = 500
+    jsonl_path = tmp_path / "session.jsonl"
+    records: list[dict[str, object]] = [_first_user_record("Do a huge multi-step task.")]
+    events: list[ToolEventRecord] = []
+    for i in range(n_tool_calls):
+        tool_use_id = f"tu_{i}"
+        records.append(_tool_use_record(tool_use_id, "Read", {"file_path": f"src/file_{i}.py"}))
+        if i == 250:
+            records.append(
+                _tool_result_record(tool_use_id, "distinctive-error-marker-250", is_error=True)
+            )
+        else:
+            records.append(_tool_result_record(tool_use_id, f"contents of file {i}"))
+        events.append(
+            ToolEventRecord(
+                session_id="test-session",
+                seq=i,
+                tool_name="Read",
+                is_error=(i == 250),
+                denial_kind=None,
+                ts="2026-01-01T00:00:00Z",
+                input_hash=f"hash{i}",
+                output_bytes=100,
+            )
+        )
+    records.append(_final_text_record("## Summary\nAll files reviewed."))
+    _write_jsonl(jsonl_path, records)
+    parsed = _parsed_session(events=events)
+
+    view = build_transcript_view(parsed, jsonl_path)
+
+    errors_section = view.split("## Errors & Denials")[1].split("## Final Report")[0]
+    assert "distinctive-error-marker-250" in errors_section
+
+
 def test_view_size_reasonable(tmp_path: Path) -> None:
-    n_tool_calls = 79
+    # Stays at or below TOOL_SEQUENCE_HEAD + TOOL_SEQUENCE_TAIL (50) so the
+    # Tool Sequence section is rendered in full, unsampled.
+    n_tool_calls = 45
     jsonl_path = tmp_path / "session.jsonl"
     records: list[dict[str, object]] = [_first_user_record("Do a large multi-step task.")]
     events: list[ToolEventRecord] = []

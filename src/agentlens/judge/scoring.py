@@ -180,7 +180,12 @@ class ScoringLoop:
             raise JudgeError(f"no transcript path provided for session {session.session_id}")
 
         parsed = _to_parsed_session(session, events=_fetch_events(self.conn, session.session_id))
-        transcript_view = build_transcript_view(parsed, jsonl_path)
+        try:
+            transcript_view = build_transcript_view(parsed, jsonl_path)
+        except (OSError, UnicodeError) as exc:
+            raise JudgeError(
+                f"failed to read transcript for {session.session_id} at {jsonl_path}"
+            ) from exc
         verdict = self.judge.score(transcript_view, self.rubric_version)
         return replace(
             verdict,

@@ -42,7 +42,7 @@ Early development. **Phases 0–2 are complete**: the CLI scaffold, the full SQL
 | 0 | Scaffold & contracts (CLI, schema DDL, verdict-JSON shape) | ✅ Done |
 | 1 | Deterministic parser core (no LLM) | ✅ Done |
 | 2 | Deterministic signals & aggregation (windows, deltas) | ✅ Done |
-| 3 | LLM judge (pluggable, `claude -p` backend, rubric v1) | Planned |
+| 3 | LLM judge (pluggable, `claude -p` backend, rubric v1) | ✅ Done |
 | 4 | Design system for the HTML report | Planned |
 | 5 | Renderers (markdown, JSON, terminal, HTML) | Planned |
 
