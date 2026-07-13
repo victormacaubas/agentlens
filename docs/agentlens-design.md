@@ -257,7 +257,7 @@ Repo init, language/runtime decision (see Open Decisions), CLI skeleton with `se
 ### Phase 1 — Parser core (deterministic, no LLM) (*COMPLETED*)
 Discover main sessions (`projects/**/*.jsonl`), subagent runs (`projects/**/<sid>/subagents/agent-*.jsonl`) + their `.meta.json` sidecars, and agent defs (`.claude/agents/**`). Parse into `fact_tool_event` + `dim_agent`, persist to SQLite. Path-based parent linkage + `.meta.json` pairing + name-resolution fallback chain. Ingest `main` sessions too (`session_kind`), even though they aren't scored until v2. Single-session path first. **Exit:** point it at the sample `agent-*.jsonl` (+ meta) and get a correctly populated store with parent lineage resolved. ~60% of the value ships here.
 
-### Phase 2 — Deterministic signals & aggregation
+### Phase 2 — Deterministic signals & aggregation (*COMPLETED*)
 Derive `fact_session` from events, build `bridge_session_skill` (declared/available/fired), implement windows + prior-window deltas + low-volume guards, emit the deterministic slice of the verdict JSON. **Exit:** `report --since 7d` produces real numbers with no LLM.
 
 ### Phase 3 — LLM judge

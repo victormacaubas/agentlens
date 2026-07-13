@@ -19,6 +19,8 @@ def render_terminal_summary(result: ReportResult) -> str:
     for agent_result in result.agents:
         agg = agent_result.aggregate
         line = f"{agg.agent_type}: {agg.n_spawns} spawns, {agg.n_failures} failures"
+        if agg.avg_verdict_score is not None:
+            line += f", avg score: {agg.avg_verdict_score:.1f}/5"
         if agg.n_denial_spawns:
             line += f", {agg.n_denial_spawns} hit denials"
         if agent_result.insufficient_data:
