@@ -17,7 +17,6 @@ from agentlens.judge.rubric import DIMENSION_NAMES, RUBRIC_PROMPT_TEMPLATE, VERD
 DEFAULT_MODEL: Final[str] = "sonnet"
 DEFAULT_TIMEOUT_SECONDS: Final[int] = 60
 MAX_TURNS: Final[str] = "3"
-ALLOWED_TOOLS: Final[str] = "Read,Grep"
 CLAUDE_EXECUTABLE: Final[str] = "claude"
 OUTPUT_EXCERPT_MAX_CHARS: Final[int] = 500
 
@@ -53,6 +52,8 @@ class ClaudeCliJudge:
             raise JudgeTimeoutError(
                 f"claude -p exceeded {self.timeout_seconds}s timeout"
             ) from exc
+        except OSError as exc:
+            raise JudgeError(f"failed to launch claude subprocess: {exc}") from exc
 
         if result.returncode != 0:
             raise JudgeError(
@@ -84,10 +85,6 @@ class ClaudeCliJudge:
             self.model,
             "--json-schema",
             json.dumps(VERDICT_JSON_SCHEMA),
-            "--permission-mode",
-            "dontAsk",
-            "--allowedTools",
-            ALLOWED_TOOLS,
             "--max-turns",
             MAX_TURNS,
             "--bare",
@@ -127,9 +124,7 @@ def _build_verdict(envelope: dict[str, Any], *, rubric_version: str, judge_model
     ):
         raise JudgeError("structured_output.suggested_fixes must be a list of strings")
 
-    overall_score = structured_output.get("overall_score")
-    if not isinstance(overall_score, (int, float)):
-        raise JudgeError("structured_output.overall_score must be a number")
+    overall_score = sum(d.score for d in dimensions.values()) / len(dimensions)
 
     raw_usage = envelope.get("usage")
     usage: dict[str, Any] = raw_usage if isinstance(raw_usage, dict) else {}
@@ -144,7 +139,7 @@ def _build_verdict(envelope: dict[str, Any], *, rubric_version: str, judge_model
         rubric_version=rubric_version,
         judge_model=judge_model,
         dimensions=dimensions,
-        overall_score=float(overall_score),
+        overall_score=overall_score,
         suggested_fixes=suggested_fixes,
         judge_cost_usd=float(total_cost_usd) if isinstance(total_cost_usd, (int, float)) else 0.0,
         judge_input_tokens=int(input_tokens) if isinstance(input_tokens, (int, float)) else 0,
@@ -164,7 +159,16 @@ def _parse_dimensions(structured_output: dict[str, Any]) -> dict[str, DimensionS
             raise JudgeError(f"structured_output.dimensions is missing required key {name!r}")
         score = raw_dimension.get("score")
         evidence = raw_dimension.get("evidence")
-        if not isinstance(score, int) or not isinstance(evidence, list) or not all(
+        if (
+            not isinstance(score, int)
+            or isinstance(score, bool)
+            or score < 0
+            or score > 5
+        ):
+            raise JudgeError(
+                f"structured_output.dimensions[{name!r}].score must be an integer in 0-5"
+            )
+        if not isinstance(evidence, list) or not all(
             isinstance(item, str) for item in evidence
         ):
             raise JudgeError(f"structured_output.dimensions[{name!r}] has an invalid shape")

@@ -217,6 +217,90 @@ def test_idempotent_rerun(tmp_path: Path) -> None:
         conn.close()
 
 
+def test_missing_transcript_skipped_and_next_scored(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "store.db")
+    try:
+        session_ids = ["s1", "s2"]
+        jsonl_paths = _seed_sessions(conn, tmp_path, session_ids)
+        # Drop s1's transcript path entirely: `_score_session` raises
+        # JudgeError("no transcript path provided...") for a missing key.
+        del jsonl_paths["s1"]
+        sessions = [_session_record(sid) for sid in session_ids]
+        judge = MockJudge()
+        loop = _make_loop(conn, judge)
+
+        result = loop.run(sessions, jsonl_paths=jsonl_paths)
+
+        assert result.skipped == 1
+        assert result.scored == 1
+        assert result.aborted is False
+        scored_ids = {
+            row[0] for row in conn.execute("SELECT session_id FROM fact_verdict").fetchall()
+        }
+        assert scored_ids == {"s2"}
+    finally:
+        conn.close()
+
+
+def test_unreadable_transcript_skipped(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "store.db")
+    try:
+        session_ids = ["s1", "s2"]
+        jsonl_paths = _seed_sessions(conn, tmp_path, session_ids)
+        # Point s1's "transcript" at a directory: reading it raises
+        # IsADirectoryError, a subclass of OSError.
+        jsonl_paths["s1"] = tmp_path
+        sessions = [_session_record(sid) for sid in session_ids]
+        judge = MockJudge()
+        loop = _make_loop(conn, judge)
+
+        result = loop.run(sessions, jsonl_paths=jsonl_paths)
+
+        assert result.skipped == 1
+        assert result.scored == 1
+        assert result.aborted is False
+    finally:
+        conn.close()
+
+
+def test_invalid_utf8_transcript_skipped(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "store.db")
+    try:
+        session_ids = ["s1", "s2"]
+        jsonl_paths = _seed_sessions(conn, tmp_path, session_ids)
+        jsonl_paths["s1"].write_bytes(b"\x80\x81\x82")
+        sessions = [_session_record(sid) for sid in session_ids]
+        judge = MockJudge()
+        loop = _make_loop(conn, judge)
+
+        result = loop.run(sessions, jsonl_paths=jsonl_paths)
+
+        assert result.skipped == 1
+        assert result.scored == 1
+        assert result.aborted is False
+    finally:
+        conn.close()
+
+
+def test_io_failure_counts_toward_consecutive_abort(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "store.db")
+    try:
+        session_ids = ["s1", "s2", "s3", "s4"]
+        jsonl_paths = _seed_sessions(conn, tmp_path, session_ids)
+        for sid in ("s2", "s3", "s4"):
+            del jsonl_paths[sid]
+        sessions = [_session_record(sid) for sid in session_ids]
+        judge = MockJudge()
+        loop = _make_loop(conn, judge)
+
+        result = loop.run(sessions, jsonl_paths=jsonl_paths)
+
+        assert result.aborted is True
+        assert result.scored == 1
+    finally:
+        conn.close()
+
+
 def test_find_unscored_filters_by_window_and_model(tmp_path: Path) -> None:
     conn = create_store(tmp_path / "store.db")
     try:

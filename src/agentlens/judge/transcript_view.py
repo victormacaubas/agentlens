@@ -24,6 +24,17 @@ NO_TASK_DESCRIPTION: Final[str] = "(no task description)"
 UNKNOWN_PATH: Final[str] = "?"
 TOKENS_PER_K: Final[int] = 1000
 
+# PERF-01: the view must stay under a hard byte ceiling regardless of how
+# large the raw transcript is. Fixed sections (Task, Identity, Facts,
+# Errors & Denials) are already bounded; the remaining budget is split
+# between the two unbounded sections (Final Report, Tool Sequence).
+VIEW_MAX_BYTES: Final[int] = 20_480
+TOOL_SEQUENCE_HEAD: Final[int] = 40
+TOOL_SEQUENCE_TAIL: Final[int] = 10
+_REPORT_BUDGET_FRACTION: Final[float] = 0.6
+_SECTION_SEPARATOR: Final[str] = "\n\n"
+_NUM_SECTIONS: Final[int] = 6
+
 _EXIT_CODE_RE: Final[re.Pattern[str]] = re.compile(r"^Exit code (\d+)")
 
 
@@ -40,21 +51,58 @@ class _ToolCall:
 
 def build_transcript_view(parsed: ParsedSession, jsonl_path: Path) -> str:
     """Build the structured text document a judge scores instead of the raw
-    JSONL transcript (design D1): Task, Agent Identity, Deterministic Facts,
-    Tool Sequence, Errors & Denials, Final Report.
+    JSONL transcript (design D1/D3): Task, Agent Identity, Deterministic
+    Facts, Tool Sequence, Errors & Denials, Final Report.
+
+    The result is byte-budgeted to `VIEW_MAX_BYTES`: the four fixed sections
+    (Task, Identity, Facts, Errors & Denials) are already bounded, and the
+    remaining budget is split between the two unbounded sections (Final
+    Report, Tool Sequence), reallocating any unused share from one to the
+    other before truncating whichever still exceeds its budget.
     """
     records = read_jsonl_records(jsonl_path)
     tool_calls = _extract_tool_calls(records)
 
+    task_section = _build_task_section(_extract_task_description(records, parsed))
+    identity_section = _build_identity_section(parsed)
+    facts_section = _build_facts_section(parsed)
+    errors_section = _build_errors_section(tool_calls)
+
+    fixed_bytes = sum(
+        len(section.encode("utf-8"))
+        for section in (task_section, identity_section, facts_section, errors_section)
+    )
+    separator_overhead = len(_SECTION_SEPARATOR.encode("utf-8")) * (_NUM_SECTIONS - 1)
+    remaining_budget = max(VIEW_MAX_BYTES - fixed_bytes - separator_overhead, 0)
+
+    report_section_full = f"## Final Report\n{_extract_final_report(records)}"
+    tool_section_full = f"## Tool Sequence\n{_build_tool_sequence_body(tool_calls)}"
+
+    report_budget = int(remaining_budget * _REPORT_BUDGET_FRACTION)
+    tool_budget = remaining_budget - report_budget
+
+    report_natural_bytes = len(report_section_full.encode("utf-8"))
+    tool_natural_bytes = len(tool_section_full.encode("utf-8"))
+
+    if report_natural_bytes <= report_budget:
+        tool_budget += report_budget - report_natural_bytes
+        report_budget = report_natural_bytes
+    elif tool_natural_bytes <= tool_budget:
+        report_budget += tool_budget - tool_natural_bytes
+        tool_budget = tool_natural_bytes
+
+    final_report_section = _truncate_bytes(report_section_full, max_bytes=report_budget)
+    tool_sequence_section = _truncate_bytes(tool_section_full, max_bytes=tool_budget)
+
     sections = [
-        _build_task_section(_extract_task_description(records, parsed)),
-        _build_identity_section(parsed),
-        _build_facts_section(parsed),
-        _build_tool_sequence_section(tool_calls),
-        _build_errors_section(tool_calls),
-        _build_final_report_section(_extract_final_report(records)),
+        task_section,
+        identity_section,
+        facts_section,
+        tool_sequence_section,
+        errors_section,
+        final_report_section,
     ]
-    return "\n\n".join(sections)
+    return _SECTION_SEPARATOR.join(sections)
 
 
 def _display(value: object) -> str:
@@ -65,6 +113,22 @@ def _truncate(text: str, *, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
     return text[:max_chars] + TRUNCATION_MARKER
+
+
+def _truncate_bytes(text: str, *, max_bytes: int, marker: str = TRUNCATION_MARKER) -> str:
+    """Truncate `text` to at most `max_bytes` UTF-8 bytes, appending `marker`
+    when truncation occurs. Never returns text whose encoded length exceeds
+    `max_bytes` under normal (non-degenerate) budgets.
+    """
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+    marker_bytes = marker.encode("utf-8")
+    if max_bytes <= len(marker_bytes):
+        return marker.encode("utf-8")[: max(max_bytes, 0)].decode("utf-8", errors="ignore")
+    budget = max_bytes - len(marker_bytes)
+    truncated = encoded[:budget].decode("utf-8", errors="ignore")
+    return truncated + marker
 
 
 def _format_tokens_k(tokens: int) -> str:
@@ -220,10 +284,44 @@ def _build_facts_section(parsed: ParsedSession) -> str:
     return "## Deterministic Facts\n" + "\n".join(lines)
 
 
-def _build_tool_sequence_section(tool_calls: list[_ToolCall]) -> str:
-    lines = [f"{i}. {_summarize_tool_call(call)}" for i, call in enumerate(tool_calls, start=1)]
-    body = "\n".join(lines) if lines else "(no tool calls)"
-    return f"## Tool Sequence\n{body}"
+def _build_tool_sequence_body(tool_calls: list[_ToolCall]) -> str:
+    """Render the Tool Sequence body, sampling to head/tail when there are
+    more calls than `TOOL_SEQUENCE_HEAD + TOOL_SEQUENCE_TAIL`. Every
+    error/denial entry that would otherwise fall in the omitted middle range
+    is preserved so critical facts survive the sampling.
+    """
+    total = len(tool_calls)
+    if total == 0:
+        return "(no tool calls)"
+    if total <= TOOL_SEQUENCE_HEAD + TOOL_SEQUENCE_TAIL:
+        return "\n".join(
+            f"{i}. {_summarize_tool_call(call)}" for i, call in enumerate(tool_calls, start=1)
+        )
+
+    head = tool_calls[:TOOL_SEQUENCE_HEAD]
+    tail_start_index = total - TOOL_SEQUENCE_TAIL
+    tail = tool_calls[tail_start_index:]
+    middle = tool_calls[TOOL_SEQUENCE_HEAD:tail_start_index]
+
+    lines = [f"{i}. {_summarize_tool_call(call)}" for i, call in enumerate(head, start=1)]
+
+    omitted = total - TOOL_SEQUENCE_HEAD - TOOL_SEQUENCE_TAIL
+    lines.append(f"... [{omitted} calls omitted] ...")
+
+    preserved = [
+        (idx, call)
+        for idx, call in enumerate(middle, start=TOOL_SEQUENCE_HEAD + 1)
+        if call.is_error or call.denial_kind is not None
+    ]
+    if preserved:
+        lines.append("Preserved errors/denials from omitted range:")
+        lines.extend(f"{idx}. {_summarize_tool_call(call)}" for idx, call in preserved)
+
+    lines.extend(
+        f"{i}. {_summarize_tool_call(call)}"
+        for i, call in enumerate(tail, start=tail_start_index + 1)
+    )
+    return "\n".join(lines)
 
 
 def _build_errors_section(tool_calls: list[_ToolCall]) -> str:
@@ -235,10 +333,6 @@ def _build_errors_section(tool_calls: list[_ToolCall]) -> str:
         lines.append(f"- [step {i}] {call.tool_name} {kind}: {_error_excerpt(call.result_content)}")
     body = "\n".join(lines) if lines else "(none)"
     return f"## Errors & Denials\n{body}"
-
-
-def _build_final_report_section(final_report: str) -> str:
-    return f"## Final Report\n{final_report}"
 
 
 def _extract_final_report(records: list[dict[str, Any]]) -> str:

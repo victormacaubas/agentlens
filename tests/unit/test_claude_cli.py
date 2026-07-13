@@ -22,7 +22,6 @@ MOCK_ENVELOPE: dict[str, Any] = {
             "efficiency": {"score": 3, "evidence": ["some unnecessary reads"]},
             "scope_adherence": {"score": 4, "evidence": ["stayed within brief"]},
         },
-        "overall_score": 4.0,
         "suggested_fixes": ["reduce redundant Read calls"],
     },
     "is_error": False,
@@ -111,6 +110,113 @@ def test_claude_not_on_path_raises_unavailable(mock_which: MagicMock, mock_run: 
 @patch("agentlens.judge.claude_cli.shutil.which", return_value="/usr/bin/claude")
 def test_malformed_json_raises_judge_error(mock_which: MagicMock, mock_run: MagicMock) -> None:
     mock_run.return_value = MagicMock(returncode=0, stdout="not valid json {{{", stderr="")
+    judge = ClaudeCliJudge(model="sonnet")
+
+    with pytest.raises(JudgeError):
+        judge.score("transcript text", "v1")
+
+
+def test_build_args_grants_no_filesystem_tools() -> None:
+    judge = ClaudeCliJudge(model="sonnet")
+
+    args = judge._build_args()
+
+    assert "--allowedTools" not in args
+    assert "Read" not in args
+    assert "Grep" not in args
+    assert "Bash" not in args
+    assert "--permission-mode" not in args
+    assert "dontAsk" not in args
+
+
+@patch("agentlens.judge.claude_cli.subprocess.run")
+@patch("agentlens.judge.claude_cli.shutil.which", return_value="/usr/bin/claude")
+def test_subprocess_launch_oserror_raises_judge_error(
+    mock_which: MagicMock, mock_run: MagicMock
+) -> None:
+    mock_run.side_effect = OSError("No such file or directory")
+    judge = ClaudeCliJudge(model="sonnet")
+
+    with pytest.raises(JudgeError):
+        judge.score("transcript text", "v1")
+
+
+@patch("agentlens.judge.claude_cli.subprocess.run")
+@patch("agentlens.judge.claude_cli.shutil.which", return_value="/usr/bin/claude")
+def test_overall_score_derived_not_trusted(mock_which: MagicMock, mock_run: MagicMock) -> None:
+    envelope: dict[str, Any] = {
+        "result": "",
+        "structured_output": {
+            "dimensions": {
+                "task_completion": {"score": 4, "evidence": ["completed all tasks"]},
+                "honesty": {"score": 5, "evidence": ["report matches actions"]},
+                "efficiency": {"score": 3, "evidence": ["some unnecessary reads"]},
+                "scope_adherence": {"score": 4, "evidence": ["stayed within brief"]},
+            },
+            "overall_score": 99,
+            "suggested_fixes": [],
+        },
+        "is_error": False,
+        "session_id": "judge-session-123",
+        "total_cost_usd": 0.019,
+        "usage": {"input_tokens": 3200, "output_tokens": 850},
+    }
+    mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(envelope), stderr="")
+    judge = ClaudeCliJudge(model="sonnet")
+
+    verdict = judge.score("transcript text", "v1")
+
+    assert verdict.overall_score == 4.0
+
+
+@patch("agentlens.judge.claude_cli.subprocess.run")
+@patch("agentlens.judge.claude_cli.shutil.which", return_value="/usr/bin/claude")
+def test_dimension_score_out_of_range_rejected(
+    mock_which: MagicMock, mock_run: MagicMock
+) -> None:
+    envelope: dict[str, Any] = {
+        "result": "",
+        "structured_output": {
+            "dimensions": {
+                "task_completion": {"score": 6, "evidence": ["completed all tasks"]},
+                "honesty": {"score": 5, "evidence": ["report matches actions"]},
+                "efficiency": {"score": 3, "evidence": ["some unnecessary reads"]},
+                "scope_adherence": {"score": 4, "evidence": ["stayed within brief"]},
+            },
+            "suggested_fixes": [],
+        },
+        "is_error": False,
+        "session_id": "judge-session-123",
+        "total_cost_usd": 0.019,
+        "usage": {"input_tokens": 3200, "output_tokens": 850},
+    }
+    mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(envelope), stderr="")
+    judge = ClaudeCliJudge(model="sonnet")
+
+    with pytest.raises(JudgeError):
+        judge.score("transcript text", "v1")
+
+
+@patch("agentlens.judge.claude_cli.subprocess.run")
+@patch("agentlens.judge.claude_cli.shutil.which", return_value="/usr/bin/claude")
+def test_dimension_score_negative_rejected(mock_which: MagicMock, mock_run: MagicMock) -> None:
+    envelope: dict[str, Any] = {
+        "result": "",
+        "structured_output": {
+            "dimensions": {
+                "task_completion": {"score": -1, "evidence": ["completed all tasks"]},
+                "honesty": {"score": 5, "evidence": ["report matches actions"]},
+                "efficiency": {"score": 3, "evidence": ["some unnecessary reads"]},
+                "scope_adherence": {"score": 4, "evidence": ["stayed within brief"]},
+            },
+            "suggested_fixes": [],
+        },
+        "is_error": False,
+        "session_id": "judge-session-123",
+        "total_cost_usd": 0.019,
+        "usage": {"input_tokens": 3200, "output_tokens": 850},
+    }
+    mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(envelope), stderr="")
     judge = ClaudeCliJudge(model="sonnet")
 
     with pytest.raises(JudgeError):

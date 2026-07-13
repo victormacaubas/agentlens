@@ -22,7 +22,6 @@ def test_verdict_json_schema_validates_good_verdict() -> None:
     assert VERDICT_JSON_SCHEMA["type"] == "object"
     assert set(VERDICT_JSON_SCHEMA["required"]) == {
         "dimensions",
-        "overall_score",
         "suggested_fixes",
     }
 
@@ -56,3 +55,19 @@ def test_rubric_prompt_template_mentions_all_dimensions() -> None:
     assert set(DIMENSION_NAMES) == EXPECTED_DIMENSION_NAMES
     for dimension_name in DIMENSION_NAMES:
         assert dimension_name in RUBRIC_PROMPT_TEMPLATE
+
+
+def test_schema_does_not_include_overall_score() -> None:
+    assert "overall_score" not in VERDICT_JSON_SCHEMA["properties"]
+    assert "overall_score" not in VERDICT_JSON_SCHEMA["required"]
+
+
+def test_rubric_prompt_contains_untrusted_warning() -> None:
+    prompt_lower = RUBRIC_PROMPT_TEMPLATE.lower()
+    assert "untrusted" in prompt_lower
+
+
+def test_rubric_prompt_does_not_ask_model_to_compute_overall() -> None:
+    prompt_lower = RUBRIC_PROMPT_TEMPLATE.lower()
+    assert "compute `overall_score`" not in prompt_lower
+    assert "compute an overall score" not in prompt_lower
