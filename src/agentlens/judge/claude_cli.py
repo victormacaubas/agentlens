@@ -1,13 +1,14 @@
-"""Claude CLI judge backend (design D1/D3): invokes `claude -p` in headless,
-non-interactive mode as a subprocess and parses its JSON envelope into a
-`Verdict`.
+"""Claude CLI judge backend: invokes `claude -p` in headless, non-interactive
+mode as a subprocess and parses its JSON envelope into a `Verdict`.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
+import tempfile
 from typing import Any, Final
 
 from agentlens.errors import JudgeError, JudgeTimeoutError, JudgeUnavailableError
@@ -19,6 +20,29 @@ DEFAULT_TIMEOUT_SECONDS: Final[int] = 60
 MAX_TURNS: Final[str] = "3"
 CLAUDE_EXECUTABLE: Final[str] = "claude"
 OUTPUT_EXCERPT_MAX_CHARS: Final[int] = 500
+
+# Omitting `--allowedTools` does not deny tools; it selects the CLI's default,
+# which grants the full built-in set. `--tools ""` removes the tools themselves.
+NO_TOOLS: Final[str] = ""
+
+# `user` cannot be dropped: under `--bare` it is the only auth channel the CLI
+# accepts. Excluding `project`/`local` keeps a repo-local settings file from
+# reconfiguring the judge.
+SETTING_SOURCES: Final[str] = "user"
+
+# Prefix match rather than an enumerated list: machines authenticate via
+# different variables (`ANTHROPIC_API_KEY`, or `ANTHROPIC_AUTH_TOKEN` plus
+# `ANTHROPIC_BASE_URL` behind a gateway).
+_ENV_PASSTHROUGH_NAMES: Final[frozenset[str]] = frozenset({"PATH", "HOME"})
+_ENV_PASSTHROUGH_PREFIX: Final[str] = "ANTHROPIC_"
+
+# Loose substring match: the CLI's message carries a `·` separator whose exact
+# form is not worth depending on.
+_NOT_LOGGED_IN_MARKER: Final[str] = "not logged in"
+_AUTH_REMEDY: Final[str] = (
+    "set ANTHROPIC_API_KEY or configure apiKeyHelper (OAuth/keychain login "
+    "is not read under --bare)"
+)
 
 
 class ClaudeCliJudge:
@@ -40,22 +64,30 @@ class ClaudeCliJudge:
         self._check_claude_available()
         args = self._build_args()
 
-        try:
-            result = subprocess.run(
-                args,
-                input=transcript_view,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout_seconds,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise JudgeTimeoutError(
-                f"claude -p exceeded {self.timeout_seconds}s timeout"
-            ) from exc
-        except OSError as exc:
-            raise JudgeError(f"failed to launch claude subprocess: {exc}") from exc
+        # The subprocess must not inherit agentlens's working directory, which
+        # may contain a `.claude/settings.local.json` that would reconfigure it.
+        with tempfile.TemporaryDirectory() as tmp_cwd:
+            try:
+                result = subprocess.run(
+                    args,
+                    input=transcript_view,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.timeout_seconds,
+                    cwd=tmp_cwd,
+                    env=_build_subprocess_env(),
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise JudgeTimeoutError(
+                    f"claude -p exceeded {self.timeout_seconds}s timeout"
+                ) from exc
+            except OSError as exc:
+                raise JudgeError(f"failed to launch claude subprocess: {exc}") from exc
 
         if result.returncode != 0:
+            unavailable = _detect_unavailable(result.stdout)
+            if unavailable is not None:
+                raise unavailable
             raise JudgeError(
                 f"claude -p exited with code {result.returncode}; "
                 f"stderr: {_excerpt(result.stderr)}; stdout: {_excerpt(result.stdout)}"
@@ -88,9 +120,44 @@ class ClaudeCliJudge:
             "--max-turns",
             MAX_TURNS,
             "--bare",
+            "--tools",
+            NO_TOOLS,
+            "--setting-sources",
+            SETTING_SOURCES,
             "--append-system-prompt",
             RUBRIC_PROMPT_TEMPLATE,
         ]
+
+
+def _build_subprocess_env() -> dict[str, str]:
+    """Build the subprocess environment explicitly instead of inheriting
+    agentlens's: `PATH`, `HOME`, and any `ANTHROPIC_*` variable are forwarded
+    so the machine's auth channel keeps working; everything else is dropped.
+    """
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if name in _ENV_PASSTHROUGH_NAMES or name.startswith(_ENV_PASSTHROUGH_PREFIX)
+    }
+
+
+def _detect_unavailable(stdout: str) -> JudgeUnavailableError | None:
+    """Check a non-zero-exit envelope for the CLI's not-logged-in response.
+
+    Returns `None` for anything not recognizably that response, including
+    stdout that isn't valid JSON, so an unrelated failure keeps its own error
+    rather than being reported as missing credentials.
+    """
+    try:
+        envelope = json.loads(stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(envelope, dict):
+        return None
+    result_text = envelope.get("result")
+    if not isinstance(result_text, str) or _NOT_LOGGED_IN_MARKER not in result_text.lower():
+        return None
+    return JudgeUnavailableError(f"claude -p reported it is not logged in; {_AUTH_REMEDY}")
 
 
 def _excerpt(text: str) -> str:

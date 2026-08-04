@@ -1,4 +1,4 @@
-"""Build the judge's prepared transcript view (design D1): a condensed text
+"""Build the judge's prepared transcript view: a condensed text
 document derived from a `ParsedSession` and its raw JSONL transcript, sized
 for a single judge call rather than the full raw transcript.
 """
@@ -51,8 +51,8 @@ class _ToolCall:
 
 def build_transcript_view(parsed: ParsedSession, jsonl_path: Path) -> str:
     """Build the structured text document a judge scores instead of the raw
-    JSONL transcript (design D1/D3): Task, Agent Identity, Deterministic
-    Facts, Tool Sequence, Errors & Denials, Final Report.
+    JSONL transcript: Task, Agent Identity, Deterministic Facts, Tool
+    Sequence, Errors & Denials, Final Report.
 
     The result is byte-budgeted to `VIEW_MAX_BYTES`: the four fixed sections
     (Task, Identity, Facts, Errors & Denials) are already bounded, and the

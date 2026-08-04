@@ -93,7 +93,7 @@ def flags_partial(text: str | None) -> bool:
     `partial` matches `partially complete` -> False, `The task was
     blocked.` -> True. The checkbox marker matches as a plain substring.
 
-    A raw signal, not a completion verdict (D2) — the judge owns the real
+    A raw signal, not a completion verdict — the judge owns the real
     completion assessment.
     """
     if not text:
@@ -121,7 +121,7 @@ def _skill_names_from_meta_record(record: dict[str, Any]) -> list[str]:
     """Resolve fired skill names from an `isMeta:true` injection-marker record.
 
     Only records carrying `<skill-format>true` in their text yield names —
-    `SKILL.md` reads and other meta records are ignored (D3, noisy).
+    `SKILL.md` reads and other meta records are too noisy to count.
     """
     if record.get("isMeta") is not True:
         return []
@@ -162,8 +162,8 @@ def _estimate_output_bytes(content: Any) -> int:
 class TranscriptFacts:
     """Facts extracted from one transcript's records, in file order.
 
-    `n_turns`/usage/`duration_sec` are read directly from the transcript
-    (D1) — they are turn-level facts, not tool-event facts, so they cannot
+    `n_turns`/usage/`duration_sec` are read directly from the transcript —
+    they are turn-level facts, not tool-event facts, so they cannot
     be derived from `tool_events` alone.
     """
 
@@ -253,7 +253,7 @@ def extract_transcript_facts(
     `tool_result.tool_use_id` (confirmed present in real logs). Unknown
     record types, and `tool_result`s with no matching `tool_use`, are
     skipped rather than treated as errors. Usage (`message.usage`) is read
-    defensively per assistant turn (D1): a missing object or field
+    defensively per assistant turn: a missing object or field
     contributes zero and never aborts parsing.
     """
     tool_uses: dict[str, tuple[str, Any]] = {}

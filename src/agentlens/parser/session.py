@@ -26,8 +26,8 @@ _FRONTMATTER_DELIM: Final[str] = "---"
 @dataclass(frozen=True)
 class ParsedSession:
     """The parser's output for one session: events, identity/lineage, and
-    the transcript-read fields aggregation combines into `fact_session`
-    (D1) — usage/turns/duration are turn-level facts absent from
+    the transcript-read fields aggregation combines into `fact_session` —
+    usage/turns/duration are turn-level facts absent from
     `fact_tool_event`, so the parser returns them directly.
     """
 

@@ -57,32 +57,37 @@ Four stages, each a thin layer over the previous. Read-only against the user's `
 
 The LLM judge shells out to the user's existing `claude` CLI in headless mode. Behind a **pluggable interface** so an `ANTHROPIC_API_KEY` backend can be added for CI. Pin `--model`; it's part of the cache key.
 
-**Auth:** headless `claude -p` uses the user's existing login/stored credentials by default — no key needed. If `ANTHROPIC_API_KEY` is set in the subprocess env, it takes precedence (that's the CI backend).
+**Auth:** the judge runs with `--bare` (see below), and `--bare` skips keychain reads entirely. Under `--bare`, auth is strictly `ANTHROPIC_API_KEY` or an `apiKeyHelper` configured via user settings (`--setting-sources "user"`): OAuth login and keychain credentials are never read, regardless of what's logged in on the machine. An unauthenticated environment fails fast with a `Not logged in` response rather than hanging or silently degrading; see [ADR 0008](adr/0008-judge-invoked-without-tools.md) and the README's Limitations section.
 
-### Confirmed CLI contract (verified against current Claude Code docs)
+### Confirmed CLI contract (hardened; see `harden-judge-invocation`)
 
 Invocation for a read-only judge:
 
 ```bash
 claude -p "<prompt>" \
   --output-format json \
-  --model opus \
-  --append-system-prompt "<judge instructions; return JSON verdict>" \
-  --permission-mode dontAsk \
-  --allowedTools "Read,Grep" \
+  --model sonnet \
+  --json-schema "<verdict JSON schema>" \
   --max-turns 3 \
-  --bare
+  --bare \
+  --tools "" \
+  --setting-sources "user" \
+  --append-system-prompt "<judge instructions; return JSON verdict>"
 ```
+
+launched with an explicit temporary-directory `cwd` and an environment filtered to `PATH`, `HOME`, and any `ANTHROPIC_*` variable, never the process's inherited cwd or full environment.
 
 Flag notes for the implementation:
 
 - **`-p` / `--print`** — headless mode. Prompt is a **positional arg**; extra context can pipe via **stdin** (≤10MB — write large transcripts to a file and reference the path instead).
 - **`--output-format json`** — single JSON envelope (vs. `stream-json`, `text`). Use `json` for one-shot.
-- **`--permission-mode dontAsk`** — required, or the subprocess **hangs** waiting for approval. Prefer this over `--dangerously-skip-permissions` (which shows a one-time interactive warning on first use).
-- **`--allowedTools "Read,Grep"` + `--max-turns 3`** — keep the judge read-only and bounded.
+- **`--tools ""`**: the enforcing mechanism for a read-only, side-effect-free judge. `--tools <tools...>` selects from the built-in set; `""` disables all of them. This is stronger than an empty `--allowedTools`: `--allowedTools` (or omitting it) is a permission decision layered over a tool set that is still loaded, so a prompt-injected transcript can still reach a tool the allowlist forgot to exclude or that the CLI adds later. `--tools ""` removes the tools themselves, so there is nothing to aim at regardless of what the prompt requests. Verified empirically: the same canary-file-read prompt that succeeded under the old `--allowedTools`-omitted invocation returned `NO_TOOLS` once `--tools ""` was added.
+- **`--setting-sources "user"`**: drops `project` and `local`, so a `.claude/settings.local.json` in whatever directory agentlens happens to run from cannot reconfigure the judge. `user` must be kept (not `""`): it is the only setting source `--bare` accepts auth through, and `--setting-sources ""` alongside `--bare` was probed and returns `Not logged in`.
+- **`--max-turns 3`**: bounds the call now that there are no tools to loop on.
+- **Explicit `cwd` and filtered `env`**: the subprocess gets a temporary directory as `cwd` and an environment forwarding only `PATH`, `HOME`, and `ANTHROPIC_*`-prefixed variables (covers `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`). This is defense in depth: with `--tools ""` there is nothing to reach, but it is the control that holds if a future change reintroduces a tool.
 - **`--append-system-prompt`** (not `--system-prompt`, which *replaces* and drops Claude Code's foundation).
 - **`--model`** — aliases `opus` \| `sonnet` \| `haiku` \| `opusplan` (auto-update), or pin a full string like `claude-opus-4-8`. The chosen value goes into the cache key.
-- **`--bare`** — skips auto-discovery of hooks/skills/plugins/MCP/CLAUDE.md; faster and cleaner for this call.
+- **`--bare`** — skips auto-discovery of hooks/skills/plugins/MCP/CLAUDE.md. Retained for reproducibility, not just speed: a non-bare call's inherited hooks, CLAUDE.md, plugin context, and auto-memory vary by machine and working directory, which would make the judge's system context, and therefore its verdicts, incomparable across runs. The cost is that OAuth-only users cannot authenticate the judge; see the auth note above.
 
 **Response envelope** — parse `result` (the model's text) as the verdict; `is_error` (bool) to detect failures; `session_id`, `total_cost_usd`, `usage`, `duration_ms` for logging. If you later use `--json-schema` structured outputs, the validated object is in `structured_output` instead of `result`.
 

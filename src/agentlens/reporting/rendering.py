@@ -1,4 +1,4 @@
-"""Terminal rendering for the `report` command's output (D5)."""
+"""Terminal rendering for the `report` command's output."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from agentlens.reporting.queries import ReportResult
 
 
 def render_terminal_summary(result: ReportResult) -> str:
-    """A thin, human-readable terminal summary of `result` (D5)."""
+    """A thin, human-readable terminal summary of `result`."""
     lines = [
         f"window: {result.window.start.isoformat()} to {result.window.end.isoformat()} "
         f"({result.window.n_days}d)"

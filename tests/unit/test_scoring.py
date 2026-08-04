@@ -8,7 +8,9 @@ import sqlite3
 from datetime import date
 from pathlib import Path
 
-from agentlens.errors import JudgeError
+import pytest
+
+from agentlens.errors import JudgeError, JudgeUnavailableError
 from agentlens.judge.protocol import DimensionScore, Verdict
 from agentlens.judge.scoring import ScoringLoop
 from agentlens.reporting.date_window import WindowRange
@@ -167,6 +169,36 @@ def test_single_failure_skipped(tmp_path: Path) -> None:
             row[0] for row in conn.execute("SELECT session_id FROM fact_verdict").fetchall()
         }
         assert scored_ids == {"s1", "s3"}
+    finally:
+        conn.close()
+
+
+class _UnavailableJudge:
+    """A `Judge` stand-in whose every call raises `JudgeUnavailableError`,
+    simulating an unavailable judge backend (e.g. missing credentials)."""
+
+    def score(self, transcript_view: str, rubric_version: str) -> Verdict:
+        raise JudgeUnavailableError("claude -p reported it is not logged in")
+
+
+def test_judge_unavailable_error_propagates_as_hard_failure(tmp_path: Path) -> None:
+    """D4: `JudgeUnavailableError` is an environment problem, not a bad
+    session — it must propagate out of `run()` rather than being counted as
+    a per-session skip toward the consecutive-failure abort."""
+    conn = create_store(tmp_path / "store.db")
+    try:
+        session_ids = ["s1", "s2"]
+        jsonl_paths = _seed_sessions(conn, tmp_path, session_ids)
+        sessions = [_session_record(sid) for sid in session_ids]
+        loop = ScoringLoop(
+            judge=_UnavailableJudge(), conn=conn, rubric_version="v1", judge_model="sonnet"
+        )
+
+        with pytest.raises(JudgeUnavailableError):
+            loop.run(sessions, jsonl_paths=jsonl_paths)
+
+        n_verdicts = conn.execute("SELECT COUNT(*) FROM fact_verdict").fetchone()[0]
+        assert n_verdicts == 0
     finally:
         conn.close()
 

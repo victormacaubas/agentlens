@@ -79,9 +79,9 @@ def discover_available_skills(claude_home: Path) -> set[str]:
     """Best-effort discovery of skill names under `.claude/skills/**`.
 
     Returns the set of skill directory names found there; empty when the
-    tree is missing or unreadable. Advisory only (D3/`available`) — a
-    skill can be declared or fired without appearing here, e.g. one
-    provided by a plugin this scan does not resolve. Never raises.
+    tree is missing or unreadable. Advisory only: a skill can be declared
+    or fired without appearing here, e.g. one provided by a plugin this
+    scan does not resolve. Never raises.
     """
     skills_dir = claude_home / SKILLS_DIRNAME
     if not skills_dir.is_dir():

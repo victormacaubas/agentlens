@@ -1,7 +1,7 @@
 """Derive the deterministic `fact_session` grain and `bridge_session_skill`
 rows from a `ParsedSession` (Phase 2 — see `docs/agentlens-design.md` §8).
 
-Per D1, `fact_session` is not a pure rollup of `fact_tool_event`: tool
+`fact_session` is not a pure rollup of `fact_tool_event`: tool
 counts are aggregated from `ParsedSession.events` here, while usage, turn
 count, and duration are read directly off the transcript by the parser and
 passed straight through.
@@ -45,7 +45,7 @@ def _safe_date_from_ts(ts: str | None) -> str | None:
 
 def derive_fact_session(parsed: ParsedSession) -> SessionRecord:
     """Combine event-derived tool counts with the parser's transcript-read
-    usage/turn/duration fields into one `fact_session` row (D1)."""
+    usage/turn/duration fields into one `fact_session` row."""
     events = parsed.events
     n_reads = sum(1 for e in events if e.tool_name == "Read")
     n_edits = sum(1 for e in events if e.tool_name == "Edit")
@@ -95,7 +95,7 @@ def derive_fact_session(parsed: ParsedSession) -> SessionRecord:
 
 def count_duplicate_tool_calls(events: Sequence[ToolEventRecord]) -> int:
     """Session-wide count of `(tool_name, input_hash)` occurrences beyond
-    the first, for each distinct pair (D2/task 3.3) — not consecutive-only.
+    the first, for each distinct pair — not consecutive-only.
 
     Events with no `input_hash` (e.g. tool inputs that failed to hash) do
     not participate; they can neither confirm nor rule out a duplicate.
@@ -115,7 +115,7 @@ def derive_skill_bridge(
     declared_skills: Sequence[str] = (),
     available_skills: Iterable[str] = (),
 ) -> list[SkillBridgeRecord]:
-    """Union of declared and fired skills (D3) — a skill can fire without
+    """Union of declared and fired skills — a skill can fire without
     being declared (injection), so the row set is not just declared skills.
     """
     declared_set = set(declared_skills)
