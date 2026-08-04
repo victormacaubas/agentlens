@@ -32,7 +32,7 @@ class WindowRange:
         return (self.end - self.start).days
 
     def prior(self) -> WindowRange:
-        """The immediately preceding equal-length span (D5)."""
+        """The immediately preceding equal-length span."""
         span = timedelta(days=self.n_days)
         return WindowRange(start=self.start - span, end=self.start)
 

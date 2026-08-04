@@ -1,6 +1,6 @@
-"""Scoring loop (design D5/D6): finds subagent sessions lacking a verdict for
-the current `(rubric_version, judge_model)`, scores them via a `Judge`
-backend, and persists verdicts into `fact_verdict`.
+"""Scoring loop: finds subagent sessions lacking a verdict for the current
+`(rubric_version, judge_model)`, scores them via a `Judge` backend, and
+persists verdicts into `fact_verdict`.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Final
 
-from agentlens.errors import JudgeError
+from agentlens.errors import JudgeError, JudgeUnavailableError
 from agentlens.judge.protocol import Judge, Verdict
 from agentlens.judge.transcript_view import build_transcript_view
 from agentlens.parser.session import SESSION_KIND_SUBAGENT, ParsedSession
@@ -124,9 +124,14 @@ class ScoringLoop:
         jsonl_paths: dict[str, Path],
         on_progress: Callable[[ProgressEvent], None] | None = None,
     ) -> ScoringResult:
-        """Score each session, persisting a verdict on success and skipping
-        on per-session failure (D6). Aborts once `consecutive_failure_limit`
-        failures happen back to back.
+        """Score each session, persisting a verdict on success and skipping on
+        per-session failure. Aborts once `consecutive_failure_limit` failures
+        happen back to back.
+
+        Raises:
+            JudgeUnavailableError: The judge itself is unusable (e.g. missing
+                credentials). Propagates instead of being counted as a skip,
+                since no session will succeed until the caller fixes it.
         """
         scored = 0
         skipped = 0
@@ -138,6 +143,9 @@ class ScoringLoop:
         for idx, session in enumerate(sessions):
             try:
                 verdict = self._score_session(session, jsonl_paths=jsonl_paths)
+            except JudgeUnavailableError:
+                # Must precede the JudgeError clause below, which it subclasses.
+                raise
             except JudgeError as exc:
                 logger.warning(
                     "Skipping session %s: judge failed", session.session_id, exc_info=True

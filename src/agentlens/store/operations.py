@@ -48,7 +48,7 @@ def upsert_session_events(
 ) -> None:
     """Replace all `fact_tool_event` rows for `session_id` in one transaction.
 
-    Delete-then-insert per session_id gives idempotency (D6): re-running the
+    Delete-then-insert per session_id gives idempotency: re-running the
     same session produces the same row set, and a session's events are never
     duplicated across runs.
     """

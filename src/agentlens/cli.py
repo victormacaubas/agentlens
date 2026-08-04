@@ -35,7 +35,7 @@ from agentlens.store.schema import create_store, resolve_store_path
 
 CLAUDE_EXECUTABLE: Final[str] = "claude"
 
-# Conservative, hardcoded per-session cost estimates (design D7) — used only
+# Conservative, hardcoded per-session cost estimates — used only
 # to show the user a ballpark before the cost confirmation gate; the actual
 # cost comes from `ScoringResult.total_cost_usd` after scoring.
 PER_SESSION_COST_ESTIMATE: Final[dict[str, float]] = {
@@ -203,7 +203,7 @@ def score(
     Finds subagent sessions in the window missing a verdict for the current
     `(rubric_version, judge_model)`, scores them via the judge backend, and
     persists verdicts into `fact_verdict`. Reads and writes the store only —
-    never ingests (design D5): run `agentlens ingest` first.
+    never ingests: run `agentlens ingest` first.
     """
     store_path = resolve_store_path(store_override=ctx.obj.get("store"))
     claude_home = claude_home_override or Path.home() / ".claude"
@@ -300,7 +300,7 @@ def score(
 
 
 def _estimate_judge_cost(n_sessions: int, judge_model: str) -> float:
-    """Ballpark cost for scoring `n_sessions` with `judge_model` (design D7).
+    """Ballpark cost for scoring `n_sessions` with `judge_model`.
 
     Uses a conservative hardcoded per-session estimate; the real cost
     reported after scoring comes from the judge backend's own usage data.
@@ -312,7 +312,7 @@ def _estimate_judge_cost(n_sessions: int, judge_model: str) -> float:
 def _discover_jsonl_paths(claude_home: Path) -> dict[str, Path]:
     """Map each session's store key to its transcript path.
 
-    Subagent `fact_session` rows are keyed by `agent_id` (D1); main-session
+    Subagent `fact_session` rows are keyed by `agent_id`; main-session
     rows are keyed by `session_id`. Both live under the same `session_id`
     column in the store, so this maps `agent_id -> jsonl_path` for subagent
     runs and `session_id -> jsonl_path` for main sessions into one dict.

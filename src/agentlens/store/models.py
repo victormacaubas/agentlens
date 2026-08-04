@@ -33,7 +33,7 @@ class AgentDefRecord:
 
 @dataclass(frozen=True)
 class SessionRecord:
-    """One `fact_session` row: the per-spawn deterministic grain (D1).
+    """One `fact_session` row: the per-spawn deterministic grain.
 
     Event-derived counts (aggregated from `fact_tool_event`) and
     transcript-read fields (usage, turns, duration — a documented exception

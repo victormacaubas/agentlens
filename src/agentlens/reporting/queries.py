@@ -1,4 +1,4 @@
-"""Store queries and aggregate rollups for the `report` command (D5) —
+"""Store queries and aggregate rollups for the `report` command —
 `build_report` reads `fact_session` only and never ingests. Aggregates by
 `agent_type` (spawns, not parent sessions), computes a prior-window delta,
 applies the low-volume guard, and rolls spawns up per `parent_session_id`
@@ -31,7 +31,7 @@ _DELTA_FIELDS: Final[tuple[str, ...]] = (
 
 @dataclass(frozen=True)
 class AgentAggregate:
-    """Window rollup for one `agent_type`, counted in spawns (D5).
+    """Window rollup for one `agent_type`, counted in spawns.
 
     `avg_verdict_score` is `None` when no session in this aggregate's window
     has a judge verdict yet (verdict inclusion is opportunistic per the
@@ -64,7 +64,7 @@ class ParentLensRow:
 @dataclass(frozen=True)
 class AgentWindowResult:
     """One agent_type's current-window aggregate plus its trend, guarded
-    by `min_sessions_for_trend` (D5's low-volume guard)."""
+    by `min_sessions_for_trend`, the low-volume guard."""
 
     aggregate: AgentAggregate
     prior: AgentAggregate | None
@@ -137,7 +137,7 @@ def build_report(
     agent_type: str | None = None,
     min_sessions_for_trend: int = DEFAULT_MIN_SESSIONS_FOR_TREND,
 ) -> ReportResult:
-    """Query the store for one window and assemble the report (D5).
+    """Query the store for one window and assemble the report.
 
     Reads `fact_session` and, opportunistically, `fact_verdict` — never
     ingests. The prior-window delta compares against the immediately

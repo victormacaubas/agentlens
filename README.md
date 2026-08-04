@@ -96,6 +96,12 @@ Four stages, each a thin layer over the previous:
 
 The store is a star schema that keeps grains separate so windows (date filters) and prior-window deltas (self-joins) stay trivial. The grain of the primary fact is a **single agent run** — one row per spawn, never an agent *type*.
 
+## Limitations
+
+The LLM judge (`agentlens score`) shells out to the `claude` CLI in `--bare` headless mode, which skips keychain and OAuth login by design (a reproducible judge context, not just speed: a non-bare call would load hooks, `CLAUDE.md`, plugin context, and auto-memory into the judge's system context, and that inherited context varies by machine and directory, which would make verdicts incomparable across runs). Under `--bare`, the judge can authenticate only via `ANTHROPIC_API_KEY` or a configured `apiKeyHelper`, and OAuth/keychain login is not supported.
+
+If neither is configured, `agentlens score` fails fast with a `JudgeUnavailableError` naming the exact remedy (set `ANTHROPIC_API_KEY`, or configure `apiKeyHelper` in your user Claude settings) rather than retrying or silently degrading.
+
 ## Development
 
 Local development uses **uv** with a project virtual environment (`.venv`). See [`CLAUDE.md`](CLAUDE.md) for the full contributor workflow.
