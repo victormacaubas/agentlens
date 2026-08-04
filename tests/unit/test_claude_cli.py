@@ -14,11 +14,6 @@ import pytest
 from agentlens.errors import JudgeError, JudgeTimeoutError, JudgeUnavailableError
 from agentlens.judge.claude_cli import ClaudeCliJudge
 
-# Recorded from the installed CLI with credentials stripped: exit code 1,
-# empty stderr, a valid JSON envelope on stdout naming the failure.
-# `result` carries a `·` (U+00B7) separator, which is exactly why
-# detection is a loose case-insensitive substring match rather than a
-# full-string comparison.
 NOT_LOGGED_IN_ENVELOPE: dict[str, Any] = {
     "is_error": True,
     "duration_api_ms": 0,

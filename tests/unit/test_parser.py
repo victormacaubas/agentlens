@@ -104,11 +104,6 @@ def test_resolve_name_consistent_signals_not_ambiguous() -> None:
     assert resolution.ambiguous is False
 
 
-# --------------------------------------------------------------------------
-# 4.1 / 4.2 — defensive reads and tool_use/tool_result pairing
-# --------------------------------------------------------------------------
-
-
 def _assistant_tool_use(
     tool_use_id: str, tool_name: str, tool_input: dict[str, object]
 ) -> dict[str, object]:
@@ -267,11 +262,6 @@ def test_read_jsonl_records_skips_unknown_record_types(tmp_path: Path) -> None:
     records = read_jsonl_records(path)
     facts = extract_transcript_facts(records, session_id="s1")
     assert facts.tool_events == []  # never aborts, just yields nothing to pair
-
-
-# --------------------------------------------------------------------------
-# 4.3 / 4.4 — session-level parsing: lineage and session_kind
-# --------------------------------------------------------------------------
 
 
 def test_parse_main_session_has_no_lineage(tmp_path: Path) -> None:
@@ -567,11 +557,6 @@ def test_extract_transcript_facts_flags_partial_true_on_final_text() -> None:
     ]
     facts = extract_transcript_facts(records, session_id="s1")
     assert facts.final_report_flagged_partial is True
-
-
-# --------------------------------------------------------------------------
-# ParsedSession: usage/turns/duration/skill/partial fields pass through
-# --------------------------------------------------------------------------
 
 
 def test_parse_main_session_exposes_usage_turns_and_duration(tmp_path: Path) -> None:

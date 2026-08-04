@@ -316,8 +316,6 @@ def test_errors_preserved_in_truncated_view(tmp_path: Path) -> None:
 
 
 def test_view_size_reasonable(tmp_path: Path) -> None:
-    # Stays at or below TOOL_SEQUENCE_HEAD + TOOL_SEQUENCE_TAIL (50) so the
-    # Tool Sequence section is rendered in full, unsampled.
     n_tool_calls = 45
     jsonl_path = tmp_path / "session.jsonl"
     records: list[dict[str, object]] = [_first_user_record("Do a large multi-step task.")]
