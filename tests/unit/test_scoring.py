@@ -254,8 +254,6 @@ def test_missing_transcript_skipped_and_next_scored(tmp_path: Path) -> None:
     try:
         session_ids = ["s1", "s2"]
         jsonl_paths = _seed_sessions(conn, tmp_path, session_ids)
-        # Drop s1's transcript path entirely: `_score_session` raises
-        # JudgeError("no transcript path provided...") for a missing key.
         del jsonl_paths["s1"]
         sessions = [_session_record(sid) for sid in session_ids]
         judge = MockJudge()
@@ -347,7 +345,6 @@ def test_find_unscored_filters_by_window_and_model(tmp_path: Path) -> None:
 
         loop = _make_loop(conn, MockJudge(), judge_model="sonnet")
 
-        # Already scored under this loop's exact (rubric_version, judge_model).
         loop.persist_verdict(
             Verdict(
                 session_id="scored-same-model",
@@ -363,8 +360,6 @@ def test_find_unscored_filters_by_window_and_model(tmp_path: Path) -> None:
                 judge_output_tokens=5,
             )
         )
-        # Scored, but under a different judge_model -> still unscored for
-        # this loop's (rubric_version, judge_model).
         other_model_loop = _make_loop(conn, MockJudge(), judge_model="opus")
         other_model_loop.persist_verdict(
             Verdict(

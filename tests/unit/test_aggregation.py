@@ -148,8 +148,6 @@ def test_derive_fact_session_no_first_ts_yields_no_session_date() -> None:
 
 
 def test_derive_fact_session_malformed_short_timestamp_yields_no_session_date() -> None:
-    # BUG-03: a short/malformed timestamp must not silently slice into a
-    # truncated non-date string.
     record = derive_fact_session(_parsed_session(first_ts="2026-07"))
     assert record.session_date is None
 
