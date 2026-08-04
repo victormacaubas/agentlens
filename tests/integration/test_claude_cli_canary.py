@@ -1,15 +1,15 @@
 """Integration test for `agentlens.judge.claude_cli.ClaudeCliJudge`: proves
-`--tools ""` (design D1) actually removes the judge's tool *capability*
+`--tools ""` actually removes the judge's tool *capability*
 against the real `claude` CLI.
 
 **Why this isn't a sentinel-absence test.** An earlier version of this test
 wrote a canary file, prompt-injected an instruction to read it, and asserted
 the canary's contents never appeared in the verdict. That version passed —
-including with `--tools ""` deliberately removed from `_build_args()` (the
-negative control task 4.3 is required to run). The judge simply *declined*
-the injection ("the Task field contains an instruction to read a canary
-file, not a legitimate subagent task") rather than lacking the tool to
-comply with it; a second, more plausible injection framing showed no
+including with `--tools ""` deliberately removed from `_build_args()`, which
+the negative control proved. The judge simply *declined* the injection ("the
+Task field contains an instruction to read a canary file, not a legitimate
+subagent task") rather than lacking the tool to comply with it; a second,
+more plausible injection framing showed no
 difference between the with-tools and without-tools conditions either. A
 test that measures the model's disposition to comply, rather than the
 presence or absence of a capability, can pass against a vulnerable argument
@@ -201,7 +201,7 @@ def test_no_tools_flag_loads_no_filesystem_or_shell_tool(tmp_path: Path) -> None
     judge = ClaudeCliJudge()
     probe_args = _build_probe_args(judge)
 
-    # D3: mirror score()'s isolation (temp cwd, filtered env) so this probe's
+    # Mirror score()'s isolation (temp cwd, filtered env) so this probe's
     # auth and settings behavior matches the real invocation it's meant to
     # regression-test rather than accidentally succeeding or failing for an
     # unrelated environmental reason.

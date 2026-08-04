@@ -182,7 +182,7 @@ class _UnavailableJudge:
 
 
 def test_judge_unavailable_error_propagates_as_hard_failure(tmp_path: Path) -> None:
-    """D4: `JudgeUnavailableError` is an environment problem, not a bad
+    """`JudgeUnavailableError` is an environment problem, not a bad
     session — it must propagate out of `run()` rather than being counted as
     a per-session skip toward the consecutive-failure abort."""
     conn = create_store(tmp_path / "store.db")

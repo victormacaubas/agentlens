@@ -1,8 +1,8 @@
 """Tests for `agentlens.parser`: name resolution, defensive reads, event pairing.
 
-Per design D7, these are fed plain dicts / hand-built fixtures under
-`tmp_path` — no dependency on real logs and no strict row-content assertions
-against real subagent transcripts (that validation is deferred to v2).
+These are fed plain dicts / hand-built fixtures under `tmp_path` — no
+dependency on real logs and no strict row-content assertions against real
+subagent transcripts (that validation is deferred to v2).
 """
 
 from __future__ import annotations
@@ -515,7 +515,7 @@ def test_extract_transcript_facts_skill_md_read_does_not_fire() -> None:
 
 
 # --------------------------------------------------------------------------
-# `final_report_flagged_partial` marker matching (D2, session-aggregation
+# `final_report_flagged_partial` marker matching (session-aggregation
 # spec: "Final-report partial marker")
 # --------------------------------------------------------------------------
 

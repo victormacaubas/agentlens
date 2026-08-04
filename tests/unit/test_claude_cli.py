@@ -14,9 +14,9 @@ import pytest
 from agentlens.errors import JudgeError, JudgeTimeoutError, JudgeUnavailableError
 from agentlens.judge.claude_cli import ClaudeCliJudge
 
-# Recorded from the installed CLI with credentials stripped (design D4):
-# exit code 1, empty stderr, a valid JSON envelope on stdout naming the
-# failure. `result` carries a `·` (U+00B7) separator, which is exactly why
+# Recorded from the installed CLI with credentials stripped: exit code 1,
+# empty stderr, a valid JSON envelope on stdout naming the failure.
+# `result` carries a `·` (U+00B7) separator, which is exactly why
 # detection is a loose case-insensitive substring match rather than a
 # full-string comparison.
 NOT_LOGGED_IN_ENVELOPE: dict[str, Any] = {
@@ -141,10 +141,10 @@ def test_malformed_json_raises_judge_error(mock_which: MagicMock, mock_run: Magi
 
 
 def test_build_args_grants_no_filesystem_tools() -> None:
-    """Fast complement to the canary integration test (D5): asserts the
+    """Fast complement to the canary integration test: asserts the
     argument list positively disables the built-in tool set and pins setting
     sources, not merely that a tool-granting flag is absent — omitting
-    `--allowedTools` is not equivalent to denying tools (D1).
+    `--allowedTools` is not equivalent to denying tools.
     """
     judge = ClaudeCliJudge(model="sonnet")
 
@@ -234,7 +234,7 @@ def test_dimension_score_out_of_range_rejected(
 @patch("agentlens.judge.claude_cli.subprocess.run")
 @patch("agentlens.judge.claude_cli.shutil.which", return_value="/usr/bin/claude")
 def test_subprocess_uses_isolated_cwd(mock_which: MagicMock, mock_run: MagicMock) -> None:
-    """D3: the subprocess must not inherit agentlens's own working
+    """The subprocess must not inherit agentlens's own working
     directory, where a repo's `.claude/settings.local.json` could live."""
     mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(MOCK_ENVELOPE), stderr="")
     judge = ClaudeCliJudge(model="sonnet")
@@ -252,7 +252,7 @@ def test_subprocess_uses_isolated_cwd(mock_which: MagicMock, mock_run: MagicMock
 def test_subprocess_env_forwards_anthropic_and_drops_unrelated(
     mock_which: MagicMock, mock_run: MagicMock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """D3: `ANTHROPIC_*` is forwarded by prefix so whichever auth channel a
+    """`ANTHROPIC_*` is forwarded by prefix so whichever auth channel a
     machine uses keeps working, while an unrelated env var is dropped."""
     monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "test-token")
     monkeypatch.setenv("AGENTLENS_UNRELATED_SENTINEL", "should-not-be-forwarded")
@@ -272,7 +272,7 @@ def test_subprocess_env_forwards_anthropic_and_drops_unrelated(
 def test_not_logged_in_raises_judge_unavailable_error(
     mock_which: MagicMock, mock_run: MagicMock
 ) -> None:
-    """D4: the CLI's not-logged-in response (non-zero exit, valid JSON
+    """The CLI's not-logged-in response (non-zero exit, valid JSON
     envelope) raises `JudgeUnavailableError`, not `JudgeError`, naming both
     remedies — so the scoring loop doesn't count it as a per-session
     failure."""
@@ -293,9 +293,10 @@ def test_not_logged_in_raises_judge_unavailable_error(
 def test_nonzero_exit_non_json_stdout_falls_through_to_judge_error(
     mock_which: MagicMock, mock_run: MagicMock
 ) -> None:
-    """D4's fall-through: a non-zero exit with unparseable stdout is a
-    different failure and must keep today's `JudgeError` behavior, with its
-    message intact — the not-logged-in detection cannot swallow it."""
+    """The not-logged-in detection's fall-through: a non-zero exit with
+    unparseable stdout is a different failure and must keep today's
+    `JudgeError` behavior, with its message intact — the not-logged-in
+    detection cannot swallow it."""
     mock_run.return_value = MagicMock(returncode=1, stdout="not valid json {{{", stderr="boom")
     judge = ClaudeCliJudge(model="sonnet")
 

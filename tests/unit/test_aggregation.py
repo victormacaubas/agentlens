@@ -165,7 +165,7 @@ def test_derive_fact_session_n_skills_fired_from_fired_skills() -> None:
 
 
 # --------------------------------------------------------------------------
-# Duplicate tool-call count (D2/task 3.3)
+# Duplicate tool-call count
 # --------------------------------------------------------------------------
 
 
