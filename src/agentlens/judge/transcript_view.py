@@ -146,7 +146,9 @@ def _reconstruct_user_text(content: Any) -> str:
     """Reconstruct a user record's text, handling both a plain string, a
     list of content blocks (`{"type": "text", ...}`), and the streaming
     char-by-char shape some transcripts use (a list of single-character
-    strings with no block structure)."""
+    strings with no block structure).
+    """
+    
     if isinstance(content, str):
         return content
     if not isinstance(content, list) or not content:
@@ -222,7 +224,8 @@ def _extract_tool_calls(records: list[dict[str, Any]]) -> list[_ToolCall]:
 
 def _extract_exit_code(call: _ToolCall) -> int:
     """Bash tool_results carry `Exit code N` as a content prefix only on
-    failure; a clean run has no such marker, so success implies exit 0."""
+    failure; a clean run has no such marker, so success implies exit 0.
+    """
     if not call.is_error:
         return 0
     content = call.result_content

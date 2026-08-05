@@ -1,6 +1,7 @@
 """Tests for `agentlens.judge.scoring.ScoringLoop`: per-session pass/fail
 handling, the 3-consecutive-failure abort, idempotent re-runs, and the
-`find_unscored_sessions` window/model filter."""
+`find_unscored_sessions` window/model filter.
+"""
 
 from __future__ import annotations
 
@@ -43,7 +44,9 @@ def _extract_task_marker(transcript_view: str) -> str:
     """Pull back out the `task_description` a test embedded in the `## Task`
     section, so the mock judge can decide pass/fail per logical session
     without `score()` ever being told a session_id directly (matching the
-    real `Judge` Protocol's signature)."""
+    real `Judge` Protocol's signature).
+    """
+    
     task_section = transcript_view.split("\n\n## Agent Identity")[0]
     return task_section.removeprefix("## Task\n")
 
@@ -175,7 +178,8 @@ def test_single_failure_skipped(tmp_path: Path) -> None:
 
 class _UnavailableJudge:
     """A `Judge` stand-in whose every call raises `JudgeUnavailableError`,
-    simulating an unavailable judge backend (e.g. missing credentials)."""
+    simulating an unavailable judge backend (e.g. missing credentials).
+    """
 
     def score(self, transcript_view: str, rubric_version: str) -> Verdict:
         raise JudgeUnavailableError("claude -p reported it is not logged in")
@@ -184,7 +188,8 @@ class _UnavailableJudge:
 def test_judge_unavailable_error_propagates_as_hard_failure(tmp_path: Path) -> None:
     """`JudgeUnavailableError` is an environment problem, not a bad
     session — it must propagate out of `run()` rather than being counted as
-    a per-session skip toward the consecutive-failure abort."""
+    a per-session skip toward the consecutive-failure abort.
+    """
     conn = create_store(tmp_path / "store.db")
     try:
         session_ids = ["s1", "s2"]

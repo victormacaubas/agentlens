@@ -1,6 +1,7 @@
 """Tests for the `score` CLI command: dry-run listing, the confirmation
 gate, `--max-sessions` capping, the missing-`claude` error, and the
-all-scored short-circuit message."""
+all-scored short-circuit message.
+"""
 
 from __future__ import annotations
 
@@ -77,7 +78,9 @@ def _session_record(session_id: str, task_description: str, **overrides: object)
 def _setup_unscored_sessions(tmp_path: Path, n: int) -> tuple[Path, Path]:
     """Seed a store with `n` unscored subagent sessions and a matching
     `.claude`-shaped tree of empty transcript files under a fresh
-    `claude_home`, so `score`'s `_discover_jsonl_paths` can find them."""
+    `claude_home`, so `score`'s `_discover_jsonl_paths` can find them.
+    """
+    
     claude_home = tmp_path / "claude-home"
     store_path = tmp_path / "store.db"
     conn = create_store(store_path)

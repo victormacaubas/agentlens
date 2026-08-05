@@ -119,7 +119,9 @@ def test_session_ingests_synthetic_subagent_with_events_and_lineage(
     isolated_home: Path, tmp_path: Path
 ) -> None:
     """8.1: full pipeline (discover -> parse -> persist) over a synthetic subagent
-    transcript; fact_tool_event rows land and parent lineage resolves."""
+    transcript; fact_tool_event rows land and parent lineage resolves.
+    """
+    
     store_path = tmp_path / "store.db"
     subagents_dir = isolated_home / ".claude" / "projects" / "-proj" / "parent-sid" / "subagents"
     subagents_dir.mkdir(parents=True)
@@ -165,7 +167,8 @@ def test_session_command_persists_fact_session_and_skill_bridge(
 ) -> None:
     """The single-session path also upserts the full grain (not just
     `fact_tool_event`), per the session-parser spec's "Idempotent ingest"
-    requirement."""
+    requirement.
+    """
     store_path = tmp_path / "store.db"
     subagents_dir = isolated_home / ".claude" / "projects" / "-proj" / "parent-sid" / "subagents"
     subagents_dir.mkdir(parents=True)
@@ -303,7 +306,8 @@ def test_report_does_not_ingest_uningested_sessions_on_disk(
 
 def test_claude_home_flag_injects_target_without_touching_home(tmp_path: Path) -> None:
     """`--claude-home` lets a caller point at a `.claude` dir directly, so tests
-    (or scripted runs) can isolate discovery without monkeypatching HOME."""
+    (or scripted runs) can isolate discovery without monkeypatching HOME.
+    """
     custom_claude_home = tmp_path / "custom-claude"
     subagents_dir = custom_claude_home / "projects" / "-proj" / "parent-sid" / "subagents"
     subagents_dir.mkdir(parents=True)

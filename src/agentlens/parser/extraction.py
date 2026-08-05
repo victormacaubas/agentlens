@@ -183,7 +183,9 @@ class TranscriptFacts:
 
 def _task_subagent_type_from_item(item: dict[str, Any]) -> tuple[str, str] | None:
     """Return `(tool_use_id, subagent_type)` if `item` is a `Task` tool_use
-    with a string `subagent_type`, else `None`."""
+    with a string `subagent_type`, else `None`.
+    """
+    
     if item.get("type") != "tool_use" or item.get("name") != "Task":
         return None
     tool_use_id = item.get("id")
@@ -224,7 +226,8 @@ def extract_task_subagent_types(records: Iterable[dict[str, Any]]) -> dict[str, 
 
 def _usage_int(usage: dict[str, Any], key: str) -> int:
     """Read an integer usage field defensively; anything else, or a
-    negative value (BUG-02: a corrupted JSONL can carry one), contributes 0."""
+    negative value (BUG-02: a corrupted JSONL can carry one), contributes 0.
+    """
     value = usage.get(key)
     if isinstance(value, bool) or not isinstance(value, int):
         return 0

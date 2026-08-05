@@ -616,7 +616,8 @@ def test_parse_subagent_run_precomputed_map_skips_parent_records_extraction(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Bulk ingest passes a precomputed map so `parse_subagent_run` needn't
-    re-derive it (or touch `parent_records`) per sibling spawn."""
+    re-derive it (or touch `parent_records`) per sibling spawn.
+    """
 
     def _boom(_: object) -> dict[str, str]:
         raise AssertionError("extract_task_subagent_types must not run when a map is given")
