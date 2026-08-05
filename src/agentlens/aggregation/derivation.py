@@ -45,7 +45,9 @@ def _safe_date_from_ts(ts: str | None) -> str | None:
 
 def derive_fact_session(parsed: ParsedSession) -> SessionRecord:
     """Combine event-derived tool counts with the parser's transcript-read
-    usage/turn/duration fields into one `fact_session` row."""
+    usage/turn/duration fields into one `fact_session` row.
+    """
+    
     events = parsed.events
     n_reads = sum(1 for e in events if e.tool_name == "Read")
     n_edits = sum(1 for e in events if e.tool_name == "Edit")

@@ -1,5 +1,6 @@
 """Tests for `agentlens.judge.claude_cli`: subprocess mocking only, per the
-project's synthetic-only test policy — no real `claude` invocation."""
+project's synthetic-only test policy — no real `claude` invocation.
+"""
 
 from __future__ import annotations
 
@@ -230,7 +231,8 @@ def test_dimension_score_out_of_range_rejected(
 @patch("agentlens.judge.claude_cli.shutil.which", return_value="/usr/bin/claude")
 def test_subprocess_uses_isolated_cwd(mock_which: MagicMock, mock_run: MagicMock) -> None:
     """The subprocess must not inherit agentlens's own working
-    directory, where a repo's `.claude/settings.local.json` could live."""
+    directory, where a repo's `.claude/settings.local.json` could live.
+    """
     mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(MOCK_ENVELOPE), stderr="")
     judge = ClaudeCliJudge(model="sonnet")
 
@@ -248,7 +250,8 @@ def test_subprocess_env_forwards_anthropic_and_drops_unrelated(
     mock_which: MagicMock, mock_run: MagicMock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`ANTHROPIC_*` is forwarded by prefix so whichever auth channel a
-    machine uses keeps working, while an unrelated env var is dropped."""
+    machine uses keeps working, while an unrelated env var is dropped.
+    """
     monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "test-token")
     monkeypatch.setenv("AGENTLENS_UNRELATED_SENTINEL", "should-not-be-forwarded")
     mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(MOCK_ENVELOPE), stderr="")
@@ -270,7 +273,8 @@ def test_not_logged_in_raises_judge_unavailable_error(
     """The CLI's not-logged-in response (non-zero exit, valid JSON
     envelope) raises `JudgeUnavailableError`, not `JudgeError`, naming both
     remedies — so the scoring loop doesn't count it as a per-session
-    failure."""
+    failure.
+    """
     mock_run.return_value = MagicMock(
         returncode=1, stdout=json.dumps(NOT_LOGGED_IN_ENVELOPE), stderr=""
     )
@@ -291,7 +295,8 @@ def test_nonzero_exit_non_json_stdout_falls_through_to_judge_error(
     """The not-logged-in detection's fall-through: a non-zero exit with
     unparseable stdout is a different failure and must keep today's
     `JudgeError` behavior, with its message intact — the not-logged-in
-    detection cannot swallow it."""
+    detection cannot swallow it.
+    """
     mock_run.return_value = MagicMock(returncode=1, stdout="not valid json {{{", stderr="boom")
     judge = ClaudeCliJudge(model="sonnet")
 

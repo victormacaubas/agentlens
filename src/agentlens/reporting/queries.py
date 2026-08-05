@@ -64,7 +64,8 @@ class ParentLensRow:
 @dataclass(frozen=True)
 class AgentWindowResult:
     """One agent_type's current-window aggregate plus its trend, guarded
-    by `min_sessions_for_trend`, the low-volume guard."""
+    by `min_sessions_for_trend`, the low-volume guard.
+    """
 
     aggregate: AgentAggregate
     prior: AgentAggregate | None
@@ -87,7 +88,8 @@ class ReportResult:
     def to_verdict_slice(self) -> dict[str, Any]:
         """The verdict JSON — deterministic counts and window rollups, plus
         judge verdicts for sessions that have one (opportunistic; absent
-        entirely when no verdicts exist in the window)."""
+        entirely when no verdicts exist in the window).
+        """
         return {
             "window": {
                 "start": self.window.start.isoformat(),
