@@ -13,8 +13,13 @@ from pathlib import Path
 from typing import Any, Final
 
 from agentlens.errors import JudgeError, JudgeTimeoutError, JudgeUnavailableError
-from agentlens.judge.protocol import DimensionScore, Verdict
-from agentlens.judge.rubric import DIMENSION_NAMES, RUBRIC_PROMPT_TEMPLATE, VERDICT_JSON_SCHEMA
+from agentlens.judge.protocol import DimensionScore, SuggestedFix, Verdict
+from agentlens.judge.rubric import (
+    DIMENSION_NAMES,
+    FIX_TARGETS,
+    RUBRIC_PROMPT_TEMPLATE,
+    VERDICT_JSON_SCHEMA,
+)
 
 DEFAULT_MODEL: Final[str] = "sonnet"
 DEFAULT_TIMEOUT_SECONDS: Final[int] = 180
@@ -181,11 +186,7 @@ def _build_verdict(envelope: dict[str, Any], *, rubric_version: str) -> Verdict:
         )
 
     dimensions = _parse_dimensions(structured_output)
-    suggested_fixes = structured_output.get("suggested_fixes")
-    if not isinstance(suggested_fixes, list) or not all(
-        isinstance(fix, str) for fix in suggested_fixes
-    ):
-        raise JudgeError("structured_output.suggested_fixes must be a list of strings")
+    suggested_fixes = _parse_suggested_fixes(structured_output)
 
     overall_score = sum(d.score for d in dimensions.values()) / len(dimensions)
 
@@ -283,3 +284,46 @@ def _parse_dimensions(structured_output: dict[str, Any]) -> dict[str, DimensionS
             raise JudgeError(f"structured_output.dimensions[{name!r}] has an invalid shape")
         dimensions[name] = DimensionScore(score=score, evidence=evidence)
     return dimensions
+
+
+def _parse_suggested_fixes(structured_output: dict[str, Any]) -> list[SuggestedFix]:
+    """Parse `structured_output.suggested_fixes` into typed `SuggestedFix` records.
+
+    Raises `JudgeError` on a bare-string fix list, an unknown `dimension`, or
+    a `target` outside the closed set defined by `FIX_TARGETS` — the
+    `--json-schema` retry loop should keep most malformed output from
+    reaching here, but this is the boundary that must not persist a verdict
+    if it does.
+    """
+    raw_fixes = structured_output.get("suggested_fixes")
+    if not isinstance(raw_fixes, list):
+        raise JudgeError("structured_output.suggested_fixes must be a list")
+
+    fixes: list[SuggestedFix] = []
+    for raw_fix in raw_fixes:
+        if not isinstance(raw_fix, dict):
+            raise JudgeError(
+                "structured_output.suggested_fixes must be a list of typed fix "
+                f"objects, not bare strings; got {raw_fix!r}"
+            )
+        dimension = raw_fix.get("dimension")
+        target = raw_fix.get("target")
+        recommendation = raw_fix.get("recommendation")
+        rationale = raw_fix.get("rationale")
+        if dimension not in DIMENSION_NAMES:
+            raise JudgeError(f"suggested_fixes entry has an unknown dimension {dimension!r}")
+        if target not in FIX_TARGETS:
+            raise JudgeError(f"suggested_fixes entry has an out-of-set target {target!r}")
+        if not isinstance(recommendation, str) or not isinstance(rationale, str):
+            raise JudgeError(
+                "suggested_fixes entry must have string 'recommendation' and 'rationale'"
+            )
+        fixes.append(
+            SuggestedFix(
+                dimension=dimension,
+                target=target,
+                recommendation=recommendation,
+                rationale=rationale,
+            )
+        )
+    return fixes

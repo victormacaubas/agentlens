@@ -162,7 +162,7 @@ Whether a *missing* fire was a mistake is a judgment call → belongs in the jud
 ### `fact_verdict` — LLM judge output (separate, never mixed with deterministic facts)
 
 - Key: `session_id` + `rubric_version` + `judge_model`
-- `verdict_json` shape: `{session_id, rubric_version, judge_model, dimensions: {task_completion, honesty, efficiency, scope_adherence} (each {score, evidence[]}), overall_score, evidence[], suggested_fixes[], judge_cost_usd, judge_input_tokens, judge_output_tokens}`
+- `verdict_json` shape: `{dimensions: {task_completion, honesty, efficiency, scope_adherence} (each {score, evidence[]}), overall_score, suggested_fixes[] (each {dimension, target, recommendation, rationale}), provenance: {locally_derived[], untrusted_model_output[]}}`. `session_id`, `rubric_version`, `judge_model`, and the three judge cost/token fields are `fact_verdict` columns, not part of the JSON blob. `provenance` marks which fields are locally derived and validated (scores) versus untrusted model output (evidence, and each fix's recommendation/rationale) — see [ADR 0011](adr/0011-handoff-trust-boundary.md).
 - **Judge run-cost:** `judge_cost_usd`, `judge_input_tokens`, `judge_output_tokens` (from the `claude -p` envelope's `total_cost_usd` / `usage`) — the tool's *own* footprint, so agentlens is honest about what a run costs.
 
 ### Token & cost reporting
@@ -221,7 +221,7 @@ Cache key = `hash(session_id + rubric_version + judge_model)`, stored in `~/.cac
 |---|---|---|
 | **Terminal** | thin summary: headline score + path, auto-opens HTML | stdout |
 | **HTML** | hero, designed, self-contained single file, shareable, `file://` | `./reports/<scope>.html` |
-| **Markdown** | Claude handoff — the fix report | `./reports/<scope>.md` |
+| **Markdown** | Claude handoff — fixes are advisory, rendered as untrusted content | `./reports/<scope>.md` |
 | **JSON** | scripting / piping / dashboard feed | `./reports/<scope>.json` or `--format json` to stdout |
 | **Store** | append-only dimensional SQLite (source of truth) | `~/.cache/agentlens/` (or configurable) |
 
@@ -272,7 +272,7 @@ Pluggable judge interface, `claude -p` backend, rubric v1 (pinned + versioned), 
 Dedicated session. Visual identity, design tokens, component library (score/verdict cards, timeline, trend charts, fix-proposal cards), static HTML mockups with fake data. Use the `impeccable` skill. **Exit:** an approved, reusable design spec + mockups.
 
 ### Phase 5 — Renderers
-Implement markdown (handoff) + JSON export + thin terminal summary + HTML report (Phase 4 design over real verdict JSON). **Exit:** all four surfaces render from one verdict core. **Depends on:** 3 + 4.
+Implement markdown (handoff) + JSON export + thin terminal summary + HTML report (Phase 4 design over real verdict JSON). Every renderer that surfaces fixes or evidence must present them inside an explicitly marked untrusted block and must not emit anything shaped like a patch, diff, or command for direct application — see [ADR 0011](adr/0011-handoff-trust-boundary.md). **Exit:** all four surfaces render from one verdict core. **Depends on:** 3 + 4.
 
 ### Phase 6 — Dashboard (separate initiative)
 Cumulative JSON export + static `gh-pages` site (windows, compare, drill-down). **Depends on:** 2 (data model) + 4 (design).

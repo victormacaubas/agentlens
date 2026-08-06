@@ -42,6 +42,6 @@ Phase 5 builds the renderers. If this is not settled first, the markdown rendere
 - Docs: new ADR on the handoff trust boundary; `docs/agentlens-design.md` §3's `verdict_json` shape and §6's markdown-handoff description.
 - Specs: `judge-interface`, `rubric-scoring` deltas.
 - Tests: `tests/unit/test_judge_protocol.py`, `tests/unit/test_rubric.py`, `tests/unit/test_claude_cli.py`.
-- Store: no schema change — `verdict_json` is an opaque `TEXT` column — and no migration, since `fact_verdict` is empty.
+- Store: no schema change — `verdict_json` is an opaque `TEXT` column — and no migration. `fact_verdict` was empty when this was drafted; re-checked at implementation time (2026-08-06) it holds **1 row** (`v1` / `claude-sonnet-5`, $0.0882). The `RUBRIC_VERSION` bump orphans it and that session will be re-scored on the next `score` run, at a cost of roughly $0.09. Noted rather than migrated: the row is orphaned, not corrupted.
 - Constrains Phase 5: the markdown renderer must render fixes inside an explicitly-marked untrusted block and must not emit anything shaped like an auto-appliable patch.
 - Independent of `harden-judge-invocation` and `pin-judge-identity`; can be drafted and implemented in parallel, though it should land before Phase 5 begins.

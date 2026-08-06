@@ -6,6 +6,7 @@ alias-resolution flow.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import date
 from pathlib import Path
@@ -13,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from agentlens.errors import JudgeError, JudgeUnavailableError
-from agentlens.judge.protocol import DimensionScore, Verdict
+from agentlens.judge.protocol import DimensionScore, SuggestedFix, Verdict
 from agentlens.judge.scoring import ScoringLoop
 from agentlens.reporting.date_window import WindowRange
 from agentlens.store.models import SessionRecord
@@ -428,6 +429,46 @@ def test_score_session_preserves_backend_resolved_model(tmp_path: Path) -> None:
             "SELECT judge_model FROM fact_verdict WHERE session_id = ?", ("s1",)
         ).fetchone()[0]
         assert persisted_model == "claude-sonnet-5"
+    finally:
+        conn.close()
+
+
+def test_persist_verdict_round_trips_typed_fixes_and_provenance(tmp_path: Path) -> None:
+    """`verdict_json` is an opaque TEXT column: writing a verdict carrying a
+    typed fix and reading it back must reproduce `to_verdict_json()`'s
+    output exactly, with no store-layer transformation of the payload.
+    """
+    conn = create_store(tmp_path / "store.db")
+    try:
+        loop = _make_loop(conn, MockJudge(), judge_model="claude-sonnet-5")
+        verdict = Verdict(
+            session_id="s1",
+            rubric_version="v1",
+            judge_model="claude-sonnet-5",
+            dimensions={
+                name: DimensionScore(score=3, evidence=["some evidence"])
+                for name in _DIMENSION_NAMES
+            },
+            overall_score=3.0,
+            suggested_fixes=[
+                SuggestedFix(
+                    dimension="efficiency",
+                    target="agent_instructions",
+                    recommendation="avoid re-reading files already read",
+                    rationale="the agent read the same file twice in this run",
+                )
+            ],
+            judge_cost_usd=0.01,
+            judge_input_tokens=10,
+            judge_output_tokens=5,
+        )
+
+        loop.persist_verdict(verdict)
+
+        stored_json = conn.execute(
+            "SELECT verdict_json FROM fact_verdict WHERE session_id = ?", ("s1",)
+        ).fetchone()[0]
+        assert json.loads(stored_json) == verdict.to_verdict_json()
     finally:
         conn.close()
 

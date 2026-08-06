@@ -7,13 +7,20 @@ import json
 
 import pytest
 
-from agentlens.judge.protocol import DimensionScore, Verdict
+from agentlens.judge.protocol import DimensionScore, SuggestedFix, Verdict
+
+_FIX = SuggestedFix(
+    dimension="efficiency",
+    target="agent_instructions",
+    recommendation="avoid re-reading files already read",
+    rationale="the agent read the same file twice in this run",
+)
 
 
 def _verdict(**overrides: object) -> Verdict:
     defaults: dict[str, object] = {
         "session_id": "session-1",
-        "rubric_version": "v1",
+        "rubric_version": "v2",
         "judge_model": "sonnet",
         "dimensions": {
             "task_completion": DimensionScore(score=4, evidence=["did the task"]),
@@ -22,7 +29,7 @@ def _verdict(**overrides: object) -> Verdict:
             "scope_adherence": DimensionScore(score=4, evidence=["stayed in scope"]),
         },
         "overall_score": 4.0,
-        "suggested_fixes": ["avoid re-reading files already read"],
+        "suggested_fixes": [_FIX],
         "judge_cost_usd": 0.02,
         "judge_input_tokens": 1500,
         "judge_output_tokens": 200,
@@ -54,7 +61,14 @@ def test_verdict_to_verdict_json_serialization() -> None:
     reloaded = json.loads(serialized)
 
     assert reloaded["overall_score"] == 4.0
-    assert reloaded["suggested_fixes"] == ["avoid re-reading files already read"]
+    assert reloaded["suggested_fixes"] == [
+        {
+            "dimension": "efficiency",
+            "target": "agent_instructions",
+            "recommendation": "avoid re-reading files already read",
+            "rationale": "the agent read the same file twice in this run",
+        }
+    ]
     assert reloaded["dimensions"]["task_completion"] == {
         "score": 4,
         "evidence": ["did the task"],
@@ -76,6 +90,51 @@ def test_verdict_to_verdict_json_serialization() -> None:
         "judge_output_tokens",
     ):
         assert excluded_key not in reloaded
+
+
+def test_verdict_to_verdict_json_with_no_fixes_serializes_empty_list() -> None:
+    verdict = _verdict(suggested_fixes=[])
+
+    payload = verdict.to_verdict_json()
+
+    assert payload["suggested_fixes"] == []
+
+
+def test_verdict_to_verdict_json_marks_provenance() -> None:
+    verdict = _verdict()
+
+    payload = verdict.to_verdict_json()
+
+    provenance = payload["provenance"]
+    assert "overall_score" in provenance["locally_derived"]
+    assert "dimensions.*.score" in provenance["locally_derived"]
+    assert "dimensions.*.evidence" in provenance["untrusted_model_output"]
+    assert "suggested_fixes[].recommendation" in provenance["untrusted_model_output"]
+    assert "suggested_fixes[].rationale" in provenance["untrusted_model_output"]
+    # Provenance itself must survive a JSON round-trip.
+    assert json.loads(json.dumps(payload))["provenance"] == provenance
+
+
+def test_suggested_fix_construction() -> None:
+    fix = SuggestedFix(
+        dimension="honesty",
+        target="caller_task_phrasing",
+        recommendation="ask the caller to state the acceptance criteria explicitly",
+        rationale="the report was ambiguous about whether the task was complete",
+    )
+    assert fix.dimension == "honesty"
+    assert fix.target == "caller_task_phrasing"
+
+
+def test_suggested_fix_frozen() -> None:
+    fix = SuggestedFix(
+        dimension="honesty",
+        target="agent_instructions",
+        recommendation="be explicit",
+        rationale="the report omitted a known failure",
+    )
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        fix.recommendation = "changed"  # type: ignore[misc]
 
 
 def test_dimension_score_frozen() -> None:
