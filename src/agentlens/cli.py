@@ -24,7 +24,7 @@ from agentlens.ingest.orchestrator import (
 )
 from agentlens.judge.claude_cli import ClaudeCliJudge
 from agentlens.judge.rubric import RUBRIC_VERSION
-from agentlens.judge.scoring import ProgressEvent, ScoringLoop
+from agentlens.judge.scoring import ProgressEvent, ScoringLoop, is_concrete_model_id
 from agentlens.reporting.date_window import resolve_window
 from agentlens.reporting.queries import (
     DEFAULT_MIN_SESSIONS_FOR_TREND,
@@ -34,15 +34,11 @@ from agentlens.reporting.rendering import render_terminal_summary
 from agentlens.store.schema import create_store, resolve_store_path
 
 CLAUDE_EXECUTABLE: Final[str] = "claude"
-
-# Conservative, hardcoded per-session cost estimates — used only
-# to show the user a ballpark before the cost confirmation gate; the actual
-# cost comes from `ScoringResult.total_cost_usd` after scoring.
 PER_SESSION_COST_ESTIMATE: Final[dict[str, float]] = {
-    "sonnet": 0.025,
+    "sonnet": 0.15,
     "opus": 0.15,
 }
-DEFAULT_PER_SESSION_COST: Final[float] = 0.05
+DEFAULT_PER_SESSION_COST: Final[float] = 0.15
 
 
 @click.group()
@@ -220,6 +216,14 @@ def score(
             rubric_version=RUBRIC_VERSION,
             judge_model=judge_model,
         )
+        # An alias (e.g. "sonnet") has no stored verdict keyed under the
+        # alias itself, so the pre-resolution query below over-counts: it
+        # matches every session in the window rather than only the ones a
+        # concrete resolved model would still consider unscored. The count
+        # is therefore an upper bound until this run resolves the alias,
+        # which happens for every alias run since the mapping isn't cached.
+        count_is_upper_bound = not is_concrete_model_id(judge_model)
+
         # Fetch the full unscored set (uncapped) so the max-sessions summary
         # can report "scored/total" — `--max-sessions` capping happens below
         # in Python, not via the loop's own (also-supported) SQL LIMIT.
@@ -236,16 +240,17 @@ def score(
         )
         n_to_score = len(sessions_to_score)
         estimated_cost = _estimate_judge_cost(n_to_score, judge_model)
+        count_display = f"up to {n_to_score}" if count_is_upper_bound else str(n_to_score)
 
         if dry_run:
             for record in sessions_to_score:
                 click.echo(f"{record.agent_type}\t{record.task_description}")
-            click.echo(f"estimated cost: ~${estimated_cost:.2f} for {n_to_score} sessions")
+            click.echo(f"estimated cost: ~${estimated_cost:.2f} for {count_display} sessions")
             return
 
         if not no_confirm:
             proceed = click.confirm(
-                f"Will score {n_to_score} sessions with {judge_model} "
+                f"Will score {count_display} sessions with {judge_model} "
                 f"(est. ~${estimated_cost:.2f}). Proceed?",
                 default=True,
             )
@@ -276,22 +281,30 @@ def score(
                 )
 
         jsonl_paths = _discover_jsonl_paths(claude_home)
-        result = loop.run(
-            sessions_to_score, jsonl_paths=jsonl_paths, on_progress=_on_progress
-        )
+        if capped:
+            result = loop.run(sessions_to_score, jsonl_paths=jsonl_paths, on_progress=_on_progress)
+        else:
+            result = loop.score_window(
+                window=window,
+                agent_type=agent_type,
+                jsonl_paths=jsonl_paths,
+                on_progress=_on_progress,
+            )
+
+        resolved_note = _resolved_model_note(judge_model, loop.judge.resolved_model)
 
         if capped:
-            click.echo(
-                f"{result.scored}/{total_unscored} scored (--max-sessions reached). "
-                "Re-run to continue.",
-                err=True,
-            )
+            summary = f"{result.scored}/{total_unscored} scored (--max-sessions reached)."
+            summary += resolved_note
+            summary += " Re-run to continue."
+            click.echo(summary, err=True)
             return
 
         summary = (
             f"Scored {result.scored}/{n_to_score} sessions. "
             f"Total judge cost: ${result.total_cost_usd:.2f}."
         )
+        summary += resolved_note
         if result.skipped:
             summary += f" {result.skipped} skipped (re-run to retry)."
         if result.aborted:
@@ -307,6 +320,18 @@ def _estimate_judge_cost(n_sessions: int, judge_model: str) -> float:
     """
     per_session = PER_SESSION_COST_ESTIMATE.get(judge_model, DEFAULT_PER_SESSION_COST)
     return n_sessions * per_session
+
+
+def _resolved_model_note(judge_model: str, resolved_model: str | None) -> str:
+    """Build the summary clause naming the concrete model an alias resolved to.
+
+    Empty when `judge_model` was already a concrete id (nothing to name
+    alongside it), or when nothing scored successfully this run and the
+    judge never resolved one.
+    """
+    if is_concrete_model_id(judge_model) or resolved_model is None:
+        return ""
+    return f" Resolved {judge_model!r} to {resolved_model}."
 
 
 def _discover_jsonl_paths(claude_home: Path) -> dict[str, Path]:

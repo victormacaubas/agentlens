@@ -55,7 +55,7 @@ Four stages, each a thin layer over the previous. Read-only against the user's `
 
 ### Judge coupling
 
-The LLM judge shells out to the user's existing `claude` CLI in headless mode. Behind a **pluggable interface** so an `ANTHROPIC_API_KEY` backend can be added for CI. Pin `--model`; it's part of the cache key.
+The LLM judge shells out to the user's existing `claude` CLI in headless mode. Behind a **pluggable interface** so an `ANTHROPIC_API_KEY` backend can be added for CI. Pin `--model`; what goes into the cache key is the resolved concrete model identifier read from the response envelope, not the alias as typed. See [ADR 0010](adr/0010-verdict-comparability.md).
 
 **Auth:** the judge runs with `--bare` (see below), and `--bare` skips keychain reads entirely. Under `--bare`, auth is strictly `ANTHROPIC_API_KEY` or an `apiKeyHelper` configured via user settings (`--setting-sources "user"`): OAuth login and keychain credentials are never read, regardless of what's logged in on the machine. An unauthenticated environment fails fast with a `Not logged in` response rather than hanging or silently degrading; see [ADR 0008](adr/0008-judge-invoked-without-tools.md) and the README's Limitations section.
 
@@ -86,7 +86,7 @@ Flag notes for the implementation:
 - **`--max-turns 3`**: bounds the call now that there are no tools to loop on.
 - **Explicit `cwd` and filtered `env`**: the subprocess gets a temporary directory as `cwd` and an environment forwarding only `PATH`, `HOME`, and `ANTHROPIC_*`-prefixed variables (covers `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`). This is defense in depth: with `--tools ""` there is nothing to reach, but it is the control that holds if a future change reintroduces a tool.
 - **`--append-system-prompt`** (not `--system-prompt`, which *replaces* and drops Claude Code's foundation).
-- **`--model`** — aliases `opus` \| `sonnet` \| `haiku` \| `opusplan` (auto-update), or pin a full string like `claude-opus-4-8`. The chosen value goes into the cache key.
+- **`--model`** — aliases `opus` \| `sonnet` \| `haiku` \| `opusplan` (auto-update), or pin a full string like `claude-opus-4-8`. An alias is accepted here as an input convenience only: what goes into the cache key is the resolved concrete identifier the backend reads back from the response envelope, never the alias as typed.
 - **`--bare`** — skips auto-discovery of hooks/skills/plugins/MCP/CLAUDE.md. Retained for reproducibility, not just speed: a non-bare call's inherited hooks, CLAUDE.md, plugin context, and auto-memory vary by machine and working directory, which would make the judge's system context, and therefore its verdicts, incomparable across runs. The cost is that OAuth-only users cannot authenticate the judge; see the auth note above.
 
 **Response envelope** — parse `result` (the model's text) as the verdict; `is_error` (bool) to detect failures; `session_id`, `total_cost_usd`, `usage`, `duration_ms` for logging. If you later use `--json-schema` structured outputs, the validated object is in `structured_output` instead of `result`.
@@ -200,7 +200,7 @@ Ground-truth signals, cheapest first: self-report vs. transcript consistency (ju
 
 ### Caching
 
-Cache key = `hash(session_id + rubric_version + judge_model)`, stored in `~/.cache/agentlens/`. Only miss → call judge. Re-running a 30-day window never re-pays for already-scored sessions.
+Cache key = `hash(session_id + rubric_version + judge_model)`, stored in `~/.cache/agentlens/`, where `judge_model` is the resolved concrete model identifier, never the alias supplied at the CLI (see [ADR 0010](adr/0010-verdict-comparability.md)). Only miss → call judge. Re-running a 30-day window never re-pays for already-scored sessions.
 
 ---
 
@@ -231,7 +231,7 @@ Never write into `.claude/` — read-only.
 
 Running multiple times a day must not duplicate data or clutter the folder. Two layers, two behaviors:
 
-- **Store = append-only truth.** Upsert by `session_id`; re-runs add only new sessions, never duplicates. Verdicts are cached by `session_id + rubric_version + judge_model`, so repeat runs re-pay the judge **only** for genuinely new sessions.
+- **Store = append-only truth.** Upsert by `session_id`; re-runs add only new sessions, never duplicates. Verdicts are cached by `session_id + rubric_version + judge_model` (`judge_model` being the resolved concrete identifier, not the configured alias), so repeat runs re-pay the judge **only** for genuinely new sessions.
 - **Reports = overwrite-in-place views.** History lives in the store, *not* in report files — trends and prior-window deltas are always read from the store, never from stale HTML. So report files are disposable, always-current renders.
 
 Naming & overwrite policy:
@@ -240,7 +240,7 @@ Naming & overwrite policy:
   - `reports/report_<window>_<agent|all>.{html,md,json}` (e.g. `report_7d_implementer.html`)
   - `reports/session_<session_id>.{html,md,json}` (changes only if re-scored under a new rubric)
 - **`--archive`** (opt-in, off by default) drops a timestamped copy into `reports/history/` for audit. Not needed for trends — the store already covers that.
-- **No-change short-circuit:** if a run finds no new sessions and the same `rubric_version` + `judge_model`, every verdict is a cache hit — report "no changes since last run" and re-render instantly (free), or skip regeneration entirely.
+- **No-change short-circuit:** if a run finds no new sessions and the same `rubric_version` + resolved `judge_model`, every verdict is a cache hit, report "no changes since last run" and re-render instantly (free), or skip regeneration entirely.
 
 Net rule: **store is append-only history; reports overwrite in place; archiving is opt-in.**
 

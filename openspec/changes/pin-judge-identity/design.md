@@ -72,6 +72,10 @@ Extraction is defensive: if `modelUsage` is absent, empty, or carries multiple e
 
 Resolved by a **one-call resolution step**: the backend exposes the resolved model after its first successful call, and the loop performs its unscored-set query against the resolved ID. On the first invocation with a given alias this means one judge call happens before the set is known, which is acceptable — that call scores a real session, so nothing is wasted.
 
+**This applies to every run with an alias, not only the first.** An earlier draft of this decision said subsequent runs would "have a resolved ID cached in the store" and could skip the resolution call. That was wrong: `fact_verdict` records concrete IDs but nothing records that `sonnet` was the alias which produced `claude-sonnet-5`, so the mapping is not recoverable from the store. Resolution is therefore a per-run cost whenever the configured value is not itself a concrete ID. The consequence is that a fully-scored window costs one judge call (~$0.08) rather than zero, and the *scoring loop* requirement's "re-run is free" scenario is amended to say so. Persisting an alias-to-ID mapping would buy the zero-call case back, but it means a schema addition this change deliberately avoids; a follow-up can add it against real usage if the per-run call proves annoying.
+
+The loop's shape is therefore: take the alias-keyed set as an upper bound, score one candidate to resolve the ID, re-query the remainder keyed on the resolved ID, score those. A user who passes a concrete ID skips the resolution stage entirely, since the configured value is already the identity.
+
 **What the confirmation gate shows on that first run.** This needs stating, because the naive reading is misleading. Before any call has resolved anything, no row in `fact_verdict` can carry a concrete ID, so an unscored-set query keyed on the alias matches *every* session in the window. The gate would therefore quote the full window on first use even if most sessions are about to turn out already-scored — an over-count, which is the safe direction for a spend gate but confusing if unexplained.
 
 The resolution is to make the gate honest about its own uncertainty rather than to add a probe call: on a run where the resolved model is not yet known, the gate presents its figure as an upper bound and says so ("up to N sessions"), and the post-run summary reports what was actually scored. Subsequent runs with the same alias have a resolved ID cached in the store and quote an exact figure. This keeps the "no wasted spend" property of the one-call approach while ensuring the number the user approves is never *lower* than what the run will do.
@@ -122,9 +126,38 @@ Note this makes cache-read a *component* of the reported total rather than a sep
 
 *Alternative considered.* Add a separate `judge_cache_tokens` column — rejected as scope creep; the store schema is deliberately untouched by this change, and a single honest input figure satisfies the design doc's claim.
 
+### D7: Pass the user settings file to `--settings` so `--bare` can authenticate
+
+Discovered while probing the envelope for D1/D6: **`score` cannot authenticate at all on this machine.** `--bare`'s help text is explicit that under minimal mode "Anthropic auth is strictly `ANTHROPIC_API_KEY` or `apiKeyHelper` via `--settings`" — an `apiKeyHelper` reached through `--setting-sources` is not read. `_build_args()` passes `--setting-sources user` and no `--settings`, so a machine that authenticates by `apiKeyHelper` (1Password-backed, no `ANTHROPIC_AUTH_TOKEN` in the environment) has no credential channel:
+
+```
+--bare --setting-sources user                 -> is_error: true,  "Not logged in · Please run /login"
+--bare --settings ~/.claude/settings.json     -> is_error: false, cost $0.00175
+```
+
+The failure surfaces as `JudgeUnavailableError` on the first call, so it is loud rather than silent — but it means every `score` run fails today. `claude_cli.py`'s own remedy string already names `apiKeyHelper` as the fix while the code never passes `--settings`, so the guidance was correct and the invocation was not.
+
+The fix is to pass the user settings file path to `--settings`, keeping `--setting-sources user` alongside it — verified to coexist, and still needed since it is what excludes `project`/`local` from reconfiguring the judge. Both flags together authenticate under an environment holding only `PATH` and `HOME`, which is what `_build_subprocess_env()` actually constructs.
+
+*Alternative considered.* Build a minimal `--settings` JSON in code, forwarding only `apiKeyHelper` and `ANTHROPIC_BASE_URL` — better for D5's structural-pinning claim, since the judge context stays explicitly minimal. Deferred as unnecessary ceremony for now: the settings file is a per-user constant, and a follow-up can narrow it if the broad load proves to matter.
+
+**Coupling to D5.** Loading the whole user settings file means the judge context is pinned to *that file's* contents rather than to a minimal set constructed in code. The comparability ADR must say so plainly: the third leg of comparability is held constant by minimal mode plus the user settings file, and a change to that file (a different `apiKeyHelper`, an added `env` entry) is a context change the primary key does not capture. That is a weaker claim than "constructed minimally in code," and the ADR should not overstate it.
+
 ### D5: One ADR covering verdict comparability
 
 Rather than three scattered notes, one ADR states the invariant: two verdicts are comparable when they share a rubric version, a concrete model ID, and a judge system context. It records that the first two are enforced by the primary key while the third is enforced structurally by `--bare` plus pinned setting sources, and that making the context configurable would require promoting it to a key column. This gives a future contributor a single place that explains why `judge_model` must not hold an alias.
+
+### D8: Raise the judge timeout to 180s, and note that `--max-turns 3` is not always enough
+
+Verifying this change against a real session (task 5.5) surfaced two things no unit test could, both in code this change already touched.
+
+**The 60s timeout was too tight.** A `sonnet` call against a 13KB transcript view took **46.6s wall** and consumed **2 turns** (a schema-validation retry). That fits inside 60s, barely, which is worse than not fitting: `score` failed on timeout on the first attempt and succeeded later with identical input. `DEFAULT_TIMEOUT_SECONDS` is raised to 180 to cover a slow gateway plus the full `--max-turns 3` allowance.
+
+**The retry budget itself is sometimes exhausted.** One run of the same input returned `num_turns: 4`, `stop_reason: tool_use`, `is_error: true`, and cost **$0.18** without producing a verdict: the model spent its turns without landing a schema-valid structured output. An immediately following run on the same input succeeded at 2 turns for $0.088. So the failure is non-deterministic at the turn limit, not input-dependent.
+
+This is left as-is rather than fixed here. `--max-turns` is explicitly a non-goal of this change, the failure is loud (`JudgeError`, session skipped, loop continues), and the consecutive-failure limit already stops a systemic version of it. But it is now a measured fact rather than a hypothetical: **a skipped session can still cost money**, roughly 2x a successful one, and `ScoringResult.total_cost_usd` does not include it because no verdict is returned. A follow-up should either raise `--max-turns`, or account for the cost of failed calls in the reported total. Recorded here so the next contributor does not rediscover it at their own expense.
+
+**Cost consequence for D4.** The successful call cost **$0.0887** on a 13KB view, which *exceeded* the $0.08 this change had just re-based `sonnet` to, on a view smaller than the 18KB the estimate was measured against. `sonnet` is therefore raised again to $0.15, matching `opus` and the default. D4's asymmetry argument is what settles it: the gate is a spend-consent mechanism, so it must sit above the observed maximum, and one directly observed overrun is sufficient evidence that $0.08 was still a floor.
 
 ## Risks / Trade-offs
 

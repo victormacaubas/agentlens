@@ -19,7 +19,7 @@ DEFAULT_MIN_SESSIONS_FOR_TREND: Final[int] = 5
 
 _DELTA_FIELDS: Final[tuple[str, ...]] = (
     "n_spawns",
-    "n_failures",
+    "n_spawns_with_errors",
     "n_denial_spawns",
     "n_errors",
     "n_duplicate_tool_calls",
@@ -41,7 +41,7 @@ class AgentAggregate:
 
     agent_type: str
     n_spawns: int
-    n_failures: int
+    n_spawns_with_errors: int
     n_denial_spawns: int
     n_errors: int
     n_duplicate_tool_calls: int
@@ -57,7 +57,7 @@ class ParentLensRow:
 
     parent_session_id: str
     n_spawns: int
-    n_failures: int
+    n_spawns_with_errors: int
     n_denial_spawns: int
 
 
@@ -80,9 +80,6 @@ class ReportResult:
     min_sessions_for_trend: int
     agents: list[AgentWindowResult]
     parent_lens: list[ParentLensRow]
-    # session_id -> parsed verdict_json, for sessions in `window` with a judge
-    # verdict. Opportunistic: sessions without one simply have no entry
-    # (windowed-reporting spec).
     verdicts: dict[str, dict[str, Any]]
 
     def to_verdict_slice(self) -> dict[str, Any]:
@@ -102,7 +99,7 @@ class ReportResult:
                 {
                     "agent_type": result.aggregate.agent_type,
                     "n_spawns": result.aggregate.n_spawns,
-                    "n_failures": result.aggregate.n_failures,
+                    "n_spawns_with_errors": result.aggregate.n_spawns_with_errors,
                     "n_denial_spawns": result.aggregate.n_denial_spawns,
                     "n_errors": result.aggregate.n_errors,
                     "n_duplicate_tool_calls": result.aggregate.n_duplicate_tool_calls,
@@ -123,7 +120,7 @@ class ReportResult:
                 {
                     "parent_session_id": row.parent_session_id,
                     "n_spawns": row.n_spawns,
-                    "n_failures": row.n_failures,
+                    "n_spawns_with_errors": row.n_spawns_with_errors,
                     "n_denial_spawns": row.n_denial_spawns,
                 }
                 for row in self.parent_lens
@@ -197,7 +194,7 @@ def _query_agent_aggregates(
             agent_type,
             COUNT(*) AS n_spawns,
             SUM(CASE WHEN n_errors > 0 OR final_report_flagged_partial = 1
-                     THEN 1 ELSE 0 END) AS n_failures,
+                     THEN 1 ELSE 0 END) AS n_spawns_with_errors,
             SUM(CASE WHEN n_permission_denials > 0 THEN 1 ELSE 0 END) AS n_denial_spawns,
             COALESCE(SUM(n_errors), 0) AS n_errors,
             COALESCE(SUM(n_duplicate_tool_calls), 0) AS n_duplicate_tool_calls,
@@ -224,7 +221,7 @@ def _query_agent_aggregates(
         str(row[0]): AgentAggregate(
             agent_type=str(row[0]),
             n_spawns=int(row[1]),
-            n_failures=int(row[2]),
+            n_spawns_with_errors=int(row[2]),
             n_denial_spawns=int(row[3]),
             n_errors=int(row[4]),
             n_duplicate_tool_calls=int(row[5]),
@@ -247,7 +244,7 @@ def _query_parent_lens(
             parent_session_id,
             COUNT(*) AS n_spawns,
             SUM(CASE WHEN n_errors > 0 OR final_report_flagged_partial = 1
-                     THEN 1 ELSE 0 END) AS n_failures,
+                     THEN 1 ELSE 0 END) AS n_spawns_with_errors,
             SUM(CASE WHEN n_permission_denials > 0 THEN 1 ELSE 0 END) AS n_denial_spawns
         FROM fact_session
         WHERE session_kind = 'subagent'
@@ -266,7 +263,7 @@ def _query_parent_lens(
         ParentLensRow(
             parent_session_id=str(row[0]),
             n_spawns=int(row[1]),
-            n_failures=int(row[2]),
+            n_spawns_with_errors=int(row[2]),
             n_denial_spawns=int(row[3]),
         )
         for row in rows

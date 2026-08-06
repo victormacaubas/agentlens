@@ -18,7 +18,7 @@ def render_terminal_summary(result: ReportResult) -> str:
         lines.append("no spawns in this window")
     for agent_result in result.agents:
         agg = agent_result.aggregate
-        line = f"{agg.agent_type}: {agg.n_spawns} spawns, {agg.n_failures} failures"
+        line = f"{agg.agent_type}: {agg.n_spawns} spawns, {agg.n_spawns_with_errors} had errors"
         if agg.avg_verdict_score is not None:
             line += f", avg score: {agg.avg_verdict_score:.1f}/5"
         if agg.n_denial_spawns:
@@ -32,7 +32,7 @@ def render_terminal_summary(result: ReportResult) -> str:
     for row in result.parent_lens:
         lines.append(
             f"parent {row.parent_session_id}: {row.n_spawns} spawns, "
-            f"{row.n_failures} failures, {row.n_denial_spawns} hit denials"
+            f"{row.n_spawns_with_errors} had errors, {row.n_denial_spawns} hit denials"
         )
 
     return "\n".join(lines)

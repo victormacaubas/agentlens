@@ -17,6 +17,7 @@ Doing this now is nearly free: the store currently holds zero verdicts, so nothi
 - The `--judge-model` CLI flag continues to accept aliases for convenience — an alias is an input, never an identity. The scoring loop's unscored-session query keys on the resolved ID, so re-running after the alias moves correctly identifies previously-scored sessions as needing a re-score under the new model.
 - `PER_SESSION_COST_ESTIMATE` is re-based **upward** from measured per-session costs instead of the pre-implementation placeholders (`sonnet` $0.025 → $0.08, default $0.05 → $0.15, `opus` unchanged at $0.15), so the confirmation gate quotes a ceiling rather than a floor. On a first run with a given alias the session count is presented as an upper bound, since no verdict can carry a resolved concrete ID before the first call produces one.
 - **Fixed:** `judge_input_tokens` / `judge_output_tokens` are computed from the resolved `modelUsage` entry (summing input, cache-creation, and cache-read tokens) rather than the envelope's top-level `usage` map, which reports 1 input token for a call consuming thousands.
+- **Fixed:** the judge invocation now passes the user settings file to `--settings`, without which `--bare` has no credential channel on a machine authenticating by `apiKeyHelper` — `score` fails with "Not logged in" on every call today. Discovered while probing the envelope for the model-identity work; folded in here because it touches the same `_build_args()` and because the change's final verification step (score a real session) cannot pass without it.
 - A new ADR records what makes two verdicts comparable: the same rubric version, the same concrete model, and the same judge system context (`--bare` plus pinned setting sources). Any of the three floating means the cache key cannot be trusted.
 
 ## Capabilities
@@ -25,13 +26,13 @@ Doing this now is nearly free: the store currently holds zero verdicts, so nothi
 <!-- none -->
 
 ### Modified Capabilities
-- `judge-interface`: the Claude CLI backend requirement gains model-identity resolution — the verdict's `judge_model` is the concrete model ID from the envelope, not the configured alias — and the judge's self-reported token counts must reflect actual consumption including cached input.
+- `judge-interface`: gains a minimal-mode authentication requirement (`apiKeyHelper` reaches the judge only via `--settings`); the Claude CLI backend requirement gains model-identity resolution — the verdict's `judge_model` is the concrete model ID from the envelope, not the configured alias — and the judge's self-reported token counts must reflect actual consumption including cached input.
 - `rubric-scoring`: the scoring-loop and verdict-persistence requirements gain the rule that verdict identity uses the resolved concrete model, so an alias that moves invalidates prior verdicts rather than silently colliding with them.
 - `score-cli`: the cost-estimate requirement is re-based on measured per-session costs and required to be an upper bound rather than a best guess.
 
 ## Impact
 
-- Code: `src/agentlens/judge/claude_cli.py` (envelope model extraction, `Verdict.judge_model`), `src/agentlens/judge/scoring.py` (`judge_model` threading — the loop currently overwrites the backend's value with the configured alias via `replace`), `src/agentlens/cli.py` (`PER_SESSION_COST_ESTIMATE`, resolved-model reporting in the summary).
+- Code: `src/agentlens/judge/claude_cli.py` (`--settings` auth channel, envelope model extraction, `Verdict.judge_model`), `src/agentlens/judge/scoring.py` (`judge_model` threading — the loop currently overwrites the backend's value with the configured alias via `replace`), `src/agentlens/cli.py` (`PER_SESSION_COST_ESTIMATE`, resolved-model reporting in the summary).
 - Docs: new ADR on verdict comparability; `docs/agentlens-design.md` §2 model-pinning note.
 - Specs: `judge-interface`, `rubric-scoring`, `score-cli` deltas.
 - Tests: `tests/unit/test_claude_cli.py`, `tests/unit/test_scoring.py`, `tests/unit/test_score_cli.py`.

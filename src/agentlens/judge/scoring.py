@@ -1,6 +1,10 @@
 """Scoring loop: finds subagent sessions lacking a verdict for the current
-`(rubric_version, judge_model)`, scores them via a `Judge` backend, and
-persists verdicts into `fact_verdict`.
+rubric and judge model, scores them via a `Judge` backend, and persists
+verdicts into `fact_verdict`.
+
+`judge_model` identity is the backend's resolved concrete model, not
+necessarily the alias a caller configures the loop with — see
+`ScoringLoop.score_window` for how the loop resolves one against the other.
 """
 
 from __future__ import annotations
@@ -23,6 +27,17 @@ from agentlens.store.models import SessionRecord, ToolEventRecord
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONSECUTIVE_FAILURE_LIMIT: Final[int] = 3
+KNOWN_MODEL_ALIASES: Final[frozenset[str]] = frozenset({"sonnet", "opus", "haiku", "opusplan"})
+
+
+def is_concrete_model_id(model: str) -> bool:
+    """Return whether `model` is not one of the known floating aliases.
+
+    Used by the loop to decide whether resolution is needed, and by the
+    CLI to decide whether a pre-scoring session count is exact or an upper
+    bound.
+    """
+    return model not in KNOWN_MODEL_ALIASES
 
 
 @dataclass(frozen=True)
@@ -49,9 +64,9 @@ class ScoringResult:
 class ScoringLoop:
     """Owns the judge, store connection, and scoring config for one run.
 
-    Constructed once per invocation of the `score` command; `find_unscored_sessions`
-    and `run` share the connection and config held here rather than threading
-    them through every call.
+    Constructed once per invocation of the `score` command; `find_unscored_sessions`,
+    `run`, and `score_window` share the connection and config held here
+    rather than threading them through every call.
     """
 
     def __init__(
@@ -75,8 +90,17 @@ class ScoringLoop:
         self, *, window: WindowRange, agent_type: str | None = None
     ) -> list[SessionRecord]:
         """Return subagent sessions in `window` with no verdict for the
-        current `(rubric_version, judge_model)`.
+        current rubric and judge model.
+
+        Keys on the judge's resolved model once a call this run has produced
+        one; before that, keys on the configured value (alias or concrete
+        id). For a floating alias, no stored verdict was ever written under
+        the alias itself, so that pre-resolution query over-counts — every
+        session in the window matches. That over-count is the upper bound
+        `score_window` resolves before scoring the remainder.
         """
+        resolved_model = self.judge.resolved_model
+        query_model = resolved_model if resolved_model is not None else self.judge_model
         query = """
             SELECT fs.session_id, fs.agent_id, fs.agent_type, fs.name_source, fs.session_kind,
                    fs.spawn_depth, fs.parent_session_id, fs.spawn_tool_use_id,
@@ -108,7 +132,7 @@ class ScoringLoop:
                     AND fv.judge_model = ?
               )
         """
-        params.extend([self.rubric_version, self.judge_model])
+        params.extend([self.rubric_version, query_model])
 
         if self.max_sessions is not None:
             query += " LIMIT ?"
@@ -180,6 +204,53 @@ class ScoringLoop:
             scored=scored, skipped=skipped, total_cost_usd=total_cost_usd, aborted=aborted
         )
 
+    def score_window(
+        self,
+        *,
+        window: WindowRange,
+        agent_type: str | None = None,
+        jsonl_paths: dict[str, Path],
+        on_progress: Callable[[ProgressEvent], None] | None = None,
+    ) -> ScoringResult:
+        """Find and score the unscored sessions in `window`, resolving a
+        floating alias to its concrete model identifier first when needed.
+
+        The resolved identifier is only knowable from a judge call, and
+        nothing in the store maps an alias back to it. So when the
+        configured model is not already a concrete identifier and no call
+        has resolved one yet, this scores one candidate from the alias-keyed
+        upper bound to learn the resolved identifier, then re-queries the
+        remainder against it before scoring the rest. A window that is
+        already fully scored under the resolved identifier therefore costs
+        exactly one judge call rather than zero — the price of learning what
+        the alias currently points at.
+        """
+        upper_bound = self.find_unscored_sessions(window=window, agent_type=agent_type)
+        if not upper_bound:
+            return ScoringResult(scored=0, skipped=0, total_cost_usd=0.0, aborted=False)
+
+        if is_concrete_model_id(self.judge_model) or self.judge.resolved_model is not None:
+            return self.run(upper_bound, jsonl_paths=jsonl_paths, on_progress=on_progress)
+
+        resolution_candidate, *_ = upper_bound
+        resolution_result = self.run(
+            [resolution_candidate], jsonl_paths=jsonl_paths, on_progress=on_progress
+        )
+        if self.judge.resolved_model is None:
+            # The one resolution attempt failed; nothing further can be
+            # resolved this run, so report what happened and stop here.
+            return resolution_result
+
+        remainder = self.find_unscored_sessions(window=window, agent_type=agent_type)
+        remainder_result = self.run(remainder, jsonl_paths=jsonl_paths, on_progress=on_progress)
+
+        return ScoringResult(
+            scored=resolution_result.scored + remainder_result.scored,
+            skipped=resolution_result.skipped + remainder_result.skipped,
+            total_cost_usd=resolution_result.total_cost_usd + remainder_result.total_cost_usd,
+            aborted=resolution_result.aborted or remainder_result.aborted,
+        )
+
     def _score_session(
         self, session: SessionRecord, *, jsonl_paths: dict[str, Path]
     ) -> Verdict:
@@ -195,11 +266,13 @@ class ScoringLoop:
                 f"failed to read transcript for {session.session_id} at {jsonl_path}"
             ) from exc
         verdict = self.judge.score(transcript_view, self.rubric_version)
+        # judge_model is not overwritten: it is the backend's resolved
+        # concrete identifier, not the loop's (possibly-floating) configured
+        # value, and only the backend knows which one it actually used.
         return replace(
             verdict,
             session_id=session.session_id,
             rubric_version=self.rubric_version,
-            judge_model=self.judge_model,
         )
 
     def persist_verdict(self, verdict: Verdict) -> None:

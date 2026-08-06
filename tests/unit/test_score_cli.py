@@ -1,6 +1,7 @@
 """Tests for the `score` CLI command: dry-run listing, the confirmation
-gate, `--max-sessions` capping, the missing-`claude` error, and the
-all-scored short-circuit message.
+gate and its upper-bound framing for a floating model alias, `--max-sessions`
+capping, the missing-`claude` error, the all-scored short-circuit message,
+and the final summary's resolved-model note.
 """
 
 from __future__ import annotations
@@ -37,6 +38,20 @@ MOCK_ENVELOPE: dict[str, object] = {
     "session_id": "judge-session",
     "total_cost_usd": 0.02,
     "usage": {"input_tokens": 1000, "output_tokens": 200},
+    "modelUsage": {
+        "claude-sonnet-5": {
+            "inputTokens": 1000,
+            "outputTokens": 200,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0,
+            "webSearchRequests": 0,
+            "costUSD": 0.02,
+            "contextWindow": 200000,
+            "maxOutputTokens": 64000,
+            "canonicalModel": "claude-sonnet-5",
+            "provider": "firstParty",
+        }
+    },
 }
 
 
@@ -145,6 +160,61 @@ def test_dry_run_lists_sessions(tmp_path: Path) -> None:
     assert "task 1" in result.output
     assert "task 2" in result.output
     assert "estimated cost" in result.output.lower()
+    # --judge-model defaults to the "sonnet" alias, which has no verdict row
+    # keyed under the alias itself, so the count is an upper bound.
+    assert "up to 3 sessions" in result.output
+
+
+def test_dry_run_shows_exact_count_for_a_concrete_model(tmp_path: Path) -> None:
+    store_path, claude_home = _setup_unscored_sessions(tmp_path, 3)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "--store",
+            str(store_path),
+            "score",
+            "--dry-run",
+            "--since",
+            "30d",
+            "--judge-model",
+            "claude-sonnet-5",
+            "--claude-home",
+            str(claude_home),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "for 3 sessions" in result.output
+    assert "up to" not in result.output
+
+
+def test_confirmation_prompt_shows_upper_bound_for_alias(tmp_path: Path) -> None:
+    store_path, claude_home = _setup_unscored_sessions(tmp_path, 3)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "--store",
+            str(store_path),
+            "score",
+            "--since",
+            "30d",
+            "--claude-home",
+            str(claude_home),
+        ],
+        input="n\n",
+    )
+
+    assert result.exit_code == 0
+    assert "Will score up to 3 sessions" in result.output
+
+    conn = sqlite3.connect(store_path)
+    try:
+        n_verdicts = conn.execute("SELECT COUNT(*) FROM fact_verdict").fetchone()[0]
+        assert n_verdicts == 0
+    finally:
+        conn.close()
 
 
 @patch("agentlens.judge.claude_cli.subprocess.run")
@@ -173,6 +243,9 @@ def test_no_confirm_skips_prompt(
     assert result.exit_code == 0
     assert "Proceed?" not in result.output
     assert "Scored 3/3" in result.output
+    # The configured value was the "sonnet" alias; the summary names the
+    # concrete model the judge resolved it to.
+    assert "Resolved 'sonnet' to claude-sonnet-5" in result.output
 
     conn = sqlite3.connect(store_path)
     try:
@@ -209,6 +282,10 @@ def test_max_sessions_cap(
 
     assert result.exit_code == 0
     assert "2/5 scored" in result.output
+    # A capped run still names the resolved model: each scored session's
+    # own judge call resolves it even though `score_window`'s own
+    # resolution flow is bypassed while the cap is in effect.
+    assert "Resolved 'sonnet' to claude-sonnet-5" in result.output
 
     conn = sqlite3.connect(store_path)
     try:

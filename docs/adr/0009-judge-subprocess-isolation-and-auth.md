@@ -1,4 +1,4 @@
-# 10. Judge subprocess runs `--bare` with pinned settings, an isolated cwd/env, and loud failure on missing auth
+# 9. Judge subprocess runs `--bare` with pinned settings, an isolated cwd/env, and loud failure on missing auth
 
 Status: Accepted
 
@@ -10,7 +10,7 @@ Status: Accepted
 - **Process isolation.** `_build_args()` produced no `cwd` and no `env`, so the subprocess inherited agentlens's own working directory and full environment — an unnecessarily wide surface for a call whose only legitimate input is the prepared transcript view on stdin.
 - **Auth.** `--bare`'s documented auth model is strictly `ANTHROPIC_API_KEY` or an `apiKeyHelper` configured via settings — OAuth and keychain credentials are never read under `--bare`. Probing confirmed `--setting-sources ""` (full isolation) is incompatible with `--bare`: settings are `--bare`'s only remaining auth channel. An OAuth-only user therefore hits a hard wall the first time `agentlens score` calls the judge, and the design doc's claim that headless mode "uses the user's existing login by default" is false under `--bare`.
 
-`--bare` itself was kept rather than dropped, for a reason independent of any cost figure: a non-bare call loads hooks, `CLAUDE.md`, plugin context, and auto-memory into the judge's system context, and that inherited context varies by machine and by working directory. A non-bare verdict would be graded by a materially different judge than a bare one on someone else's machine, which corrupts the cross-run comparability `report` depends on — the same property [ADR 0009](0009-verdict-comparability.md) formalizes as the judge-context leg of verdict comparability.
+`--bare` itself was kept rather than dropped, for a reason independent of any cost figure: a non-bare call loads hooks, `CLAUDE.md`, plugin context, and auto-memory into the judge's system context, and that inherited context varies by machine and by working directory. A non-bare verdict would be graded by a materially different judge than a bare one on someone else's machine, which corrupts the cross-run comparability `report` depends on — the same property [ADR 0010](0010-verdict-comparability.md) formalizes as the judge-context leg of verdict comparability.
 
 ## Decision
 
@@ -31,7 +31,7 @@ These are ordered dependencies, not independent knobs: the `env` filter is only 
 - The judge invocation cannot be reconfigured by a settings file discovered from an untrusted repo, or from whatever directory agentlens happens to run in.
 - OAuth-only users cannot run `agentlens score` — a named limitation (README), not a silent failure: `JudgeUnavailableError` states the exact remedy at the point of failure.
 - The env filter forwards `ANTHROPIC_*` as a prefix rather than an enumerated list, so it does not need to know in advance which specific variable a given machine's auth setup uses.
-- `--bare` is now a documented reproducibility requirement, not merely a cost optimization — a future change that drops it must reckon with judge-context comparability ([ADR 0009](0009-verdict-comparability.md)), not just cost.
+- `--bare` is now a documented reproducibility requirement, not merely a cost optimization — a future change that drops it must reckon with judge-context comparability ([ADR 0010](0010-verdict-comparability.md)), not just cost.
 - `JudgeUnavailableError` must keep propagating as a hard failure (not a per-session skip) for this decision to hold: an environment problem should stop a scoring run, not silently consume the run's failure budget one session at a time.
 - The not-logged-in detection depends on matching a CLI message string (`not logged in`) on a specific path (non-zero exit, parseable stdout). A future CLI wording change would silently reclassify the failure as a generic `JudgeError` rather than `JudgeUnavailableError` — a narrower, already-safe degradation, since the user still receives a `JudgeError` naming the envelope text.
-- Complements [ADR 0008](0008-judge-invoked-without-tools.md) (no tools for the judge) and [ADR 0009](0009-verdict-comparability.md) (verdict comparability, which cites this ADR's `--bare` + pinned settings as what holds judge context fixed).
+- Complements [ADR 0008](0008-judge-invoked-without-tools.md) (no tools for the judge) and [ADR 0010](0010-verdict-comparability.md) (verdict comparability, which cites this ADR's `--bare` + pinned settings as what holds judge context fixed).

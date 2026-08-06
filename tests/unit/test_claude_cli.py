@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agentlens.errors import JudgeError, JudgeTimeoutError, JudgeUnavailableError
-from agentlens.judge.claude_cli import ClaudeCliJudge
+from agentlens.judge.claude_cli import DEFAULT_TIMEOUT_SECONDS, ClaudeCliJudge
 
 NOT_LOGGED_IN_ENVELOPE: dict[str, Any] = {
     "is_error": True,
@@ -33,6 +33,26 @@ NOT_LOGGED_IN_ENVELOPE: dict[str, Any] = {
     "duration_ms": 16,
 }
 
+def _model_usage_entry(
+    *, input_tokens: int = 3200, output_tokens: int = 850, canonical_model: str | None = None
+) -> dict[str, Any]:
+    """Build a single `modelUsage` entry with the shape a real envelope
+    reports, so tests only need to vary the fields they care about.
+    """
+    return {
+        "inputTokens": input_tokens,
+        "outputTokens": output_tokens,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.019,
+        "contextWindow": 200000,
+        "maxOutputTokens": 64000,
+        "canonicalModel": canonical_model if canonical_model is not None else "claude-sonnet-5",
+        "provider": "firstParty",
+    }
+
+
 MOCK_ENVELOPE: dict[str, Any] = {
     "result": "",
     "structured_output": {
@@ -48,6 +68,7 @@ MOCK_ENVELOPE: dict[str, Any] = {
     "session_id": "judge-session-123",
     "total_cost_usd": 0.019,
     "usage": {"input_tokens": 3200, "output_tokens": 850},
+    "modelUsage": {"claude-sonnet-5": _model_usage_entry()},
     "duration_ms": 5200,
 }
 
@@ -65,18 +86,19 @@ def test_successful_scoring(mock_which: MagicMock, mock_run: MagicMock) -> None:
     assert verdict.overall_score == 4.0
     assert verdict.session_id == "judge-session-123"
     assert verdict.rubric_version == "v1"
-    assert verdict.judge_model == "sonnet"
+    assert verdict.judge_model == "claude-sonnet-5"
     assert verdict.judge_cost_usd == 0.019
     assert verdict.judge_input_tokens == 3200
     assert verdict.judge_output_tokens == 850
     assert verdict.suggested_fixes == ["reduce redundant Read calls"]
     assert verdict.dimensions["task_completion"].score == 4
     assert verdict.dimensions["task_completion"].evidence == ["completed all tasks"]
+    assert judge.resolved_model == "claude-sonnet-5"
 
     mock_run.assert_called_once()
     call_args, call_kwargs = mock_run.call_args
     assert call_kwargs["input"] == "transcript text"
-    assert call_kwargs["timeout"] == 60
+    assert call_kwargs["timeout"] == DEFAULT_TIMEOUT_SECONDS
     args_list = call_args[0]
     assert "--model" in args_list
     assert args_list[args_list.index("--model") + 1] == "sonnet"
@@ -190,6 +212,7 @@ def test_overall_score_derived_not_trusted(mock_which: MagicMock, mock_run: Magi
         "session_id": "judge-session-123",
         "total_cost_usd": 0.019,
         "usage": {"input_tokens": 3200, "output_tokens": 850},
+        "modelUsage": {"claude-sonnet-5": _model_usage_entry()},
     }
     mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(envelope), stderr="")
     judge = ClaudeCliJudge(model="sonnet")
@@ -331,3 +354,163 @@ def test_dimension_score_negative_rejected(mock_which: MagicMock, mock_run: Magi
 
     with pytest.raises(JudgeError):
         judge.score("transcript text", "v1")
+
+
+def test_build_args_includes_settings_path_for_bare_auth() -> None:
+    """`--bare` reads `apiKeyHelper` only via `--settings`, never through
+    `--setting-sources`; both flags must be present for a machine that
+    authenticates by `apiKeyHelper` to have a working credential channel.
+    """
+    judge = ClaudeCliJudge(model="sonnet")
+
+    args = judge._build_args()
+
+    assert "--settings" in args
+    settings_path = args[args.index("--settings") + 1]
+    assert settings_path == str(Path.home() / ".claude" / "settings.json")
+    assert "--setting-sources" in args
+    assert args[args.index("--setting-sources") + 1] == "user"
+
+
+@patch("agentlens.judge.claude_cli.subprocess.run")
+@patch("agentlens.judge.claude_cli.shutil.which", return_value="/usr/bin/claude")
+def test_alias_resolves_to_concrete_model_identifier(
+    mock_which: MagicMock, mock_run: MagicMock
+) -> None:
+    envelope = {**MOCK_ENVELOPE, "modelUsage": {"claude-sonnet-5": _model_usage_entry()}}
+    mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(envelope), stderr="")
+    judge = ClaudeCliJudge(model="sonnet")
+
+    verdict = judge.score("transcript text", "v1")
+
+    assert verdict.judge_model == "claude-sonnet-5"
+
+
+@patch("agentlens.judge.claude_cli.subprocess.run")
+@patch("agentlens.judge.claude_cli.shutil.which", return_value="/usr/bin/claude")
+def test_pinned_model_identifier_passes_through_unchanged(
+    mock_which: MagicMock, mock_run: MagicMock
+) -> None:
+    envelope = {**MOCK_ENVELOPE, "modelUsage": {"claude-sonnet-5": _model_usage_entry()}}
+    mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(envelope), stderr="")
+    judge = ClaudeCliJudge(model="claude-sonnet-5")
+
+    verdict = judge.score("transcript text", "v1")
+
+    assert verdict.judge_model == "claude-sonnet-5"
+
+
+@patch("agentlens.judge.claude_cli.subprocess.run")
+@patch("agentlens.judge.claude_cli.shutil.which", return_value="/usr/bin/claude")
+def test_dated_snapshot_key_preferred_over_canonical_model(
+    mock_which: MagicMock, mock_run: MagicMock
+) -> None:
+    """`haiku` is the case where the map key and `canonicalModel` diverge:
+    the key carries the dated snapshot, `canonicalModel` the undated family
+    name. The key must win.
+    """
+    envelope = {
+        **MOCK_ENVELOPE,
+        "modelUsage": {
+            "claude-haiku-4-5-20251001": _model_usage_entry(canonical_model="claude-haiku-4-5")
+        },
+    }
+    mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(envelope), stderr="")
+    judge = ClaudeCliJudge(model="haiku")
+
+    verdict = judge.score("transcript text", "v1")
+
+    assert verdict.judge_model == "claude-haiku-4-5-20251001"
+
+
+@patch("agentlens.judge.claude_cli.subprocess.run")
+@patch("agentlens.judge.claude_cli.shutil.which", return_value="/usr/bin/claude")
+def test_missing_model_usage_raises_judge_error(mock_which: MagicMock, mock_run: MagicMock) -> None:
+    envelope = {k: v for k, v in MOCK_ENVELOPE.items() if k != "modelUsage"}
+    mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(envelope), stderr="")
+    judge = ClaudeCliJudge(model="sonnet")
+
+    with pytest.raises(JudgeError):
+        judge.score("transcript text", "v1")
+
+
+@patch("agentlens.judge.claude_cli.subprocess.run")
+@patch("agentlens.judge.claude_cli.shutil.which", return_value="/usr/bin/claude")
+def test_empty_model_usage_raises_judge_error(mock_which: MagicMock, mock_run: MagicMock) -> None:
+    envelope = {**MOCK_ENVELOPE, "modelUsage": {}}
+    mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(envelope), stderr="")
+    judge = ClaudeCliJudge(model="sonnet")
+
+    with pytest.raises(JudgeError):
+        judge.score("transcript text", "v1")
+
+
+@patch("agentlens.judge.claude_cli.subprocess.run")
+@patch("agentlens.judge.claude_cli.shutil.which", return_value="/usr/bin/claude")
+def test_multi_entry_model_usage_raises_judge_error(
+    mock_which: MagicMock, mock_run: MagicMock
+) -> None:
+    envelope = {
+        **MOCK_ENVELOPE,
+        "modelUsage": {
+            "claude-sonnet-5": _model_usage_entry(),
+            "claude-haiku-4-5-20251001": _model_usage_entry(canonical_model="claude-haiku-4-5"),
+        },
+    }
+    mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(envelope), stderr="")
+    judge = ClaudeCliJudge(model="sonnet")
+
+    with pytest.raises(JudgeError):
+        judge.score("transcript text", "v1")
+
+
+@patch("agentlens.judge.claude_cli.subprocess.run")
+@patch("agentlens.judge.claude_cli.shutil.which", return_value="/usr/bin/claude")
+def test_resolved_model_exposed_after_successful_call(
+    mock_which: MagicMock, mock_run: MagicMock
+) -> None:
+    mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(MOCK_ENVELOPE), stderr="")
+    judge = ClaudeCliJudge(model="sonnet")
+    assert judge.resolved_model is None
+
+    judge.score("transcript text", "v1")
+
+    assert judge.resolved_model == "claude-sonnet-5"
+
+
+@patch("agentlens.judge.claude_cli.subprocess.run")
+@patch("agentlens.judge.claude_cli.shutil.which", return_value="/usr/bin/claude")
+def test_judge_input_tokens_counts_cache_creation_not_nominal_usage(
+    mock_which: MagicMock, mock_run: MagicMock
+) -> None:
+    """A large, uncached prompt is booked almost entirely as cache creation:
+    the envelope's top-level `usage.input_tokens` reports a nominal 1 while
+    the real consumption lives in `modelUsage`'s cache-creation count.
+    """
+    envelope: dict[str, Any] = {
+        **MOCK_ENVELOPE,
+        "total_cost_usd": 0.0710,
+        "usage": {"input_tokens": 1, "output_tokens": 1523, "cache_read_input_tokens": 0},
+        "modelUsage": {
+            "claude-sonnet-5": {
+                "inputTokens": 1,
+                "outputTokens": 1523,
+                "cacheReadInputTokens": 0,
+                "cacheCreationInputTokens": 12843,
+                "webSearchRequests": 0,
+                "costUSD": 0.0710,
+                "contextWindow": 200000,
+                "maxOutputTokens": 64000,
+                "canonicalModel": "claude-sonnet-5",
+                "provider": "firstParty",
+            }
+        },
+    }
+    mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(envelope), stderr="")
+    judge = ClaudeCliJudge(model="sonnet")
+
+    verdict = judge.score("transcript text", "v1")
+
+    assert verdict.judge_input_tokens == 12844
+    assert verdict.judge_output_tokens == 1523
+    assert verdict.judge_cost_usd == 0.0710

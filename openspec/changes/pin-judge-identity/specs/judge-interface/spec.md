@@ -1,5 +1,19 @@
 ## ADDED Requirements
 
+### Requirement: Judge authentication under minimal mode
+
+Minimal mode (`--bare`) reads Anthropic credentials strictly from `ANTHROPIC_API_KEY` or from an `apiKeyHelper` supplied via `--settings`; it never reads OAuth, the keychain, or an `apiKeyHelper` reached through `--setting-sources`. The Claude CLI backend SHALL therefore pass the user's settings file to `--settings` so that a machine authenticating by `apiKeyHelper` has a working credential channel, and SHALL continue to pass `--setting-sources user` so that repo-local settings cannot reconfigure the judge.
+
+#### Scenario: apiKeyHelper authentication succeeds under minimal mode
+
+- **WHEN** the machine authenticates via `apiKeyHelper` with no `ANTHROPIC_API_KEY` in the environment
+- **THEN** the judge invocation authenticates successfully rather than failing with a not-logged-in response
+
+#### Scenario: Repo-local settings remain excluded
+
+- **WHEN** the judge is invoked from a directory containing a project or local settings file
+- **THEN** those settings are not loaded, because only the `user` setting source is enabled
+
 ### Requirement: Resolved judge model identity
 
 The system SHALL record the concrete model that produced a verdict, not the possibly-floating alias the user configured. The Claude CLI backend SHALL read the resolved model identifier from the response envelope's `modelUsage` map and SHALL set the returned `Verdict.judge_model` to that concrete identifier.
