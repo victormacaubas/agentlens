@@ -10,22 +10,12 @@ DIMENSION_NAMES: Final[tuple[str, ...]] = (
     "efficiency",
     "scope_adherence",
 )
-
-# Closed set of things a suggested fix may name as its target. A fix's
-# `target` must be one of these — never an arbitrary file path or command —
-# so a fix stays a description of a change to the agent's own guidance.
 FIX_TARGETS: Final[tuple[str, ...]] = (
     "agent_instructions",
     "declared_tools",
     "declared_skills",
     "caller_task_phrasing",
 )
-
-# Bounds on the judge's structured output. Fixes are capped well above what
-# a genuine verdict needs and well below what padding the channel would
-# require. Evidence bounds mirror the same reasoning: the prompt asks for
-# 1-3 short citations per dimension, so the cap sits comfortably above that
-# while a per-item length limit keeps each citation to roughly a sentence.
 MAX_SUGGESTED_FIXES: Final[int] = 5
 MAX_EVIDENCE_ITEMS: Final[int] = 6
 MAX_EVIDENCE_ITEM_LENGTH: Final[int] = 300

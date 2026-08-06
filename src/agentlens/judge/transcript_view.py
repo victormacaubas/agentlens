@@ -23,11 +23,6 @@ NO_FINAL_REPORT: Final[str] = "(no final report)"
 NO_TASK_DESCRIPTION: Final[str] = "(no task description)"
 UNKNOWN_PATH: Final[str] = "?"
 TOKENS_PER_K: Final[int] = 1000
-
-# PERF-01: the view must stay under a hard byte ceiling regardless of how
-# large the raw transcript is. Fixed sections (Task, Identity, Facts,
-# Errors & Denials) are already bounded; the remaining budget is split
-# between the two unbounded sections (Final Report, Tool Sequence).
 VIEW_MAX_BYTES: Final[int] = 20_480
 TOOL_SEQUENCE_HEAD: Final[int] = 40
 TOOL_SEQUENCE_TAIL: Final[int] = 10
