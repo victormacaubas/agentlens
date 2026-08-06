@@ -54,8 +54,6 @@ class ClaudeCliJudge:
         self._check_claude_available()
         args = self._build_args()
 
-        # The subprocess must not inherit agentlens's working directory, which
-        # may contain a `.claude/settings.local.json` that would reconfigure it.
         with tempfile.TemporaryDirectory() as tmp_cwd:
             try:
                 result = subprocess.run(
