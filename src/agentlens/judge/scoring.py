@@ -266,9 +266,7 @@ class ScoringLoop:
                 f"failed to read transcript for {session.session_id} at {jsonl_path}"
             ) from exc
         verdict = self.judge.score(transcript_view, self.rubric_version)
-        # judge_model is not overwritten: it is the backend's resolved
-        # concrete identifier, not the loop's (possibly-floating) configured
-        # value, and only the backend knows which one it actually used.
+
         return replace(
             verdict,
             session_id=session.session_id,
