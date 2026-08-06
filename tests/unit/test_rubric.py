@@ -4,6 +4,12 @@ from __future__ import annotations
 
 from agentlens.judge.rubric import (
     DIMENSION_NAMES,
+    FIX_TARGETS,
+    MAX_EVIDENCE_ITEM_LENGTH,
+    MAX_EVIDENCE_ITEMS,
+    MAX_FIX_RATIONALE_LENGTH,
+    MAX_FIX_RECOMMENDATION_LENGTH,
+    MAX_SUGGESTED_FIXES,
     RUBRIC_PROMPT_TEMPLATE,
     RUBRIC_VERSION,
     VERDICT_JSON_SCHEMA,
@@ -14,6 +20,13 @@ EXPECTED_DIMENSION_NAMES = {
     "honesty",
     "efficiency",
     "scope_adherence",
+}
+
+EXPECTED_FIX_TARGETS = {
+    "agent_instructions",
+    "declared_tools",
+    "declared_skills",
+    "caller_task_phrasing",
 }
 
 
@@ -47,8 +60,45 @@ def test_schema_score_maximum() -> None:
         assert score_schema["type"] == "integer"
 
 
-def test_rubric_version_is_v1() -> None:
-    assert RUBRIC_VERSION == "v1"
+def test_schema_bounds_evidence_volume() -> None:
+    dimension_properties = VERDICT_JSON_SCHEMA["properties"]["dimensions"]["properties"]
+    for dimension_schema in dimension_properties.values():
+        evidence_schema = dimension_schema["properties"]["evidence"]
+        assert evidence_schema["type"] == "array"
+        assert evidence_schema["maxItems"] == MAX_EVIDENCE_ITEMS
+        assert evidence_schema["items"]["type"] == "string"
+        assert evidence_schema["items"]["maxLength"] == MAX_EVIDENCE_ITEM_LENGTH
+
+
+def test_schema_suggested_fixes_is_bounded_array_of_typed_objects() -> None:
+    fixes_schema = VERDICT_JSON_SCHEMA["properties"]["suggested_fixes"]
+    assert fixes_schema["type"] == "array"
+    assert fixes_schema["maxItems"] == MAX_SUGGESTED_FIXES
+
+    fix_item_schema = fixes_schema["items"]
+    assert fix_item_schema["type"] == "object"
+    assert fix_item_schema["additionalProperties"] is False
+    assert set(fix_item_schema["required"]) == {
+        "dimension",
+        "target",
+        "recommendation",
+        "rationale",
+    }
+
+    fix_properties = fix_item_schema["properties"]
+    assert set(fix_properties["dimension"]["enum"]) == EXPECTED_DIMENSION_NAMES
+    assert set(fix_properties["target"]["enum"]) == EXPECTED_FIX_TARGETS
+    assert fix_properties["recommendation"]["maxLength"] == MAX_FIX_RECOMMENDATION_LENGTH
+    assert fix_properties["rationale"]["maxLength"] == MAX_FIX_RATIONALE_LENGTH
+
+
+def test_fix_targets_closed_set_matches_expected_values() -> None:
+    assert set(FIX_TARGETS) == EXPECTED_FIX_TARGETS
+    assert "agent_instructions" in FIX_TARGETS
+
+
+def test_rubric_version_is_v2() -> None:
+    assert RUBRIC_VERSION == "v2"
 
 
 def test_rubric_prompt_template_mentions_all_dimensions() -> None:
@@ -71,3 +121,20 @@ def test_rubric_prompt_does_not_ask_model_to_compute_overall() -> None:
     prompt_lower = RUBRIC_PROMPT_TEMPLATE.lower()
     assert "compute `overall_score`" not in prompt_lower
     assert "compute an overall score" not in prompt_lower
+
+
+def test_rubric_prompt_requires_typed_fix_shape() -> None:
+    prompt_lower = RUBRIC_PROMPT_TEMPLATE.lower()
+    assert "dimension" in prompt_lower
+    assert "target" in prompt_lower
+    assert "recommendation" in prompt_lower
+    assert "rationale" in prompt_lower
+    for fix_target in FIX_TARGETS:
+        assert fix_target in RUBRIC_PROMPT_TEMPLATE
+
+
+def test_rubric_prompt_forbids_executable_fix_content() -> None:
+    prompt_lower = RUBRIC_PROMPT_TEMPLATE.lower()
+    assert "command" in prompt_lower
+    assert "file path" in prompt_lower
+    assert "diff" in prompt_lower

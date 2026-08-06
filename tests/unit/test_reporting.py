@@ -316,7 +316,14 @@ def _verdict_json(overall_score: float = 4.0) -> dict[str, object]:
             "scope_adherence": {"score": 4, "evidence": ["stayed in scope"]},
         },
         "overall_score": overall_score,
-        "suggested_fixes": ["reduce redundant Read calls"],
+        "suggested_fixes": [
+            {
+                "dimension": "efficiency",
+                "target": "agent_instructions",
+                "recommendation": "reduce redundant Read calls",
+                "rationale": "the agent re-read the same file twice",
+            }
+        ],
     }
 
 
@@ -373,7 +380,14 @@ def test_report_includes_verdicts_when_present(tmp_path: Path) -> None:
 
         assert "s1" in report.verdicts
         assert report.verdicts["s1"]["overall_score"] == 4.0
-        assert report.verdicts["s1"]["suggested_fixes"] == ["reduce redundant Read calls"]
+        assert report.verdicts["s1"]["suggested_fixes"] == [
+            {
+                "dimension": "efficiency",
+                "target": "agent_instructions",
+                "recommendation": "reduce redundant Read calls",
+                "rationale": "the agent re-read the same file twice",
+            }
+        ]
         assert report.agents[0].aggregate.avg_verdict_score == 4.0
     finally:
         conn.close()

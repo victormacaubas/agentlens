@@ -14,6 +14,7 @@ import pytest
 
 from agentlens.errors import JudgeError, JudgeTimeoutError, JudgeUnavailableError
 from agentlens.judge.claude_cli import DEFAULT_TIMEOUT_SECONDS, ClaudeCliJudge
+from agentlens.judge.protocol import SuggestedFix
 
 NOT_LOGGED_IN_ENVELOPE: dict[str, Any] = {
     "is_error": True,
@@ -62,7 +63,14 @@ MOCK_ENVELOPE: dict[str, Any] = {
             "efficiency": {"score": 3, "evidence": ["some unnecessary reads"]},
             "scope_adherence": {"score": 4, "evidence": ["stayed within brief"]},
         },
-        "suggested_fixes": ["reduce redundant Read calls"],
+        "suggested_fixes": [
+            {
+                "dimension": "efficiency",
+                "target": "agent_instructions",
+                "recommendation": "reduce redundant Read calls",
+                "rationale": "the agent re-read the same file twice in this run",
+            }
+        ],
     },
     "is_error": False,
     "session_id": "judge-session-123",
@@ -71,6 +79,16 @@ MOCK_ENVELOPE: dict[str, Any] = {
     "modelUsage": {"claude-sonnet-5": _model_usage_entry()},
     "duration_ms": 5200,
 }
+
+
+def _envelope_with_suggested_fixes(suggested_fixes: list[Any]) -> dict[str, Any]:
+    return {
+        **MOCK_ENVELOPE,
+        "structured_output": {
+            **MOCK_ENVELOPE["structured_output"],
+            "suggested_fixes": suggested_fixes,
+        },
+    }
 
 
 @patch("agentlens.judge.claude_cli.subprocess.run")
@@ -90,7 +108,14 @@ def test_successful_scoring(mock_which: MagicMock, mock_run: MagicMock) -> None:
     assert verdict.judge_cost_usd == 0.019
     assert verdict.judge_input_tokens == 3200
     assert verdict.judge_output_tokens == 850
-    assert verdict.suggested_fixes == ["reduce redundant Read calls"]
+    assert verdict.suggested_fixes == [
+        SuggestedFix(
+            dimension="efficiency",
+            target="agent_instructions",
+            recommendation="reduce redundant Read calls",
+            rationale="the agent re-read the same file twice in this run",
+        )
+    ]
     assert verdict.dimensions["task_completion"].score == 4
     assert verdict.dimensions["task_completion"].evidence == ["completed all tasks"]
     assert judge.resolved_model == "claude-sonnet-5"
@@ -349,6 +374,85 @@ def test_dimension_score_negative_rejected(mock_which: MagicMock, mock_run: Magi
         "total_cost_usd": 0.019,
         "usage": {"input_tokens": 3200, "output_tokens": 850},
     }
+    mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(envelope), stderr="")
+    judge = ClaudeCliJudge(model="sonnet")
+
+    with pytest.raises(JudgeError):
+        judge.score("transcript text", "v1")
+
+
+@patch("agentlens.judge.claude_cli.subprocess.run")
+@patch("agentlens.judge.claude_cli.shutil.which", return_value="/usr/bin/claude")
+def test_typed_fix_is_accepted(mock_which: MagicMock, mock_run: MagicMock) -> None:
+    envelope = _envelope_with_suggested_fixes(
+        [
+            {
+                "dimension": "honesty",
+                "target": "agent_instructions",
+                "recommendation": "state explicitly when a verification step was skipped",
+                "rationale": "the report claimed completion despite a skipped step",
+            }
+        ]
+    )
+    mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(envelope), stderr="")
+    judge = ClaudeCliJudge(model="sonnet")
+
+    verdict = judge.score("transcript text", "v1")
+
+    assert verdict.suggested_fixes == [
+        SuggestedFix(
+            dimension="honesty",
+            target="agent_instructions",
+            recommendation="state explicitly when a verification step was skipped",
+            rationale="the report claimed completion despite a skipped step",
+        )
+    ]
+
+
+@patch("agentlens.judge.claude_cli.subprocess.run")
+@patch("agentlens.judge.claude_cli.shutil.which", return_value="/usr/bin/claude")
+def test_unknown_fix_dimension_rejected(mock_which: MagicMock, mock_run: MagicMock) -> None:
+    envelope = _envelope_with_suggested_fixes(
+        [
+            {
+                "dimension": "made_up_dimension",
+                "target": "agent_instructions",
+                "recommendation": "some change",
+                "rationale": "some reason",
+            }
+        ]
+    )
+    mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(envelope), stderr="")
+    judge = ClaudeCliJudge(model="sonnet")
+
+    with pytest.raises(JudgeError):
+        judge.score("transcript text", "v1")
+
+
+@patch("agentlens.judge.claude_cli.subprocess.run")
+@patch("agentlens.judge.claude_cli.shutil.which", return_value="/usr/bin/claude")
+def test_out_of_set_fix_target_rejected(mock_which: MagicMock, mock_run: MagicMock) -> None:
+    envelope = _envelope_with_suggested_fixes(
+        [
+            {
+                "dimension": "honesty",
+                "target": "/etc/passwd",
+                "recommendation": "some change",
+                "rationale": "some reason",
+            }
+        ]
+    )
+    mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(envelope), stderr="")
+    judge = ClaudeCliJudge(model="sonnet")
+
+    with pytest.raises(JudgeError):
+        judge.score("transcript text", "v1")
+
+
+@patch("agentlens.judge.claude_cli.subprocess.run")
+@patch("agentlens.judge.claude_cli.shutil.which", return_value="/usr/bin/claude")
+def test_bare_string_fix_list_rejected(mock_which: MagicMock, mock_run: MagicMock) -> None:
+    envelope = _envelope_with_suggested_fixes(["reduce redundant Read calls"])
     mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(envelope), stderr="")
     judge = ClaudeCliJudge(model="sonnet")
 

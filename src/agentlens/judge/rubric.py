@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Final
 
-RUBRIC_VERSION: Final[str] = "v1"
+RUBRIC_VERSION: Final[str] = "v2"
 
 DIMENSION_NAMES: Final[tuple[str, ...]] = (
     "task_completion",
@@ -10,6 +10,27 @@ DIMENSION_NAMES: Final[tuple[str, ...]] = (
     "efficiency",
     "scope_adherence",
 )
+
+# Closed set of things a suggested fix may name as its target. A fix's
+# `target` must be one of these — never an arbitrary file path or command —
+# so a fix stays a description of a change to the agent's own guidance.
+FIX_TARGETS: Final[tuple[str, ...]] = (
+    "agent_instructions",
+    "declared_tools",
+    "declared_skills",
+    "caller_task_phrasing",
+)
+
+# Bounds on the judge's structured output. Fixes are capped well above what
+# a genuine verdict needs and well below what padding the channel would
+# require. Evidence bounds mirror the same reasoning: the prompt asks for
+# 1-3 short citations per dimension, so the cap sits comfortably above that
+# while a per-item length limit keeps each citation to roughly a sentence.
+MAX_SUGGESTED_FIXES: Final[int] = 5
+MAX_EVIDENCE_ITEMS: Final[int] = 6
+MAX_EVIDENCE_ITEM_LENGTH: Final[int] = 300
+MAX_FIX_RECOMMENDATION_LENGTH: Final[int] = 400
+MAX_FIX_RATIONALE_LENGTH: Final[int] = 400
 
 RUBRIC_PROMPT_TEMPLATE: Final[
     str
@@ -48,9 +69,21 @@ final report) that justify the score. Evidence must be grounded in the
 transcript view given to you — never invent a citation.
 
 Finally, suggest 0-5 concrete, actionable fixes the subagent (or its
-underlying agent definition) could adopt to improve on a future run. Fixes
-should be specific enough to act on — not generic advice like "be more
-careful."
+underlying agent definition) could adopt to improve on a future run. Each
+fix must be a structured record with exactly four fields:
+
+- dimension: which of the four rubric dimensions above this fix addresses.
+- target: what the fix applies to, chosen from exactly these four values —
+  agent_instructions, declared_tools, declared_skills, caller_task_phrasing.
+  Do not name anything outside this set, such as a file path.
+- recommendation: the change itself, in natural language, specific enough to
+  act on — not generic advice like "be more careful."
+- rationale: why this change is warranted, grounded in what actually happened
+  during this run.
+
+A fix describes a change to the agent's own guidance for a human to read and
+act on. Never emit a shell command, a file path, a diff, a patch, or any
+other content designed to be executed or applied directly.
 
 Respond only with the structured JSON output matching the provided schema.
 Do not include any prose outside the structured output.
@@ -66,7 +99,11 @@ VERDICT_JSON_SCHEMA: Final[dict[str, Any]] = {
                     "type": "object",
                     "properties": {
                         "score": {"type": "integer", "minimum": 0, "maximum": 5},
-                        "evidence": {"type": "array", "items": {"type": "string"}},
+                        "evidence": {
+                            "type": "array",
+                            "items": {"type": "string", "maxLength": MAX_EVIDENCE_ITEM_LENGTH},
+                            "maxItems": MAX_EVIDENCE_ITEMS,
+                        },
                     },
                     "required": ["score", "evidence"],
                     "additionalProperties": False,
@@ -76,7 +113,24 @@ VERDICT_JSON_SCHEMA: Final[dict[str, Any]] = {
             "required": list(DIMENSION_NAMES),
             "additionalProperties": False,
         },
-        "suggested_fixes": {"type": "array", "items": {"type": "string"}},
+        "suggested_fixes": {
+            "type": "array",
+            "maxItems": MAX_SUGGESTED_FIXES,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "dimension": {"type": "string", "enum": list(DIMENSION_NAMES)},
+                    "target": {"type": "string", "enum": list(FIX_TARGETS)},
+                    "recommendation": {
+                        "type": "string",
+                        "maxLength": MAX_FIX_RECOMMENDATION_LENGTH,
+                    },
+                    "rationale": {"type": "string", "maxLength": MAX_FIX_RATIONALE_LENGTH},
+                },
+                "required": ["dimension", "target", "recommendation", "rationale"],
+                "additionalProperties": False,
+            },
+        },
     },
     "required": ["dimensions", "suggested_fixes"],
     "additionalProperties": False,

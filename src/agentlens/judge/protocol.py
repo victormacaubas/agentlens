@@ -13,6 +13,24 @@ class DimensionScore:
 
 
 @dataclass(frozen=True)
+class SuggestedFix:
+    """A judge-recommended change to an agent's own guidance.
+
+    `dimension` ties the fix to the rubric dimension it addresses.  `target`
+    names what the fix applies to, drawn from the closed set defined in
+    `agentlens.judge.rubric.FIX_TARGETS` — never an arbitrary file path or
+    command. `recommendation` and `rationale` are natural-language text
+    supplied by the judge model and are untrusted, unlike the other two
+    fields, which the parse boundary validates against fixed sets.
+    """
+
+    dimension: str
+    target: str
+    recommendation: str
+    rationale: str
+
+
+@dataclass(frozen=True)
 class Verdict:
     """A judge's scoring of one session against a pinned rubric version."""
 
@@ -21,7 +39,7 @@ class Verdict:
     judge_model: str
     dimensions: dict[str, DimensionScore]
     overall_score: float
-    suggested_fixes: list[str]
+    suggested_fixes: list[SuggestedFix]
     judge_cost_usd: float
     judge_input_tokens: int
     judge_output_tokens: int
@@ -31,6 +49,12 @@ class Verdict:
 
         Excludes `session_id`, `rubric_version`, `judge_model`, and the judge
         cost fields — those are stored as dedicated columns on `fact_verdict`.
+
+        The payload carries a `provenance` manifest alongside the existing
+        fields so any consumer can tell, without reimplementing pipeline
+        knowledge, which values are locally derived and validated versus
+        which are free text authored by the judge model from untrusted
+        transcript content.
         """
         return {
             "dimensions": {
@@ -38,7 +62,23 @@ class Verdict:
                 for name, dim in self.dimensions.items()
             },
             "overall_score": self.overall_score,
-            "suggested_fixes": self.suggested_fixes,
+            "suggested_fixes": [
+                {
+                    "dimension": fix.dimension,
+                    "target": fix.target,
+                    "recommendation": fix.recommendation,
+                    "rationale": fix.rationale,
+                }
+                for fix in self.suggested_fixes
+            ],
+            "provenance": {
+                "locally_derived": ["overall_score", "dimensions.*.score"],
+                "untrusted_model_output": [
+                    "dimensions.*.evidence",
+                    "suggested_fixes[].recommendation",
+                    "suggested_fixes[].rationale",
+                ],
+            },
         }
 
 
