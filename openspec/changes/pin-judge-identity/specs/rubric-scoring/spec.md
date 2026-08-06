@@ -6,15 +6,22 @@ The system SHALL implement a scoring loop that: resolves a window of sessions, q
 
 The `judge_model` component of verdict identity SHALL be the concrete model identifier resolved by the judge backend, never the alias supplied at the CLI. The loop SHALL NOT overwrite the backend's resolved `judge_model` with its configured value; it sets only `session_id` and `rubric_version`, which are the loop's own facts. Consequently, when a floating alias advances to a new underlying model, sessions previously scored under the prior model SHALL be reported as unscored and re-scored, rather than colliding with the existing verdicts on the same key.
 
+Because only a judge call resolves an alias to a concrete identifier, and nothing in the store maps one to the other, the loop SHALL determine its unscored set in two stages when configured with a value that is not itself a concrete identifier. It SHALL first take the set keyed on the configured value as an upper bound, score one candidate from it to obtain the resolved identifier, and then re-query the remaining candidates keyed on that resolved identifier. A run in which every session is already scored under the resolved identifier therefore costs exactly one judge call, not zero — the price of learning what the alias currently points at.
+
 #### Scenario: Only unscored sessions are judged
 
 - **WHEN** the loop runs on a window of 20 sessions where 15 already have verdicts
-- **THEN** the judge is called exactly 5 times (for the unscored sessions)
+- **THEN** the judge is called for the 5 unscored sessions, plus at most one resolution call against an already-scored session when the resolved identifier is not yet known
 
 #### Scenario: Re-run after full scoring is free
 
-- **WHEN** all sessions in a window already have verdicts for the current rubric and resolved model
+- **WHEN** all sessions in a window already have verdicts for the current rubric, and the configured judge model is itself a concrete identifier so no resolution is needed
 - **THEN** the loop makes zero judge calls and reports "all sessions already scored"
+
+#### Scenario: Re-run under an alias costs one resolution call
+
+- **WHEN** all sessions in a window already have verdicts for the current rubric and resolved model, but the loop was configured with an alias whose resolved identifier is not yet known
+- **THEN** the loop makes a single judge call to resolve the alias, re-queries against the resolved identifier, finds nothing further to score, and reports that all sessions are already scored
 
 #### Scenario: Persisted verdicts survive failures
 

@@ -1,6 +1,7 @@
 """Tests for `agentlens.judge.scoring.ScoringLoop`: per-session pass/fail
-handling, the 3-consecutive-failure abort, idempotent re-runs, and the
-`find_unscored_sessions` window/model filter.
+handling, the 3-consecutive-failure abort, idempotent re-runs, the
+`find_unscored_sessions` window/model filter, and `score_window`'s
+alias-resolution flow.
 """
 
 from __future__ import annotations
@@ -21,23 +22,36 @@ from agentlens.store.schema import create_store
 
 _DIMENSION_NAMES = ("task_completion", "honesty", "efficiency", "scope_adherence")
 
+DEFAULT_RESOLVED_MODEL = "claude-sonnet-5"
+
 
 class MockJudge:
     """A `Judge` stand-in that fails for sessions whose task description
     (embedded in the transcript view's `## Task` section) is in
-    `fail_session_ids`, and otherwise returns a valid `Verdict`.
+    `fail_session_ids`, and otherwise returns a valid `Verdict` carrying
+    `reports_as` as its resolved model.
+
+    Mirrors `ClaudeCliJudge`'s real behavior: `resolved_model` stays `None`
+    until a call to `score()` succeeds, so a loop that never scores a
+    session with this judge never observes a resolved identity either.
     """
 
-    def __init__(self, fail_session_ids: set[str] | None = None) -> None:
+    def __init__(
+        self, fail_session_ids: set[str] | None = None, *, reports_as: str = DEFAULT_RESOLVED_MODEL
+    ) -> None:
         self.fail_session_ids = fail_session_ids or set()
         self.calls: list[str] = []
+        self.reports_as = reports_as
+        self.resolved_model: str | None = None
 
     def score(self, transcript_view: str, rubric_version: str) -> Verdict:
         self.calls.append(transcript_view)
         session_marker = _extract_task_marker(transcript_view)
         if session_marker in self.fail_session_ids:
             raise JudgeError(f"mock judge failure for {session_marker}")
-        return _make_verdict(session_marker, rubric_version)
+        verdict = _make_verdict(session_marker, rubric_version, judge_model=self.reports_as)
+        self.resolved_model = verdict.judge_model
+        return verdict
 
 
 def _extract_task_marker(transcript_view: str) -> str:
@@ -46,16 +60,18 @@ def _extract_task_marker(transcript_view: str) -> str:
     without `score()` ever being told a session_id directly (matching the
     real `Judge` Protocol's signature).
     """
-    
+
     task_section = transcript_view.split("\n\n## Agent Identity")[0]
     return task_section.removeprefix("## Task\n")
 
 
-def _make_verdict(session_marker: str, rubric_version: str) -> Verdict:
+def _make_verdict(
+    session_marker: str, rubric_version: str, *, judge_model: str = DEFAULT_RESOLVED_MODEL
+) -> Verdict:
     return Verdict(
         session_id="",  # overwritten by ScoringLoop._score_session via replace()
         rubric_version=rubric_version,
-        judge_model="mock-model",
+        judge_model=judge_model,
         dimensions={
             name: DimensionScore(score=4, evidence=[f"evidence for {session_marker}"])
             for name in _DIMENSION_NAMES
@@ -180,6 +196,8 @@ class _UnavailableJudge:
     """A `Judge` stand-in whose every call raises `JudgeUnavailableError`,
     simulating an unavailable judge backend (e.g. missing credentials).
     """
+
+    resolved_model: str | None = None
 
     def score(self, transcript_view: str, rubric_version: str) -> Verdict:
         raise JudgeUnavailableError("claude -p reported it is not logged in")
@@ -387,5 +405,128 @@ def test_find_unscored_filters_by_window_and_model(tmp_path: Path) -> None:
         unscored_ids = {record.session_id for record in unscored}
 
         assert unscored_ids == {"in-window-unscored", "scored-other-model"}
+    finally:
+        conn.close()
+
+
+def test_score_session_preserves_backend_resolved_model(tmp_path: Path) -> None:
+    """The loop must not overwrite the backend's resolved model with its own
+    configured value: `run()` scoring under an alias still persists the
+    concrete identifier the judge actually reported.
+    """
+    conn = create_store(tmp_path / "store.db")
+    try:
+        jsonl_paths = _seed_sessions(conn, tmp_path, ["s1"])
+        sessions = [_session_record("s1")]
+        judge = MockJudge(reports_as="claude-sonnet-5")
+        loop = _make_loop(conn, judge, judge_model="sonnet")
+
+        result = loop.run(sessions, jsonl_paths=jsonl_paths)
+
+        assert result.scored == 1
+        persisted_model = conn.execute(
+            "SELECT judge_model FROM fact_verdict WHERE session_id = ?", ("s1",)
+        ).fetchone()[0]
+        assert persisted_model == "claude-sonnet-5"
+    finally:
+        conn.close()
+
+
+def test_score_window_skips_resolution_when_configured_model_is_concrete(tmp_path: Path) -> None:
+    """A concrete configured model needs no resolution call: the
+    unscored-set query is already exact, so a fully-scored window costs
+    zero judge calls.
+    """
+    conn = create_store(tmp_path / "store.db")
+    try:
+        jsonl_paths = _seed_sessions(conn, tmp_path, ["s1"])
+        loop = _make_loop(conn, MockJudge(), judge_model="claude-sonnet-5")
+        loop.persist_verdict(
+            Verdict(
+                session_id="s1",
+                rubric_version="v1",
+                judge_model="claude-sonnet-5",
+                dimensions={
+                    name: DimensionScore(score=3, evidence=[]) for name in _DIMENSION_NAMES
+                },
+                overall_score=3.0,
+                suggested_fixes=[],
+                judge_cost_usd=0.01,
+                judge_input_tokens=10,
+                judge_output_tokens=5,
+            )
+        )
+        window = WindowRange(start=date(2026, 7, 4), end=date(2026, 7, 11))
+
+        result = loop.score_window(window=window, jsonl_paths=jsonl_paths)
+
+        assert result.scored == 0
+        assert result.skipped == 0
+    finally:
+        conn.close()
+
+
+def test_score_window_resolves_alias_with_one_call_when_fully_scored(tmp_path: Path) -> None:
+    """When every session is already scored under the resolved identifier
+    but the loop is configured with the alias, one resolution call is made
+    and the re-query finds nothing further to score.
+    """
+    conn = create_store(tmp_path / "store.db")
+    try:
+        jsonl_paths = _seed_sessions(conn, tmp_path, ["s1", "s2"])
+        for session_id in ("s1", "s2"):
+            _make_loop(conn, MockJudge(), judge_model="claude-sonnet-5").persist_verdict(
+                Verdict(
+                    session_id=session_id,
+                    rubric_version="v1",
+                    judge_model="claude-sonnet-5",
+                    dimensions={
+                        name: DimensionScore(score=3, evidence=[]) for name in _DIMENSION_NAMES
+                    },
+                    overall_score=3.0,
+                    suggested_fixes=[],
+                    judge_cost_usd=0.01,
+                    judge_input_tokens=10,
+                    judge_output_tokens=5,
+                )
+            )
+        judge = MockJudge(reports_as="claude-sonnet-5")
+        loop = _make_loop(conn, judge, judge_model="sonnet")
+        window = WindowRange(start=date(2026, 7, 4), end=date(2026, 7, 11))
+
+        result = loop.score_window(window=window, jsonl_paths=jsonl_paths)
+
+        assert len(judge.calls) == 1
+        assert result.scored == 1
+        assert result.skipped == 0
+    finally:
+        conn.close()
+
+
+def test_score_window_alias_movement_invalidates_prior_verdicts(tmp_path: Path) -> None:
+    """When the alias later resolves to a different concrete model, the
+    session is reported unscored under the new model and re-scored, while
+    the earlier verdict remains in the store as a separate row.
+    """
+    conn = create_store(tmp_path / "store.db")
+    try:
+        jsonl_paths = _seed_sessions(conn, tmp_path, ["s1"])
+        window = WindowRange(start=date(2026, 7, 4), end=date(2026, 7, 11))
+
+        old_judge = MockJudge(reports_as="claude-sonnet-4")
+        old_loop = _make_loop(conn, old_judge, judge_model="sonnet")
+        first_result = old_loop.score_window(window=window, jsonl_paths=jsonl_paths)
+        assert first_result.scored == 1
+
+        new_judge = MockJudge(reports_as="claude-sonnet-5")
+        new_loop = _make_loop(conn, new_judge, judge_model="sonnet")
+        second_result = new_loop.score_window(window=window, jsonl_paths=jsonl_paths)
+        assert second_result.scored == 1
+
+        rows = conn.execute(
+            "SELECT judge_model FROM fact_verdict WHERE session_id = ? ORDER BY judge_model",
+            ("s1",),
+        ).fetchall()
+        assert {row[0] for row in rows} == {"claude-sonnet-4", "claude-sonnet-5"}
     finally:
         conn.close()

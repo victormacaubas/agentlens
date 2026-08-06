@@ -43,6 +43,14 @@ class Verdict:
 
 
 class Judge(Protocol):
-    """Structural interface for a verdict-scoring backend."""
+    """Structural interface for a verdict-scoring backend.
+
+    `resolved_model` exposes the concrete model identifier a backend
+    resolved a possibly-floating `model` configuration to. It is `None`
+    until a call to `score()` succeeds, so a caller that needs the resolved
+    identity (e.g. to key a store query on it) must call `score()` first.
+    """
+
+    resolved_model: str | None
 
     def score(self, transcript_view: str, rubric_version: str) -> Verdict: ...

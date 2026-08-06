@@ -243,7 +243,7 @@ def test_build_report_parent_lens_summarizes_fanout_and_health(tmp_path: Path) -
         row = report.parent_lens[0]
         assert row.parent_session_id == "parent-1"
         assert row.n_spawns == 4
-        assert row.n_failures == 1
+        assert row.n_spawns_with_errors == 1
         assert row.n_denial_spawns == 1
     finally:
         conn.close()
@@ -261,6 +261,29 @@ def test_to_verdict_slice_has_no_score_fields(tmp_path: Path) -> None:
 
         assert "score" not in serialized.lower()
         assert slice_dict["agents"][0]["n_spawns"] == 1
+    finally:
+        conn.close()
+
+
+def test_to_verdict_slice_has_no_n_failures_key(tmp_path: Path) -> None:
+    conn = _store(tmp_path)
+    try:
+        for i in range(6):
+            upsert_session(conn, _session(f"cur{i}", session_date="2026-07-05", n_errors=1))
+        for i in range(6):
+            upsert_session(conn, _session(f"prior{i}", session_date="2026-06-28"))
+        upsert_session(conn, _session("s0", parent_session_id="parent-1", n_errors=1))
+
+        window = WindowRange(start=date(2026, 7, 4), end=date(2026, 7, 11))
+        report = build_report(conn, window=window, min_sessions_for_trend=5)
+
+        result = report.agents[0]
+        assert result.delta is not None
+        assert "n_spawns_with_errors" in result.delta
+
+        payload = json.dumps(report.to_verdict_slice())
+        assert "n_failures" not in payload
+        assert "n_spawns_with_errors" in payload
     finally:
         conn.close()
 

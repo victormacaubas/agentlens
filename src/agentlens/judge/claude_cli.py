@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+from pathlib import Path
 from typing import Any, Final
 
 from agentlens.errors import JudgeError, JudgeTimeoutError, JudgeUnavailableError
@@ -16,32 +17,18 @@ from agentlens.judge.protocol import DimensionScore, Verdict
 from agentlens.judge.rubric import DIMENSION_NAMES, RUBRIC_PROMPT_TEMPLATE, VERDICT_JSON_SCHEMA
 
 DEFAULT_MODEL: Final[str] = "sonnet"
-DEFAULT_TIMEOUT_SECONDS: Final[int] = 60
+DEFAULT_TIMEOUT_SECONDS: Final[int] = 180
 MAX_TURNS: Final[str] = "3"
 CLAUDE_EXECUTABLE: Final[str] = "claude"
 OUTPUT_EXCERPT_MAX_CHARS: Final[int] = 500
-
-# Omitting `--allowedTools` does not deny tools; it selects the CLI's default,
-# which grants the full built-in set. `--tools ""` removes the tools themselves.
 NO_TOOLS: Final[str] = ""
-
-# `user` cannot be dropped: under `--bare` it is the only auth channel the CLI
-# accepts. Excluding `project`/`local` keeps a repo-local settings file from
-# reconfiguring the judge.
 SETTING_SOURCES: Final[str] = "user"
-
-# Prefix match rather than an enumerated list: machines authenticate via
-# different variables (`ANTHROPIC_API_KEY`, or `ANTHROPIC_AUTH_TOKEN` plus
-# `ANTHROPIC_BASE_URL` behind a gateway).
 _ENV_PASSTHROUGH_NAMES: Final[frozenset[str]] = frozenset({"PATH", "HOME"})
 _ENV_PASSTHROUGH_PREFIX: Final[str] = "ANTHROPIC_"
-
-# Loose substring match: the CLI's message carries a `·` separator whose exact
-# form is not worth depending on.
 _NOT_LOGGED_IN_MARKER: Final[str] = "not logged in"
 _AUTH_REMEDY: Final[str] = (
-    "set ANTHROPIC_API_KEY or configure apiKeyHelper (OAuth/keychain login "
-    "is not read under --bare)"
+    "set ANTHROPIC_API_KEY, or add apiKeyHelper to ~/.claude/settings.json "
+    "(read via --settings under --bare; OAuth/keychain login is not read)"
 )
 
 
@@ -50,7 +37,9 @@ class ClaudeCliJudge:
 
     Availability is checked lazily on the first `score()` call rather than at
     construction time, so instantiating the judge never touches the
-    filesystem or environment.
+    filesystem or environment. `resolved_model` stays `None` until a
+    successful `score()` call resolves `model` (which may be a floating
+    alias) to the concrete identifier the CLI actually used.
     """
 
     def __init__(
@@ -58,14 +47,13 @@ class ClaudeCliJudge:
     ) -> None:
         self.model = model
         self.timeout_seconds = timeout_seconds
+        self.resolved_model: str | None = None
         self._checked_available = False
 
     def score(self, transcript_view: str, rubric_version: str) -> Verdict:
         self._check_claude_available()
         args = self._build_args()
 
-        # The subprocess must not inherit agentlens's working directory, which
-        # may contain a `.claude/settings.local.json` that would reconfigure it.
         with tempfile.TemporaryDirectory() as tmp_cwd:
             try:
                 result = subprocess.run(
@@ -98,7 +86,9 @@ class ClaudeCliJudge:
             result_text = envelope.get("result", "(no result)")
             raise JudgeError(f"claude -p reported an error: {result_text}")
 
-        return _build_verdict(envelope, rubric_version=rubric_version, judge_model=self.model)
+        verdict = _build_verdict(envelope, rubric_version=rubric_version)
+        self.resolved_model = verdict.judge_model
+        return verdict
 
     def _check_claude_available(self) -> None:
         if self._checked_available:
@@ -122,11 +112,17 @@ class ClaudeCliJudge:
             "--bare",
             "--tools",
             NO_TOOLS,
+            "--settings",
+            str(_user_settings_path()),
             "--setting-sources",
             SETTING_SOURCES,
             "--append-system-prompt",
             RUBRIC_PROMPT_TEMPLATE,
         ]
+
+
+def _user_settings_path() -> Path:
+    return Path.home() / ".claude" / "settings.json"
 
 
 def _build_subprocess_env() -> dict[str, str]:
@@ -177,7 +173,7 @@ def _parse_envelope(stdout: str) -> dict[str, Any]:
     return envelope
 
 
-def _build_verdict(envelope: dict[str, Any], *, rubric_version: str, judge_model: str) -> Verdict:
+def _build_verdict(envelope: dict[str, Any], *, rubric_version: str) -> Verdict:
     structured_output = envelope.get("structured_output")
     if not isinstance(structured_output, dict):
         raise JudgeError(
@@ -193,10 +189,13 @@ def _build_verdict(envelope: dict[str, Any], *, rubric_version: str, judge_model
 
     overall_score = sum(d.score for d in dimensions.values()) / len(dimensions)
 
-    raw_usage = envelope.get("usage")
-    usage: dict[str, Any] = raw_usage if isinstance(raw_usage, dict) else {}
-    input_tokens = usage.get("input_tokens", 0)
-    output_tokens = usage.get("output_tokens", 0)
+    resolved_model, model_usage = _extract_model_usage(envelope)
+    input_tokens = (
+        _numeric_field(model_usage, "inputTokens")
+        + _numeric_field(model_usage, "cacheCreationInputTokens")
+        + _numeric_field(model_usage, "cacheReadInputTokens")
+    )
+    output_tokens = _numeric_field(model_usage, "outputTokens")
     total_cost_usd = envelope.get("total_cost_usd", 0.0)
 
     session_id = envelope.get("session_id")
@@ -204,14 +203,57 @@ def _build_verdict(envelope: dict[str, Any], *, rubric_version: str, judge_model
     return Verdict(
         session_id=session_id if isinstance(session_id, str) else "",
         rubric_version=rubric_version,
-        judge_model=judge_model,
+        judge_model=resolved_model,
         dimensions=dimensions,
         overall_score=overall_score,
         suggested_fixes=suggested_fixes,
         judge_cost_usd=float(total_cost_usd) if isinstance(total_cost_usd, (int, float)) else 0.0,
-        judge_input_tokens=int(input_tokens) if isinstance(input_tokens, (int, float)) else 0,
-        judge_output_tokens=int(output_tokens) if isinstance(output_tokens, (int, float)) else 0,
+        judge_input_tokens=input_tokens,
+        judge_output_tokens=output_tokens,
     )
+
+
+def _extract_model_usage(envelope: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Extract the resolved model identifier and its usage entry from the
+    envelope's `modelUsage` map.
+
+    The identifier is the map's key, which carries the dated snapshot where a
+    model's key and its `canonicalModel` field diverge (e.g. a `haiku` call
+    resolves to key `claude-haiku-4-5-20251001` while `canonicalModel` holds
+    the undated `claude-haiku-4-5`). `canonicalModel` is used only when the
+    key itself is unusable. `modelUsage` missing, empty, or carrying more
+    than one entry raises rather than falling back to the configured alias:
+    a silent fallback would reintroduce the alias ambiguity this extraction
+    exists to remove, and multiple entries would mean the call used more
+    than one model, which no single `judge_model` value can represent.
+    """
+    raw_model_usage = envelope.get("modelUsage")
+    if not isinstance(raw_model_usage, dict) or len(raw_model_usage) != 1:
+        raise JudgeError(
+            "claude -p envelope's modelUsage must carry exactly one entry, "
+            f"got: {raw_model_usage!r}"
+        )
+    ((model_key, entry),) = raw_model_usage.items()
+    if not isinstance(entry, dict):
+        raise JudgeError(f"claude -p envelope's modelUsage entry is not an object: {entry!r}")
+
+    resolved_model = model_key if isinstance(model_key, str) and model_key else None
+    if resolved_model is None:
+        canonical_model = entry.get("canonicalModel")
+        resolved_model = (
+            canonical_model if isinstance(canonical_model, str) and canonical_model else None
+        )
+    if resolved_model is None:
+        raise JudgeError(
+            "claude -p envelope's modelUsage entry has no usable model "
+            f"identifier: {raw_model_usage!r}"
+        )
+    return resolved_model, entry
+
+
+def _numeric_field(mapping: dict[str, Any], key: str) -> int:
+    value = mapping.get(key, 0)
+    return int(value) if isinstance(value, (int, float)) else 0
 
 
 def _parse_dimensions(structured_output: dict[str, Any]) -> dict[str, DimensionScore]:
