@@ -1,7 +1,42 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Sequence
 from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class SourceRevision:
+    """A transcript snapshot's filesystem metadata and exact byte hash."""
+
+    mtime_ns: int
+    size: int
+    content_hash: str
+
+    @property
+    def identity(self) -> str:
+        payload = json.dumps(
+            [self.mtime_ns, self.size, self.content_hash],
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def agent_definition_key(
+    *,
+    agent_type: str,
+    scope: str,
+    source_project: str | None,
+    definition_hash: str,
+) -> str:
+    """Derive the immutable identity of one agent-definition version."""
+    payload = json.dumps(
+        [agent_type, scope, source_project, definition_hash],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -16,6 +51,7 @@ class ToolEventRecord:
     ts: str | None
     input_hash: str | None
     output_bytes: int | None
+    file_path_hash: str | None = None
 
 
 @dataclass(frozen=True)
@@ -29,6 +65,18 @@ class AgentDefRecord:
     declared_tools: Sequence[str]
     declared_skills: Sequence[str]
     definition_hash: str
+    scope: str = "user"
+    source_project: str | None = None
+    definition_id: str | None = None
+
+    @property
+    def effective_definition_id(self) -> str:
+        return self.definition_id or agent_definition_key(
+            agent_type=self.agent_type,
+            scope=self.scope,
+            source_project=self.source_project,
+            definition_hash=self.definition_hash,
+        )
 
 
 @dataclass(frozen=True)
@@ -69,6 +117,14 @@ class SessionRecord:
     cache_creation_tokens: int
     task_prompt_len: int | None
     n_skills_fired: int
+    raw_session_id: str = ""
+    source_project: str = ""
+    source_revision: str = ""
+    source_mtime_ns: int = 0
+    source_size: int = 0
+    source_content_hash: str = ""
+    judge_input_hash: str | None = None
+    agent_definition_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -80,3 +136,29 @@ class SkillBridgeRecord:
     declared: bool
     available: bool
     fired: bool
+
+
+@dataclass(frozen=True)
+class ScoringClaimRecord:
+    """Ownership of one pending judge call."""
+
+    session_id: str
+    judge_input_hash: str
+    rubric_version: str
+    judge_model: str
+    owner_id: str
+    expires_at: str
+
+
+@dataclass(frozen=True)
+class VerdictRecord:
+    """One input-bound verdict ready for atomic claim finalization."""
+
+    session_id: str
+    judge_input_hash: str
+    rubric_version: str
+    judge_model: str
+    verdict_json: str
+    judge_cost_usd: float
+    judge_input_tokens: int
+    judge_output_tokens: int

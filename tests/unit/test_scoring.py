@@ -6,8 +6,11 @@ alias-resolution flow.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 import sqlite3
+import threading
 from datetime import date
 from pathlib import Path
 
@@ -15,6 +18,7 @@ import pytest
 
 from agentlens.errors import JudgeError, JudgeUnavailableError
 from agentlens.judge.protocol import DimensionScore, SuggestedFix, Verdict
+from agentlens.judge.rubric import MAX_EVIDENCE_ITEM_LENGTH
 from agentlens.judge.scoring import ScoringLoop
 from agentlens.reporting.date_window import WindowRange
 from agentlens.store.models import SessionRecord
@@ -151,6 +155,34 @@ def _make_loop(
     )
 
 
+def _seed_verdict(conn: sqlite3.Connection, verdict: Verdict) -> None:
+    judge_input_hash = f"input-{verdict.session_id}"
+    with conn:
+        conn.execute(
+            "UPDATE fact_session SET judge_input_hash = ? WHERE session_id = ?",
+            (judge_input_hash, verdict.session_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO fact_verdict (
+                session_id, judge_input_hash, rubric_version, judge_model,
+                verdict_json, judge_cost_usd, judge_input_tokens, judge_output_tokens
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                verdict.session_id,
+                judge_input_hash,
+                verdict.rubric_version,
+                verdict.judge_model,
+                json.dumps(verdict.to_verdict_json()),
+                verdict.judge_cost_usd,
+                verdict.judge_input_tokens,
+                verdict.judge_output_tokens,
+            ),
+        )
+
+
 def test_loop_scores_all_sessions(tmp_path: Path) -> None:
     conn = create_store(tmp_path / "store.db")
     try:
@@ -167,6 +199,81 @@ def test_loop_scores_all_sessions(tmp_path: Path) -> None:
         assert result.aborted is False
         n_verdicts = conn.execute("SELECT COUNT(*) FROM fact_verdict").fetchone()[0]
         assert n_verdicts == 3
+    finally:
+        conn.close()
+
+
+def test_prepared_view_hash_is_session_and_verdict_identity(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "store.db")
+    try:
+        jsonl_paths = _seed_sessions(conn, tmp_path, ["s1"])
+        judge = MockJudge()
+        loop = _make_loop(conn, judge, judge_model=DEFAULT_RESOLVED_MODEL)
+
+        result = loop.run([_session_record("s1")], jsonl_paths=jsonl_paths)
+
+        expected_hash = hashlib.sha256(judge.calls[0].encode("utf-8")).hexdigest()
+        session_hash = conn.execute(
+            "SELECT judge_input_hash FROM fact_session WHERE session_id = ?",
+            ("s1",),
+        ).fetchone()[0]
+        verdict_hash = conn.execute(
+            "SELECT judge_input_hash FROM fact_verdict WHERE session_id = ?",
+            ("s1",),
+        ).fetchone()[0]
+        assert result.scored == 1
+        assert session_hash == expected_hash
+        assert verdict_hash == expected_hash
+    finally:
+        conn.close()
+
+
+def test_changed_prepared_input_creates_new_verdict_identity(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "store.db")
+    try:
+        jsonl_paths = _seed_sessions(
+            conn,
+            tmp_path,
+            ["s1"],
+            source_revision="revision-1",
+            source_mtime_ns=1,
+            source_size=1,
+            source_content_hash="content-1",
+        )
+        window = WindowRange(start=date(2026, 7, 4), end=date(2026, 7, 11))
+
+        first_judge = MockJudge()
+        first_loop = _make_loop(conn, first_judge, judge_model=DEFAULT_RESOLVED_MODEL)
+        assert first_loop.score_window(window=window, jsonl_paths=jsonl_paths).scored == 1
+
+        assert upsert_session_grain(
+            conn,
+            record=_session_record(
+                "s1",
+                task_description="changed task",
+                source_revision="revision-2",
+                source_mtime_ns=2,
+                source_size=2,
+                source_content_hash="content-2",
+            ),
+            events=[],
+            skills=[],
+        )
+        second_judge = MockJudge()
+        second_loop = _make_loop(conn, second_judge, judge_model=DEFAULT_RESOLVED_MODEL)
+
+        second_result = second_loop.score_window(window=window, jsonl_paths=jsonl_paths)
+
+        hashes = {
+            row[0]
+            for row in conn.execute(
+                "SELECT judge_input_hash FROM fact_verdict WHERE session_id = ?",
+                ("s1",),
+            ).fetchall()
+        }
+        assert second_result.scored == 1
+        assert len(hashes) == 2
+        assert len(second_judge.calls) == 1
     finally:
         conn.close()
 
@@ -223,6 +330,27 @@ def test_judge_unavailable_error_propagates_as_hard_failure(tmp_path: Path) -> N
 
         n_verdicts = conn.execute("SELECT COUNT(*) FROM fact_verdict").fetchone()[0]
         assert n_verdicts == 0
+    finally:
+        conn.close()
+
+
+def test_alias_resolution_propagates_unavailable_judge(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "store.db")
+    try:
+        jsonl_paths = _seed_sessions(conn, tmp_path, ["s1", "s2"])
+        loop = ScoringLoop(
+            judge=_UnavailableJudge(),
+            conn=conn,
+            rubric_version="v1",
+            judge_model="sonnet",
+        )
+        window = WindowRange(start=date(2026, 7, 4), end=date(2026, 7, 11))
+
+        with pytest.raises(JudgeUnavailableError):
+            loop.score_window(window=window, jsonl_paths=jsonl_paths)
+
+        assert conn.execute("SELECT COUNT(*) FROM fact_verdict").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM scoring_claim").fetchone()[0] == 0
     finally:
         conn.close()
 
@@ -369,7 +497,8 @@ def test_find_unscored_filters_by_window_and_model(tmp_path: Path) -> None:
 
         loop = _make_loop(conn, MockJudge(), judge_model="sonnet")
 
-        loop.persist_verdict(
+        _seed_verdict(
+            conn,
             Verdict(
                 session_id="scored-same-model",
                 rubric_version="v1",
@@ -384,8 +513,8 @@ def test_find_unscored_filters_by_window_and_model(tmp_path: Path) -> None:
                 judge_output_tokens=5,
             )
         )
-        other_model_loop = _make_loop(conn, MockJudge(), judge_model="opus")
-        other_model_loop.persist_verdict(
+        _seed_verdict(
+            conn,
             Verdict(
                 session_id="scored-other-model",
                 rubric_version="v1",
@@ -440,7 +569,12 @@ def test_persist_verdict_round_trips_typed_fixes_and_provenance(tmp_path: Path) 
     """
     conn = create_store(tmp_path / "store.db")
     try:
-        loop = _make_loop(conn, MockJudge(), judge_model="claude-sonnet-5")
+        upsert_session_grain(
+            conn,
+            record=_session_record("s1"),
+            events=[],
+            skills=[],
+        )
         verdict = Verdict(
             session_id="s1",
             rubric_version="v1",
@@ -463,7 +597,7 @@ def test_persist_verdict_round_trips_typed_fixes_and_provenance(tmp_path: Path) 
             judge_output_tokens=5,
         )
 
-        loop.persist_verdict(verdict)
+        _seed_verdict(conn, verdict)
 
         stored_json = conn.execute(
             "SELECT verdict_json FROM fact_verdict WHERE session_id = ?", ("s1",)
@@ -482,7 +616,8 @@ def test_score_window_skips_resolution_when_configured_model_is_concrete(tmp_pat
     try:
         jsonl_paths = _seed_sessions(conn, tmp_path, ["s1"])
         loop = _make_loop(conn, MockJudge(), judge_model="claude-sonnet-5")
-        loop.persist_verdict(
+        _seed_verdict(
+            conn,
             Verdict(
                 session_id="s1",
                 rubric_version="v1",
@@ -516,7 +651,8 @@ def test_score_window_resolves_alias_with_one_call_when_fully_scored(tmp_path: P
     try:
         jsonl_paths = _seed_sessions(conn, tmp_path, ["s1", "s2"])
         for session_id in ("s1", "s2"):
-            _make_loop(conn, MockJudge(), judge_model="claude-sonnet-5").persist_verdict(
+            _seed_verdict(
+                conn,
                 Verdict(
                     session_id=session_id,
                     rubric_version="v1",
@@ -569,5 +705,209 @@ def test_score_window_alias_movement_invalidates_prior_verdicts(tmp_path: Path) 
             ("s1",),
         ).fetchall()
         assert {row[0] for row in rows} == {"claude-sonnet-4", "claude-sonnet-5"}
+    finally:
+        conn.close()
+
+
+def test_alias_resolution_continues_after_session_failure(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "store.db")
+    try:
+        jsonl_paths = _seed_sessions(conn, tmp_path, ["s1", "s2", "s3"])
+        judge = MockJudge(fail_session_ids={"s1"})
+        loop = _make_loop(conn, judge, judge_model="sonnet")
+        window = WindowRange(start=date(2026, 7, 4), end=date(2026, 7, 11))
+
+        result = loop.score_window(window=window, jsonl_paths=jsonl_paths)
+
+        assert [_extract_task_marker(call) for call in judge.calls] == ["s1", "s2", "s3"]
+        assert result.attempts == 3
+        assert result.scored == 2
+        assert result.skipped == 1
+        assert result.aborted is False
+        assert {
+            row[0] for row in conn.execute("SELECT session_id FROM fact_verdict").fetchall()
+        } == {"s2", "s3"}
+    finally:
+        conn.close()
+
+
+def test_one_attempt_budget_covers_alias_resolution_and_scoring(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "store.db")
+    try:
+        jsonl_paths = _seed_sessions(conn, tmp_path, ["s1", "s2", "s3"])
+        judge = MockJudge(fail_session_ids={"s1"})
+        loop = ScoringLoop(
+            judge=judge,
+            conn=conn,
+            rubric_version="v1",
+            judge_model="sonnet",
+            max_sessions=2,
+        )
+        window = WindowRange(start=date(2026, 7, 4), end=date(2026, 7, 11))
+
+        result = loop.score_window(window=window, jsonl_paths=jsonl_paths)
+
+        assert [_extract_task_marker(call) for call in judge.calls] == ["s1", "s2"]
+        assert result.attempts == 2
+        assert result.scored == 1
+        assert result.skipped == 1
+        assert result.aborted is False
+        assert result.remaining == 2
+        assert result.resolved_model == DEFAULT_RESOLVED_MODEL
+        assert conn.execute(
+            "SELECT session_id FROM fact_verdict"
+        ).fetchall() == [("s2",)]
+    finally:
+        conn.close()
+
+
+def test_repeated_capped_alias_runs_progress_in_stable_order(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "store.db")
+    try:
+        session_ids = ["s1", "s2", "s3", "s4"]
+        jsonl_paths = _seed_sessions(conn, tmp_path, session_ids)
+        window = WindowRange(start=date(2026, 7, 4), end=date(2026, 7, 11))
+        expected_calls = (
+            ["s1", "s2"],
+            ["s1", "s3"],
+            ["s1", "s4"],
+        )
+
+        for expected_count, call_order in zip(range(2, 5), expected_calls, strict=True):
+            judge = MockJudge()
+            loop = ScoringLoop(
+                judge=judge,
+                conn=conn,
+                rubric_version="v1",
+                judge_model="sonnet",
+                max_sessions=2,
+            )
+
+            result = loop.score_window(window=window, jsonl_paths=jsonl_paths)
+
+            assert result.attempts == 2
+            assert [_extract_task_marker(call) for call in judge.calls] == call_order
+            assert conn.execute("SELECT COUNT(*) FROM fact_verdict").fetchone()[0] == expected_count
+    finally:
+        conn.close()
+
+
+def test_concurrent_scorer_does_not_duplicate_judge_call(tmp_path: Path) -> None:
+    db_path = tmp_path / "store.db"
+    seed_conn = create_store(db_path)
+    jsonl_paths = _seed_sessions(seed_conn, tmp_path, ["s1"])
+    seed_conn.close()
+
+    entered_judge = threading.Event()
+    release_judge = threading.Event()
+    worker_errors: list[BaseException] = []
+    worker_results: list[object] = []
+
+    class BlockingJudge(MockJudge):
+        def score(self, transcript_view: str, rubric_version: str) -> Verdict:
+            self.calls.append(transcript_view)
+            entered_judge.set()
+            if not release_judge.wait(timeout=2):
+                raise JudgeError("test timed out waiting to release the blocking judge")
+            verdict = _make_verdict(
+                _extract_task_marker(transcript_view),
+                rubric_version,
+                judge_model=self.reports_as,
+            )
+            self.resolved_model = verdict.judge_model
+            return verdict
+
+    first_judge = BlockingJudge()
+
+    def score_first_owner() -> None:
+        conn = create_store(db_path)
+        try:
+            loop = _make_loop(conn, first_judge, judge_model=DEFAULT_RESOLVED_MODEL)
+            worker_results.append(loop.run([_session_record("s1")], jsonl_paths=jsonl_paths))
+        except BaseException as exc:
+            worker_errors.append(exc)
+        finally:
+            conn.close()
+
+    thread = threading.Thread(target=score_first_owner, daemon=True)
+    thread.start()
+    try:
+        assert entered_judge.wait(timeout=1)
+        second_conn = create_store(db_path)
+        try:
+            second_conn.execute("PRAGMA busy_timeout = 200")
+            second_judge = MockJudge()
+            second_loop = _make_loop(
+                second_conn,
+                second_judge,
+                judge_model=DEFAULT_RESOLVED_MODEL,
+            )
+
+            second_result = second_loop.run(
+                [_session_record("s1")],
+                jsonl_paths=jsonl_paths,
+            )
+
+            assert second_result.scored == 0
+            assert second_result.skipped == 1
+            assert second_judge.calls == []
+        finally:
+            second_conn.close()
+    finally:
+        release_judge.set()
+        thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert worker_errors == []
+    assert len(worker_results) == 1
+    check_conn = create_store(db_path)
+    try:
+        assert check_conn.execute("SELECT COUNT(*) FROM fact_verdict").fetchone()[0] == 1
+    finally:
+        check_conn.close()
+
+
+def test_invalid_custom_backend_verdict_is_not_persisted_or_logged_verbatim(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sentinel = "private-sentinel-" + "x" * (MAX_EVIDENCE_ITEM_LENGTH + 1_000)
+
+    class InvalidCustomJudge:
+        resolved_model: str | None = DEFAULT_RESOLVED_MODEL
+
+        def score(self, transcript_view: str, rubric_version: str) -> Verdict:
+            return Verdict(
+                session_id="",
+                rubric_version=rubric_version,
+                judge_model=DEFAULT_RESOLVED_MODEL,
+                dimensions={
+                    name: DimensionScore(score=4, evidence=[sentinel])
+                    for name in _DIMENSION_NAMES
+                },
+                overall_score=99.0,
+                suggested_fixes=[],
+                judge_cost_usd=0.01,
+                judge_input_tokens=100,
+                judge_output_tokens=50,
+            )
+
+    conn = create_store(tmp_path / "store.db")
+    try:
+        jsonl_paths = _seed_sessions(conn, tmp_path, ["s1"])
+        loop = ScoringLoop(
+            judge=InvalidCustomJudge(),
+            conn=conn,
+            rubric_version="v1",
+            judge_model=DEFAULT_RESOLVED_MODEL,
+        )
+
+        with caplog.at_level(logging.WARNING):
+            result = loop.run([_session_record("s1")], jsonl_paths=jsonl_paths)
+
+        assert result.scored == 0
+        assert result.skipped == 1
+        assert conn.execute("SELECT COUNT(*) FROM fact_verdict").fetchone()[0] == 0
+        assert sentinel not in caplog.text
     finally:
         conn.close()

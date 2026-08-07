@@ -7,14 +7,19 @@ subagent transcripts (that validation is deferred to v2).
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from agentlens.discovery.models import qualify_session_id
 from agentlens.parser.extraction import (
+    consume_jsonl_records,
     extract_task_subagent_types,
     extract_transcript_facts,
     flags_partial,
+    parse_timestamp,
     read_jsonl_records,
 )
 from agentlens.parser.name_resolution import (
@@ -271,7 +276,10 @@ def test_parse_main_session_has_no_lineage(tmp_path: Path) -> None:
     parsed = parse_main_session(path, session_id="main-sid")
 
     assert parsed.session_kind == SESSION_KIND_MAIN
-    assert parsed.session_id == "main-sid"
+    assert parsed.raw_session_id == "main-sid"
+    assert parsed.session_id == qualify_session_id(
+        source_project="", session_kind="main", raw_session_id="main-sid"
+    )
     assert parsed.parent_session_id is None
     assert parsed.spawn_tool_use_id is None
 
@@ -288,8 +296,13 @@ def test_parse_subagent_run_resolves_lineage_from_args_and_meta(tmp_path: Path) 
     )
 
     assert parsed.session_kind == SESSION_KIND_SUBAGENT
-    assert parsed.session_id == "a1"
-    assert parsed.parent_session_id == "parent-sid"
+    assert parsed.raw_session_id == "a1"
+    assert parsed.session_id == qualify_session_id(
+        source_project="", session_kind="subagent", raw_session_id="a1"
+    )
+    assert parsed.parent_session_id == qualify_session_id(
+        source_project="", session_kind="main", raw_session_id="parent-sid"
+    )
     assert parsed.spawn_tool_use_id == "toolu_1"
     assert parsed.name == "implementer"
     assert parsed.name_source == NAME_SOURCE_META
@@ -319,7 +332,7 @@ def test_parse_subagent_run_never_drops_session_with_no_signals(tmp_path: Path) 
 
     parsed = parse_subagent_run(path, agent_id="deadbeef", parent_session_id="parent-sid")
 
-    assert parsed.session_id == "deadbeef"
+    assert parsed.raw_session_id == "deadbeef"
     assert parsed.name == "deadbeef"
     assert parsed.name_source == NAME_SOURCE_AGENT_ID_HASH
 
@@ -637,3 +650,142 @@ def test_parse_subagent_run_precomputed_map_skips_parent_records_extraction(
     )
 
     assert parsed.name == "researcher"
+
+
+def test_consume_jsonl_records_reports_health_and_revision(tmp_path: Path) -> None:
+    path = tmp_path / "transcript.jsonl"
+    payload = b'{"type":"assistant","message":{"content":[]}}\nnot-json\n[]\n'
+    path.write_bytes(payload)
+
+    consumed = consume_jsonl_records(path, list)
+
+    assert len(consumed.value) == 1
+    assert consumed.health.line_count == 3
+    assert consumed.health.malformed_count == 1
+    assert consumed.health.non_object_count == 1
+    assert consumed.health.complete is False
+    assert consumed.source_revision.size == len(payload)
+    assert len(consumed.source_revision.content_hash) == 64
+
+
+def test_stable_empty_jsonl_is_complete(tmp_path: Path) -> None:
+    path = tmp_path / "empty.jsonl"
+    path.write_bytes(b"")
+
+    parsed = parse_main_session(path, session_id="empty", source_project="project")
+
+    assert parsed.parse_health.complete is True
+    assert parsed.parse_health.line_count == 0
+
+
+def test_incomplete_final_line_is_degraded(tmp_path: Path) -> None:
+    path = tmp_path / "incomplete.jsonl"
+    path.write_text('{"type":"assistant","message":{"content":[]}}')
+
+    parsed = parse_main_session(path, session_id="incomplete", source_project="project")
+
+    assert parsed.parse_health.incomplete_final_line is True
+    assert parsed.parse_health.complete is False
+
+
+def test_file_change_during_read_is_degraded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "changing.jsonl"
+    path.write_text('{"type":"assistant","message":{"content":[]}}\n')
+    real_stat = path.stat()
+    observations = iter(
+        [
+            SimpleNamespace(st_mtime_ns=real_stat.st_mtime_ns, st_size=real_stat.st_size),
+            SimpleNamespace(
+                st_mtime_ns=real_stat.st_mtime_ns + 1,
+                st_size=real_stat.st_size,
+            ),
+        ]
+    )
+    original_stat = Path.stat
+
+    def changing_stat(
+        candidate: Path,
+        *,
+        follow_symlinks: bool = True,
+    ) -> os.stat_result | SimpleNamespace:
+        if candidate == path:
+            return next(observations)
+        return original_stat(candidate, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(Path, "stat", changing_stat)
+
+    parsed = parse_main_session(path, session_id="changing", source_project="project")
+
+    assert parsed.parse_health.changed_during_read is True
+    assert parsed.parse_health.complete is False
+
+
+def test_file_path_hash_ignores_offset_but_input_hash_does_not() -> None:
+    records = [
+        _assistant_tool_use("t1", "Read", {"file_path": "./src/../src/a.py", "offset": 1}),
+        _user_tool_result("t1"),
+        _assistant_tool_use("t2", "Read", {"file_path": "src/a.py", "offset": 50}),
+        _user_tool_result("t2"),
+    ]
+
+    events = extract_transcript_facts(records, session_id="s1").tool_events
+
+    assert events[0].input_hash != events[1].input_hash
+    assert events[0].file_path_hash == events[1].file_path_hash
+
+
+def test_malformed_file_path_input_has_no_path_hash() -> None:
+    records = [
+        _assistant_tool_use("t1", "Read", {"file_path": 42}),
+        _user_tool_result("t1"),
+    ]
+
+    event = extract_transcript_facts(records, session_id="s1").tool_events[0]
+
+    assert event.file_path_hash is None
+
+
+def test_pending_tool_use_state_is_bounded_and_marks_overflow() -> None:
+    records = (
+        _assistant_tool_use(f"t{index}", "Read", {"file_path": f"{index}.py"})
+        for index in range(4097)
+    )
+
+    facts = extract_transcript_facts(records, session_id="s1")
+
+    assert facts.pending_tool_use_overflow_count == 1
+
+
+def test_parse_timestamp_normalizes_offsets_and_naive_values_to_utc() -> None:
+    assert parse_timestamp("2026-08-08T00:30:00+02:00") == parse_timestamp(
+        "2026-08-07T22:30:00Z"
+    )
+    assert parse_timestamp("2026-08-07T22:30:00") == parse_timestamp(
+        "2026-08-07T22:30:00Z"
+    )
+
+
+@pytest.mark.parametrize(
+    "timestamp",
+    ["2026-08-07", "2026-08-07T22:30", "2026-08-07T22:30:00Zjunk"],
+)
+def test_parse_timestamp_rejects_incomplete_or_malformed_values(timestamp: str) -> None:
+    assert parse_timestamp(timestamp) is None
+
+
+def test_parse_agent_definition_preserves_scope_and_project(tmp_path: Path) -> None:
+    path = tmp_path / "implementer.md"
+    path.write_text("---\nname: implementer\nskills: project-skill\n---\n")
+
+    record = parse_agent_definition(
+        path,
+        scope="project",
+        source_project="-Users-example-project",
+    )
+
+    assert record is not None
+    assert record.scope == "project"
+    assert record.source_project == "-Users-example-project"

@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agentlens — 7-day report</title>
+<!--
+  Phase 4 design mockup. In the Phase 5 production build, Google Fonts
+  links will be replaced with base64-embedded variable font subsets so the
+  file is fully self-contained (works at file://, no network).
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,600;1,6..72,400&display=swap" rel="stylesheet">
+<style>
+/* ===== TOKENS ===== */
+:root {
+  --color-primary: oklch(0.48 0.17 29);
+  --color-accent: oklch(0.28 0.10 255);
+  --color-bg: oklch(1.000 0.000 0);
+  --color-surface: oklch(0.975 0.003 29);
+  --color-ink: oklch(0.17 0.01 29);
+  --color-muted: oklch(0.48 0.005 29);
+  --color-border: oklch(0.90 0.005 29);
+
+  --color-score-high: oklch(0.42 0.10 155);
+  --color-score-mid: oklch(0.48 0.12 75);
+  --color-score-low: oklch(0.48 0.17 29);
+
+  --font-display: 'Newsreader', Georgia, serif;
+  --font-body: 'Inter', system-ui, sans-serif;
+  --font-mono: ui-monospace, 'JetBrains Mono', 'Cascadia Code', monospace;
+
+  --text-display: 600 2rem/1.2 var(--font-display);
+  --text-h1: 600 1.5rem/1.25 var(--font-display);
+  --text-h2: 600 1.25rem/1.3 var(--font-display);
+  --text-h3: 600 1rem/1.4 var(--font-display);
+  --text-body: 400 0.9375rem/1.6 var(--font-body);
+  --text-label: 500 0.8125rem/1.4 var(--font-body);
+  --text-small: 400 0.75rem/1.5 var(--font-body);
+
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 40px;
+  --space-xxl: 64px;
+
+  --radius-sm: 3px;
+  --radius-md: 6px;
+
+  --measure: 68ch;
+  --content-width: 780px;
+  --outer-width: 960px;
+}
+
+/* ===== RESET ===== */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { font: var(--text-body); color: var(--color-ink); background: var(--color-bg); -webkit-font-smoothing: antialiased; }
+body { max-width: var(--outer-width); margin: 0 auto; padding: var(--space-xxl) var(--space-lg); }
+
+/* ===== LAYOUT ===== */
+.content-well { max-width: var(--content-width); }
+.section { margin-top: var(--space-xxl); }
+.section + .section { margin-top: var(--space-xl); }
+.subsection { margin-top: var(--space-lg); }
+
+/* ===== TYPOGRAPHY ===== */
+h1 { font: var(--text-h1); letter-spacing: -0.01em; }
+h2 { font: var(--text-h2); letter-spacing: -0.01em; }
+h3 { font: var(--text-h3); }
+p { max-width: var(--measure); }
+p + p { margin-top: var(--space-md); }
+code, .mono { font-family: var(--font-mono); font-size: 0.8125rem; }
+
+/* ===== REPORT HEADER ===== */
+.report-header { border-bottom: 1px solid var(--color-border); padding-bottom: var(--space-xl); }
+.report-title { font: var(--text-display); letter-spacing: -0.02em; margin-bottom: var(--space-xs); }
+.report-meta { font: var(--text-label); color: var(--color-muted); margin-top: var(--space-sm); }
+.report-meta span + span::before { content: " · "; }
+
+/* ===== OVERALL SCORE ===== */
+.overall-score { display: flex; align-items: baseline; gap: var(--space-md); margin-top: var(--space-lg); }
+.overall-score-value { font: 600 3rem/1 var(--font-mono); color: var(--color-primary); letter-spacing: -0.03em; }
+.overall-score-label { font: var(--text-label); color: var(--color-muted); }
+
+/* ===== DIMENSION ROW ===== */
+.dimension-row { display: flex; flex-wrap: wrap; gap: var(--space-sm); margin-top: var(--space-md); }
+.dimension-badge { display: inline-flex; align-items: center; gap: 6px; font: var(--text-label); padding: var(--space-xs) var(--space-sm); border-radius: var(--radius-sm); background: var(--color-surface); border: 1px solid var(--color-border); }
+.dimension-badge .score { font-family: var(--font-mono); font-weight: 600; font-size: 0.875rem; }
+.dimension-badge .score[data-tier="high"] { color: var(--color-score-high); }
+.dimension-badge .score[data-tier="mid"] { color: var(--color-score-mid); }
+.dimension-badge .score[data-tier="low"] { color: var(--color-score-low); }
+
+/* ===== AGENT SECTION ===== */
+.agent-header { display: flex; align-items: baseline; gap: var(--space-md); flex-wrap: wrap; }
+.agent-name { font: var(--text-h2); }
+.agent-count { font: var(--text-label); color: var(--color-muted); }
+.agent-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: var(--space-sm) var(--space-lg); margin-top: var(--space-md); padding: var(--space-md); background: var(--color-surface); border-radius: var(--radius-md); border: 1px solid var(--color-border); }
+.stat { display: flex; flex-direction: column; gap: 2px; }
+.stat-value { font: 600 1.125rem/1 var(--font-mono); }
+.stat-label { font: var(--text-small); color: var(--color-muted); }
+
+/* ===== TREND INDICATOR ===== */
+.trend { display: inline-flex; align-items: center; gap: 3px; font: var(--text-small); }
+.trend[data-direction="up"] { color: var(--color-score-low); }
+.trend[data-direction="down"] { color: var(--color-score-high); }
+.trend[data-direction="flat"] { color: var(--color-muted); }
+.trend-insufficient { font: var(--text-small); color: var(--color-muted); font-style: italic; }
+
+/* ===== FIX PROPOSAL CARD ===== */
+.fix-card { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: var(--space-md) var(--space-lg); margin-top: var(--space-md); }
+.fix-card-header { display: flex; align-items: center; gap: var(--space-sm); margin-bottom: var(--space-sm); }
+.fix-target { font: var(--text-label); font-family: var(--font-mono); background: var(--color-bg); border: 1px solid var(--color-border); border-radius: var(--radius-sm); padding: 2px 6px; }
+.fix-dimension { font: var(--text-small); color: var(--color-primary); font-weight: 500; }
+.fix-recommendation { font: var(--text-body); max-width: var(--measure); }
+.fix-rationale { font: var(--text-small); color: var(--color-muted); margin-top: var(--space-sm); max-width: var(--measure); }
+.fix-provenance { font: var(--text-small); color: var(--color-muted); margin-top: var(--space-sm); font-style: italic; opacity: 0.7; }
+
+/* ===== TOOL SEQUENCE ===== */
+.tool-sequence { margin-top: var(--space-md); font-family: var(--font-mono); font-size: 0.8125rem; line-height: 1.8; }
+.tool-event { display: flex; align-items: baseline; gap: var(--space-sm); }
+.tool-event-seq { color: var(--color-muted); min-width: 2ch; text-align: right; }
+.tool-event-name { font-weight: 500; }
+.tool-event-error { color: var(--color-primary); font-weight: 500; }
+.tool-event-denial { color: var(--color-score-mid); font-weight: 500; }
+.tool-sequence-ellipsis { color: var(--color-muted); padding-left: 3ch; font-style: italic; font-family: var(--font-body); }
+
+/* ===== PARENT LENS ===== */
+.parent-lens-table { width: 100%; border-collapse: collapse; margin-top: var(--space-md); font: var(--text-label); }
+.parent-lens-table th { text-align: left; font-weight: 500; color: var(--color-muted); padding: var(--space-sm) var(--space-sm) var(--space-sm) 0; border-bottom: 1px solid var(--color-border); }
+.parent-lens-table td { padding: var(--space-sm) var(--space-sm) var(--space-sm) 0; border-bottom: 1px solid var(--color-border); }
+.parent-lens-table .mono { font-size: 0.75rem; }
+.error-flag { color: var(--color-primary); font-weight: 500; }
+
+/* ===== EVIDENCE LIST ===== */
+.evidence-list { margin-top: var(--space-sm); padding-left: var(--space-lg); }
+.evidence-list li { font: var(--text-small); color: var(--color-muted); max-width: var(--measure); margin-top: var(--space-xs); }
+
+/* ===== PROVENANCE NOTICE ===== */
+.provenance-notice { font: var(--text-small); color: var(--color-muted); background: var(--color-surface); border-radius: var(--radius-sm); padding: var(--space-sm) var(--space-md); margin-top: var(--space-xl); border-left: 3px solid var(--color-muted); max-width: var(--measure); }
+.provenance-notice strong { font-weight: 500; color: var(--color-ink); }
+
+/* ===== FOOTER ===== */
+.report-footer { margin-top: var(--space-xxl); padding-top: var(--space-lg); border-top: 1px solid var(--color-border); font: var(--text-small); color: var(--color-muted); }
+
+/* ===== RESPONSIVE ===== */
+@media (max-width: 640px) {
+  body { padding: var(--space-lg) var(--space-md); }
+  .report-title { font-size: 1.5rem; }
+  .overall-score-value { font-size: 2.25rem; }
+  .agent-stats { grid-template-columns: repeat(2, 1fr); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}
+</style>
+</head>
+<body>
+
+<!-- ===== REPORT HEADER ===== -->
+<header class="report-header content-well">
+  <h1 class="report-title">agentlens report</h1>
+  <div class="report-meta">
+    <span>2026-07-28 to 2026-08-04</span>
+    <span>7 days</span>
+    <span>12 spawns across 4 sessions</span>
+    <span>judge: claude-sonnet-5</span>
+  </div>
+
+  <div class="overall-score">
+    <span class="overall-score-value">3.6</span>
+    <span class="overall-score-label">avg. score across 12 scored spawns</span>
+  </div>
+
+  <div class="dimension-row">
+    <span class="dimension-badge"><span class="score" data-tier="high">4.2</span> task completion</span>
+    <span class="dimension-badge"><span class="score" data-tier="high">4.0</span> honesty</span>
+    <span class="dimension-badge"><span class="score" data-tier="mid">3.1</span> efficiency</span>
+    <span class="dimension-badge"><span class="score" data-tier="mid">3.2</span> scope adherence</span>
+  </div>
+</header>
+
+<!-- ===== AGENT: implementer ===== -->
+<section class="section content-well">
+  <div class="agent-header">
+    <h2 class="agent-name">implementer</h2>
+    <span class="agent-count">6 spawns</span>
+    <span class="trend" data-direction="up" title="+33% vs prior 7 days">&#x2191; +33%</span>
+  </div>
+
+  <div class="agent-stats">
+    <div class="stat">
+      <span class="stat-value">3.8</span>
+      <span class="stat-label">avg. score</span>
+    </div>
+    <div class="stat">
+      <span class="stat-value">1</span>
+      <span class="stat-label">spawns with errors</span>
+    </div>
+    <div class="stat">
+      <span class="stat-value">0</span>
+      <span class="stat-label">permission denials</span>
+    </div>
+    <div class="stat">
+      <span class="stat-value">42</span>
+      <span class="stat-label">avg. tool calls</span>
+    </div>
+    <div class="stat">
+      <span class="stat-value">3</span>
+      <span class="stat-label">duplicate calls</span>
+    </div>
+    <div class="stat">
+      <span class="stat-value">127s</span>
+      <span class="stat-label">avg. duration</span>
+    </div>
+    <div class="stat">
+      <span class="stat-value">48.2k</span>
+      <span class="stat-label">avg. tokens</span>
+    </div>
+    <div class="stat">
+      <span class="stat-value">68%</span>
+      <span class="stat-label">cache-read rate</span>
+    </div>
+  </div>
+
+  <!-- Dimension detail for this agent -->
+  <div class="subsection">
+    <h3>Dimension scores</h3>
+    <div class="dimension-row">
+      <span class="dimension-badge"><span class="score" data-tier="high">4.5</span> task completion</span>
+      <span class="dimension-badge"><span class="score" data-tier="high">4.2</span> honesty</span>
+      <span class="dimension-badge"><span class="score" data-tier="mid">3.3</span> efficiency</span>
+      <span class="dimension-badge"><span class="score" data-tier="mid">3.2</span> scope adherence</span>
+    </div>
+    <ul class="evidence-list">
+      <li>5/6 spawns completed their assigned task fully, verified by tool output</li>
+      <li>1 spawn reported success but left a failing test (session abc-1234)</li>
+      <li>3 spawns re-read the same file multiple times without edits between reads</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ===== AGENT: pathfinder ===== -->
+<section class="section content-well">
+  <div class="agent-header">
+    <h2 class="agent-name">pathfinder</h2>
+    <span class="agent-count">4 spawns</span>
+    <span class="trend" data-direction="flat" title="0% vs prior 7 days">&#x2192; 0%</span>
+  </div>
+
+  <div class="agent-stats">
+    <div class="stat">
+      <span class="stat-value">4.1</span>
+      <span class="stat-label">avg. score</span>
+    </div>
+    <div class="stat">
+      <span class="stat-value">0</span>
+      <span class="stat-label">spawns with errors</span>
+    </div>
+    <div class="stat">
+      <span class="stat-value">0</span>
+      <span class="stat-label">permission denials</span>
+    </div>
+    <div class="stat">
+      <span class="stat-value">18</span>
+      <span class="stat-label">avg. tool calls</span>
+    </div>
+    <div class="stat">
+      <span class="stat-value">0</span>
+      <span class="stat-label">duplicate calls</span>
+    </div>
+    <div class="stat">
+      <span class="stat-value">64s</span>
+      <span class="stat-label">avg. duration</span>
+    </div>
+    <div class="stat">
+      <span class="stat-value">31.8k</span>
+      <span class="stat-label">avg. tokens</span>
+    </div>
+    <div class="stat">
+      <span class="stat-value">82%</span>
+      <span class="stat-label">cache-read rate</span>
+    </div>
+  </div>
+
+  <div class="subsection">
+    <h3>Dimension scores</h3>
+    <div class="dimension-row">
+      <span class="dimension-badge"><span class="score" data-tier="high">4.3</span> task completion</span>
+      <span class="dimension-badge"><span class="score" data-tier="high">4.5</span> honesty</span>
+      <span class="dimension-badge"><span class="score" data-tier="high">4.0</span> efficiency</span>
+      <span class="dimension-badge"><span class="score" data-tier="mid">3.5</span> scope adherence</span>
+    </div>
+  </div>
+</section>
+
+<!-- ===== AGENT: researcher ===== -->
+<section class="section content-well">
+  <div class="agent-header">
+    <h2 class="agent-name">researcher</h2>
+    <span class="agent-count">2 spawns</span>
+    <span class="trend-insufficient">insufficient data (n=2, need 5)</span>
+  </div>
+
+  <div class="agent-stats">
+    <div class="stat">
+      <span class="stat-value">2.8</span>
+      <span class="stat-label">avg. score</span>
+    </div>
+    <div class="stat">
+      <span class="stat-value">1</span>
+      <span class="stat-label">spawns with errors</span>
+    </div>
+    <div class="stat">
+      <span class="stat-value">1</span>
+      <span class="stat-label">permission denials</span>
+    </div>
+    <div class="stat">
+      <span class="stat-value">24</span>
+      <span class="stat-label">avg. tool calls</span>
+    </div>
+    <div class="stat">
+      <span class="stat-value">5</span>
+      <span class="stat-label">duplicate calls</span>
+    </div>
+    <div class="stat">
+      <span class="stat-value">93s</span>
+      <span class="stat-label">avg. duration</span>
+    </div>
+    <div class="stat">
+      <span class="stat-value">55.1k</span>
+      <span class="stat-label">avg. tokens</span>
+    </div>
+    <div class="stat">
+      <span class="stat-value">41%</span>
+      <span class="stat-label">cache-read rate</span>
+    </div>
+  </div>
+
+  <div class="subsection">
+    <h3>Dimension scores</h3>
+    <div class="dimension-row">
+      <span class="dimension-badge"><span class="score" data-tier="mid">3.0</span> task completion</span>
+      <span class="dimension-badge"><span class="score" data-tier="mid">3.5</span> honesty</span>
+      <span class="dimension-badge"><span class="score" data-tier="low">2.0</span> efficiency</span>
+      <span class="dimension-badge"><span class="score" data-tier="mid">2.8</span> scope adherence</span>
+    </div>
+    <ul class="evidence-list">
+      <li>1 spawn hit a WebFetch permission denial and retried the same URL 4 times</li>
+      <li>Both spawns exceeded their task scope by reading unrelated source files</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ===== FIX PROPOSALS ===== -->
+<section class="section content-well">
+  <h2>Suggested fixes</h2>
+
+  <div class="provenance-notice">
+    <strong>Trust boundary:</strong> Recommendations below are untrusted model output from the judge.
+    Scores and dimension labels are locally derived; evidence text and fix rationale are not.
+    Review before applying.
+  </div>
+
+  <div class="fix-card">
+    <div class="fix-card-header">
+      <span class="fix-target">agent_instructions</span>
+      <span class="fix-dimension">efficiency</span>
+    </div>
+    <p class="fix-recommendation">Add an explicit instruction to the researcher agent: "Before retrying a failed web fetch, check whether the URL is accessible from the current network. Do not retry the same URL more than once." The current definition has no retry guidance, leading to 4-5 identical attempts on blocked URLs.</p>
+    <p class="fix-rationale">Two researcher spawns this window burned 20-30% of their token budget on retry loops against URLs that returned permission denials on the first attempt. The underlying issue is the agent has no heuristic for when to abandon a fetch.</p>
+    <p class="fix-provenance">untrusted model output</p>
+  </div>
+
+  <div class="fix-card">
+    <div class="fix-card-header">
+      <span class="fix-target">caller_task_phrasing</span>
+      <span class="fix-dimension">scope_adherence</span>
+    </div>
+    <p class="fix-recommendation">When spawning a researcher, constrain the search scope explicitly: "Search only within [named directories or URLs]. Do not read source files outside the named scope." The current delegation prompt says "research X" without bounding what the agent should look at.</p>
+    <p class="fix-rationale">Both researcher spawns read 8-12 files unrelated to their stated task, inflating token usage and muddying their findings. The parent session's Task prompt was open-ended enough that "thorough research" was interpreted as "read everything nearby."</p>
+    <p class="fix-provenance">untrusted model output</p>
+  </div>
+
+  <div class="fix-card">
+    <div class="fix-card-header">
+      <span class="fix-target">agent_instructions</span>
+      <span class="fix-dimension">honesty</span>
+    </div>
+    <p class="fix-recommendation">Add to the implementer agent definition: "If any test fails after your changes, report the failure explicitly in your final message. Do not report the task as complete if tests are failing." Currently the agent sometimes reports success while suppressing test output.</p>
+    <p class="fix-rationale">One implementer spawn reported "all changes applied successfully" while a unit test was failing. The final report included the file edits but omitted the test run output. The judge scored honesty at 2/5 for that session.</p>
+    <p class="fix-provenance">untrusted model output</p>
+  </div>
+</section>
+
+<!-- ===== TOOL SEQUENCE SAMPLE ===== -->
+<section class="section content-well">
+  <h2>Tool sequence sample</h2>
+  <p class="report-meta" style="margin-bottom: var(--space-md)">implementer spawn <code>agent-a1b2c3d4</code> — "Implement derive_skill_bridge function"</p>
+
+  <div class="tool-sequence">
+    <div class="tool-event"><span class="tool-event-seq">1</span> <span class="tool-event-name">Read</span> src/agentlens/aggregation/derivation.py</div>
+    <div class="tool-event"><span class="tool-event-seq">2</span> <span class="tool-event-name">Read</span> src/agentlens/store/models.py</div>
+    <div class="tool-event"><span class="tool-event-seq">3</span> <span class="tool-event-name">Read</span> tests/unit/test_aggregation.py</div>
+    <div class="tool-event"><span class="tool-event-seq">4</span> <span class="tool-event-name">Edit</span> src/agentlens/aggregation/derivation.py</div>
+    <div class="tool-event"><span class="tool-event-seq">5</span> <span class="tool-event-name">Edit</span> tests/unit/test_aggregation.py</div>
+    <div class="tool-event"><span class="tool-event-seq">6</span> <span class="tool-event-name">Bash</span> uv run pytest tests/unit/test_aggregation.py</div>
+    <div class="tool-event"><span class="tool-event-seq">7</span> <span class="tool-event-name tool-event-error">Bash</span> <span class="tool-event-error">exit 1 — 2 tests failed</span></div>
+    <div class="tool-event"><span class="tool-event-seq">8</span> <span class="tool-event-name">Read</span> src/agentlens/aggregation/derivation.py</div>
+    <div class="tool-sequence-ellipsis">... 18 more events</div>
+    <div class="tool-event"><span class="tool-event-seq">27</span> <span class="tool-event-name">Bash</span> uv run pytest</div>
+    <div class="tool-event"><span class="tool-event-seq">28</span> <span class="tool-event-name">Bash</span> uv run ruff check</div>
+    <div class="tool-event"><span class="tool-event-seq">29</span> <span class="tool-event-name">Bash</span> uv run mypy</div>
+  </div>
+</section>
+
+<!-- ===== PARENT LENS ===== -->
+<section class="section content-well">
+  <h2>Parent lens</h2>
+  <p style="font: var(--text-body); color: var(--color-muted); margin-bottom: var(--space-md); max-width: var(--measure);">Per-session fan-out: how each parent session delegated work.</p>
+
+  <table class="parent-lens-table">
+    <thead>
+      <tr>
+        <th>Session</th>
+        <th>Spawns</th>
+        <th>Errors</th>
+        <th>Denials</th>
+        <th>Agents used</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="mono">ses-7f2a91c</td>
+        <td>5</td>
+        <td><span class="error-flag">1</span></td>
+        <td>0</td>
+        <td>3 implementer, 1 pathfinder, 1 researcher</td>
+      </tr>
+      <tr>
+        <td class="mono">ses-e4d8b03</td>
+        <td>3</td>
+        <td>0</td>
+        <td>0</td>
+        <td>2 implementer, 1 pathfinder</td>
+      </tr>
+      <tr>
+        <td class="mono">ses-1ac5f72</td>
+        <td>2</td>
+        <td><span class="error-flag">1</span></td>
+        <td><span class="error-flag">1</span></td>
+        <td>1 researcher, 1 pathfinder</td>
+      </tr>
+      <tr>
+        <td class="mono">ses-b8e34d1</td>
+        <td>2</td>
+        <td>0</td>
+        <td>0</td>
+        <td>1 implementer, 1 pathfinder</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ===== FOOTER ===== -->
+<footer class="report-footer content-well">
+  <p>Generated by agentlens v0.1.0 · judge cost: $0.12 (6 new verdicts, 6 cached) · store: ~/.cache/agentlens/agentlens.db</p>
+</footer>
+
+</body>
+</html>

@@ -23,6 +23,7 @@ def _event(
     is_error: bool = False,
     denial_kind: str | None = None,
     seq: int = 1,
+    file_path_hash: str | None = None,
 ) -> ToolEventRecord:
     return ToolEventRecord(
         session_id="s1",
@@ -33,6 +34,11 @@ def _event(
         ts="2026-07-06T18:00:00.000Z",
         input_hash=input_hash,
         output_bytes=10,
+        file_path_hash=(
+            file_path_hash
+            if file_path_hash is not None
+            else input_hash if tool_name in {"Read", "Edit", "Write"} else None
+        ),
     )
 
 
@@ -93,7 +99,7 @@ def test_derive_fact_session_counts_tools_from_events() -> None:
     assert record.n_permission_denials == 1
 
 
-def test_derive_fact_session_files_touched_is_distinct_input_hash_of_file_tools() -> None:
+def test_derive_fact_session_files_touched_is_distinct_path_hash_of_file_tools() -> None:
     events = [
         _event("Read", input_hash="h1", seq=1),
         _event("Read", input_hash="h1", seq=2),  # same file re-read
@@ -150,6 +156,50 @@ def test_derive_fact_session_no_first_ts_yields_no_session_date() -> None:
 def test_derive_fact_session_malformed_short_timestamp_yields_no_session_date() -> None:
     record = derive_fact_session(_parsed_session(first_ts="2026-07"))
     assert record.session_date is None
+
+
+def test_derive_fact_session_malformed_timestamp_suffix_yields_no_session_date() -> None:
+    record = derive_fact_session(
+        _parsed_session(first_ts="2026-07-06T18:00:00Z trailing")
+    )
+    assert record.session_date is None
+
+
+def test_derive_fact_session_date_uses_utc_instant() -> None:
+    record = derive_fact_session(
+        _parsed_session(first_ts="2026-07-07T00:30:00+02:00")
+    )
+    assert record.session_date == "2026-07-06"
+
+
+def test_files_touched_uses_path_hash_not_whole_input_hash() -> None:
+    events = [
+        _event("Read", input_hash="offset-1", file_path_hash="same-path", seq=1),
+        _event("Read", input_hash="offset-50", file_path_hash="same-path", seq=2),
+        _event("Edit", input_hash="content-a", file_path_hash="same-path", seq=3),
+        _event("Edit", input_hash="content-b", file_path_hash="same-path", seq=4),
+        _event("Read", input_hash="other", file_path_hash="other-path", seq=5),
+    ]
+
+    record = derive_fact_session(_parsed_session(events=events))
+
+    assert record.n_files_touched == 2
+    assert record.n_duplicate_tool_calls == 0
+
+
+def test_files_touched_ignores_events_without_valid_path_hash() -> None:
+    event = ToolEventRecord(
+        session_id="s1",
+        seq=1,
+        tool_name="Read",
+        is_error=False,
+        denial_kind=None,
+        ts=None,
+        input_hash="whole-input",
+        output_bytes=0,
+        file_path_hash=None,
+    )
+    assert derive_fact_session(_parsed_session(events=[event])).n_files_touched == 0
 
 
 def test_derive_fact_session_final_report_flagged_partial_passthrough() -> None:

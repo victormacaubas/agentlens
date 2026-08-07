@@ -16,6 +16,7 @@ FIX_TARGETS: Final[tuple[str, ...]] = (
     "declared_skills",
     "caller_task_phrasing",
 )
+MODEL_ALIASES: Final[frozenset[str]] = frozenset({"sonnet", "opus", "haiku", "opusplan"})
 MAX_SUGGESTED_FIXES: Final[int] = 5
 MAX_EVIDENCE_ITEMS: Final[int] = 6
 MAX_EVIDENCE_ITEM_LENGTH: Final[int] = 300

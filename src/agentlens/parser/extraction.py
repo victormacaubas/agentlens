@@ -3,14 +3,16 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import posixpath
 import re
-from collections.abc import Iterable
+from collections import OrderedDict
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Generic, TypeVar
 
-from agentlens.store.models import ToolEventRecord
+from agentlens.store.models import SourceRevision, ToolEventRecord
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +38,121 @@ _SKILL_TOOL_INPUT_KEYS: Final[tuple[str, ...]] = ("name", "skill_name", "skill",
 
 _SKILL_FORMAT_MARKER: Final[str] = "<skill-format>true"
 _COMMAND_NAME_RE: Final[re.Pattern[str]] = re.compile(r"<command-name>(.*?)</command-name>")
+_COMPLETE_ISO_TIMESTAMP_RE: Final[re.Pattern[str]] = re.compile(
+    r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?$"
+)
+_FILE_PATH_INPUT_KEYS: Final[dict[str, tuple[str, ...]]] = {
+    "Read": ("file_path",),
+    "Edit": ("file_path",),
+    "Write": ("file_path",),
+    "MultiEdit": ("file_path",),
+    "NotebookEdit": ("notebook_path",),
+}
+MAX_PENDING_TOOL_USES: Final[int] = 4096
+
+T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class ParseHealth:
+    line_count: int
+    malformed_count: int
+    non_object_count: int
+    incomplete_final_line: bool
+    changed_during_read: bool
+    pending_tool_use_overflow_count: int = 0
+
+    @property
+    def complete(self) -> bool:
+        return (
+            self.malformed_count == 0
+            and self.non_object_count == 0
+            and not self.incomplete_final_line
+            and not self.changed_during_read
+            and self.pending_tool_use_overflow_count == 0
+        )
+
+
+@dataclass(frozen=True)
+class JsonlConsumption(Generic[T]):
+    value: T
+    health: ParseHealth
+    source_revision: SourceRevision
+
+
+def consume_jsonl_records(
+    path: Path,
+    consumer: Callable[[Iterable[dict[str, Any]]], T],
+    *,
+    raise_on_unicode_error: bool = False,
+) -> JsonlConsumption[T]:
+    """Stream one JSONL snapshot through a synchronous consumer.
+
+    The source is statted before and after the read. Content failures remain
+    visible in parse health instead of being silently treated as complete.
+    Callers that cannot safely consume a partial snapshot can request strict
+    UTF-8 decoding.
+    """
+    before = path.stat()
+    content_hasher = hashlib.sha256()
+    line_count = 0
+    malformed_count = 0
+    non_object_count = 0
+    incomplete_final_line = False
+
+    def records() -> Iterator[dict[str, Any]]:
+        nonlocal line_count, malformed_count, non_object_count, incomplete_final_line
+        with path.open("rb") as source:
+            for raw_line in source:
+                line_count += 1
+                content_hasher.update(raw_line)
+                incomplete_final_line = not raw_line.endswith(b"\n")
+                try:
+                    line = raw_line.decode("utf-8").strip()
+                except UnicodeDecodeError:
+                    if raise_on_unicode_error:
+                        raise
+                    malformed_count += 1
+                    continue
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    malformed_count += 1
+                    logger.debug("Skipping malformed JSONL line %d in %s", line_count, path)
+                    continue
+                if not isinstance(record, dict):
+                    non_object_count += 1
+                    logger.debug("Skipping non-object JSONL line %d in %s", line_count, path)
+                    continue
+                yield record
+
+    value = consumer(records())
+    try:
+        after = path.stat()
+    except OSError:
+        changed_during_read = True
+    else:
+        changed_during_read = (
+            before.st_mtime_ns != after.st_mtime_ns or before.st_size != after.st_size
+        )
+
+    return JsonlConsumption(
+        value=value,
+        health=ParseHealth(
+            line_count=line_count,
+            malformed_count=malformed_count,
+            non_object_count=non_object_count,
+            incomplete_final_line=incomplete_final_line,
+            changed_during_read=changed_during_read,
+        ),
+        source_revision=SourceRevision(
+            mtime_ns=before.st_mtime_ns,
+            size=before.st_size,
+            content_hash=content_hasher.hexdigest(),
+        ),
+    )
 
 
 def read_jsonl_records(path: Path) -> list[dict[str, Any]]:
@@ -45,8 +162,8 @@ def read_jsonl_records(path: Path) -> list[dict[str, Any]]:
     never raises for content issues (only for the file being unreadable).
     """
     records: list[dict[str, Any]] = []
-    with path.open(encoding="utf-8") as f:
-        for line_no, raw_line in enumerate(f, start=1):
+    with path.open(encoding="utf-8") as source:
+        for line_no, raw_line in enumerate(source, start=1):
             line = raw_line.strip()
             if not line:
                 continue
@@ -134,11 +251,21 @@ def _skill_names_from_meta_record(record: dict[str, Any]) -> list[str]:
     return [name.strip() for name in _COMMAND_NAME_RE.findall(text) if name.strip()]
 
 
-def _parse_timestamp(ts: str) -> datetime | None:
+def parse_timestamp(ts: str) -> datetime | None:
+    """Parse a complete ISO timestamp and normalize it to UTC.
+
+    Timezone-naive values are interpreted as UTC. Date-only and partially
+    valid values are rejected.
+    """
+    if _COMPLETE_ISO_TIMESTAMP_RE.fullmatch(ts) is None:
+        return None
     try:
-        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
     except ValueError:
         return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _hash_input(tool_input: Any) -> str:
@@ -147,6 +274,26 @@ def _hash_input(tool_input: Any) -> str:
     except TypeError:
         payload = str(tool_input)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _file_path_hash(tool_name: str, tool_input: Any) -> str | None:
+    if not isinstance(tool_input, dict):
+        return None
+    keys = _FILE_PATH_INPUT_KEYS.get(tool_name)
+    if keys is None:
+        return None
+    raw_path = next(
+        (
+            value
+            for key in keys
+            if isinstance((value := tool_input.get(key)), str) and value
+        ),
+        None,
+    )
+    if raw_path is None:
+        return None
+    normalized = posixpath.normpath(raw_path.replace("\\", "/"))
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def _estimate_output_bytes(content: Any) -> int:
@@ -179,6 +326,8 @@ class TranscriptFacts:
     cache_creation_tokens: int
     fired_skills: list[str]
     final_report_flagged_partial: bool
+    pending_tool_use_overflow_count: int
+    working_directory: str | None
 
 
 def _task_subagent_type_from_item(item: dict[str, Any]) -> tuple[str, str] | None:
@@ -237,8 +386,8 @@ def _usage_int(usage: dict[str, Any], key: str) -> int:
 def _duration_seconds(first_ts: str | None, last_ts: str | None) -> float:
     if first_ts is None or last_ts is None:
         return 0.0
-    first_dt = _parse_timestamp(first_ts)
-    last_dt = _parse_timestamp(last_ts)
+    first_dt = parse_timestamp(first_ts)
+    last_dt = parse_timestamp(last_ts)
     if first_dt is None or last_dt is None:
         return 0.0
     return max((last_dt - first_dt).total_seconds(), 0.0)
@@ -259,7 +408,7 @@ def extract_transcript_facts(
     defensively per assistant turn: a missing object or field
     contributes zero and never aborts parsing.
     """
-    tool_uses: dict[str, tuple[str, Any]] = {}
+    tool_uses: OrderedDict[str, tuple[str, str, str | None]] = OrderedDict()
     task_subagent_types: dict[str, str] = {}
     attribution_agents: list[str] = []
     fired_skills: list[str] = []
@@ -273,8 +422,16 @@ def extract_transcript_facts(
     cache_read_tokens = 0
     cache_creation_tokens = 0
     final_assistant_text: str | None = None
+    pending_tool_use_overflow_count = 0
+    working_directory: str | None = None
 
     for record in records:
+        record_cwd = record.get("cwd")
+        if working_directory is None and isinstance(record_cwd, str) and record_cwd:
+            candidate = Path(record_cwd).expanduser()
+            if candidate.is_absolute():
+                working_directory = str(candidate)
+
         record_ts = record.get("timestamp")
         if isinstance(record_ts, str):
             first_ts = first_ts if first_ts is not None else record_ts
@@ -314,7 +471,15 @@ def extract_transcript_facts(
                 if not isinstance(tool_use_id, str) or not isinstance(tool_name, str):
                     continue
                 tool_input = item.get("input")
-                tool_uses[tool_use_id] = (tool_name, tool_input)
+                tool_uses[tool_use_id] = (
+                    tool_name,
+                    _hash_input(tool_input),
+                    _file_path_hash(tool_name, tool_input),
+                )
+                tool_uses.move_to_end(tool_use_id)
+                if len(tool_uses) > MAX_PENDING_TOOL_USES:
+                    tool_uses.popitem(last=False)
+                    pending_tool_use_overflow_count += 1
                 task_signal = _task_subagent_type_from_item(item)
                 if task_signal is not None:
                     task_subagent_types[task_signal[0]] = task_signal[1]
@@ -331,7 +496,7 @@ def extract_transcript_facts(
                 tool_use_id = item.get("tool_use_id")
                 if not isinstance(tool_use_id, str) or tool_use_id not in tool_uses:
                     continue
-                tool_name, tool_input = tool_uses[tool_use_id]
+                tool_name, input_hash, file_path_hash = tool_uses.pop(tool_use_id)
                 seq += 1
                 events.append(
                     ToolEventRecord(
@@ -341,8 +506,9 @@ def extract_transcript_facts(
                         is_error=bool(item.get("is_error", False)),
                         denial_kind=denial_kind if isinstance(denial_kind, str) else None,
                         ts=ts if isinstance(ts, str) else None,
-                        input_hash=_hash_input(tool_input),
+                        input_hash=input_hash,
                         output_bytes=_estimate_output_bytes(item.get("content")),
+                        file_path_hash=file_path_hash,
                     )
                 )
 
@@ -359,4 +525,6 @@ def extract_transcript_facts(
         cache_creation_tokens=cache_creation_tokens,
         fired_skills=fired_skills,
         final_report_flagged_partial=flags_partial(final_assistant_text),
+        pending_tool_use_overflow_count=pending_tool_use_overflow_count,
+        working_directory=working_directory,
     )

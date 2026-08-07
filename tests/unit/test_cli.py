@@ -10,13 +10,17 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from importlib import metadata
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from click.testing import CliRunner
 
 from agentlens.cli import main
-from agentlens.store.schema import REQUIRED_TABLES
+from agentlens.ingest.orchestrator import DefinitionSyncSummary
+from agentlens.judge.rubric import RUBRIC_VERSION
+from agentlens.store.schema import REQUIRED_TABLES, create_store
 
 
 @pytest.fixture
@@ -49,8 +53,11 @@ def test_report_stub_accepts_window_flags_and_exits_zero(
     isolated_home: Path, tmp_path: Path
 ) -> None:
     store_path = tmp_path / "store.db"
+    create_store(store_path).close()
+    before = store_path.read_bytes()
     result = CliRunner().invoke(main, ["--store", str(store_path), "report", "--since", "7d"])
     assert result.exit_code == 0
+    assert store_path.read_bytes() == before
 
 
 def test_empty_pipeline_creates_valid_store_and_exits_zero(
@@ -149,7 +156,13 @@ def test_session_ingests_synthetic_subagent_with_events_and_lineage(
     conn = sqlite3.connect(store_path)
     try:
         rows = conn.execute(
-            "SELECT tool_name FROM fact_tool_event WHERE session_id = 'a1' ORDER BY seq"
+            """
+            SELECT fte.tool_name
+            FROM fact_tool_event fte
+            JOIN fact_session fs ON fs.session_id = fte.session_id
+            WHERE fs.raw_session_id = 'a1'
+            ORDER BY fte.seq
+            """
         ).fetchall()
         assert [r[0] for r in rows] == ["Read"]
     finally:
@@ -193,7 +206,7 @@ def test_session_command_persists_fact_session_and_skill_bridge(
     conn = sqlite3.connect(store_path)
     try:
         row = conn.execute(
-            "SELECT agent_type, n_reads FROM fact_session WHERE session_id = 'a1'"
+            "SELECT agent_type, n_reads FROM fact_session WHERE raw_session_id = 'a1'"
         ).fetchone()
         assert row == ("researcher", 1)
     finally:
@@ -215,7 +228,8 @@ def test_ingest_command_populates_store_and_exits_zero(tmp_path: Path) -> None:
     )
 
     assert result.exit_code == 0
-    assert "1 sessions" in result.output
+    assert "Ingested: 1" in result.output
+    assert "Skipped: 0" in result.output
 
     conn = sqlite3.connect(store_path)
     try:
@@ -279,6 +293,93 @@ def test_report_json_emits_verdict_slice_with_no_scores(tmp_path: Path) -> None:
     assert "window" in payload
 
 
+def test_report_cli_requires_and_accepts_concrete_model_for_ambiguous_cohort(
+    tmp_path: Path,
+) -> None:
+    store_path = tmp_path / "store.db"
+    conn = create_store(store_path)
+    try:
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO fact_session (
+                    session_id, raw_session_id, source_project, session_kind,
+                    judge_input_hash, agent_id, agent_type, session_date
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "qualified-s1",
+                    "raw-s1",
+                    "project-a",
+                    "subagent",
+                    "input-s1",
+                    "raw-s1",
+                    "implementer",
+                    "2026-08-01",
+                ),
+            )
+            for model, score in (
+                ("claude-sonnet-5", 4.0),
+                ("claude-opus-5", 2.0),
+            ):
+                conn.execute(
+                    """
+                    INSERT INTO fact_verdict (
+                        session_id, judge_input_hash, rubric_version,
+                        judge_model, verdict_json
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "qualified-s1",
+                        "input-s1",
+                        RUBRIC_VERSION,
+                        model,
+                        json.dumps({"overall_score": score}),
+                    ),
+                )
+    finally:
+        conn.close()
+
+    runner = CliRunner()
+    ambiguous = runner.invoke(
+        main,
+        [
+            "--store",
+            str(store_path),
+            "report",
+            "--from",
+            "2026-08-01",
+            "--to",
+            "2026-08-01",
+            "--json",
+        ],
+    )
+    assert ambiguous.exit_code != 0
+    assert "pass --judge-model" in ambiguous.output
+
+    selected = runner.invoke(
+        main,
+        [
+            "--store",
+            str(store_path),
+            "report",
+            "--from",
+            "2026-08-01",
+            "--to",
+            "2026-08-01",
+            "--judge-model",
+            "claude-sonnet-5",
+            "--json",
+        ],
+    )
+    assert selected.exit_code == 0
+    payload = json.loads(selected.output)
+    assert payload["verdict_cohort"]["judge_model"] == "claude-sonnet-5"
+    assert payload["sessions"][0]["session_id"] == "qualified-s1"
+    assert payload["sessions"][0]["raw_session_id"] == "raw-s1"
+    assert payload["sessions"][0]["verdict"]["overall_score"] == 4.0
+
+
 def test_report_does_not_ingest_uningested_sessions_on_disk(
     isolated_home: Path, tmp_path: Path
 ) -> None:
@@ -340,3 +441,191 @@ def test_claude_home_flag_injects_target_without_touching_home(tmp_path: Path) -
     assert result.exit_code == 0
     assert "subagent" in result.output
     assert "name_source=meta_agent_type" in result.output
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_ingest_rejects_non_positive_limit_before_store_work(
+    tmp_path: Path,
+    value: str,
+) -> None:
+    store_path = tmp_path / "store.db"
+    with patch("agentlens.cli.create_store") as create_store_mock:
+        result = CliRunner().invoke(
+            main,
+            ["--store", str(store_path), "ingest", "--limit", value],
+        )
+
+    assert result.exit_code == 2
+    assert "Invalid value for '--limit'" in result.output
+    create_store_mock.assert_not_called()
+    assert not store_path.exists()
+
+
+def test_partial_ingest_reports_all_counts_and_exits_nonzero(tmp_path: Path) -> None:
+    claude_home = tmp_path / "claude-home"
+    project_dir = claude_home / "projects" / "project"
+    project_dir.mkdir(parents=True)
+    (project_dir / "good.jsonl").write_text(
+        '{"type": "assistant", "message": {"role": "assistant", "content": []}}\n'
+    )
+    bad_path = project_dir / "bad.jsonl"
+    bad_path.write_text("not-json\n")
+    store_path = tmp_path / "store.db"
+
+    result = CliRunner().invoke(
+        main,
+        ["--store", str(store_path), "ingest", "--claude-home", str(claude_home)],
+    )
+
+    assert result.exit_code == 1
+    assert "Ingested: 1" in result.output
+    assert "Skipped: 1" in result.output
+    assert "Degraded: 1" in result.output
+    assert str(bad_path) in result.output
+    with sqlite3.connect(store_path) as conn:
+        assert conn.execute("SELECT raw_session_id FROM fact_session").fetchall() == [
+            ("good",)
+        ]
+
+
+def test_store_location_error_is_actionable_click_error(
+    isolated_home: Path,
+) -> None:
+    bad_store = isolated_home / ".claude" / "agentlens.db"
+
+    result = CliRunner().invoke(main, ["--store", str(bad_store), "session"])
+    unwrapped = CliRunner().invoke(
+        main,
+        ["--store", str(bad_store), "session"],
+        standalone_mode=False,
+    )
+
+    assert result.exit_code != 0
+    assert "Error:" in result.output
+    assert "refusing to write" in result.output
+    assert unwrapped.exception is not None
+    assert unwrapped.exception.__cause__ is not None
+
+
+@pytest.mark.parametrize("command", ["ingest", "report"])
+def test_stale_store_is_actionable_click_error(tmp_path: Path, command: str) -> None:
+    db_path = tmp_path / "agentlens.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("CREATE TABLE fact_session (session_id TEXT PRIMARY KEY)")
+        conn.commit()
+    finally:
+        conn.close()
+    db_path.chmod(0o600)
+
+    result = CliRunner().invoke(main, ["--store", str(db_path), command])
+
+    assert result.exit_code != 0
+    assert "Error:" in result.output
+    assert "delete it and re-run ingest" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_programmer_error_is_not_translated_to_click_error(tmp_path: Path) -> None:
+    with patch("agentlens.cli.resolve_store_path", side_effect=RuntimeError("programmer bug")):
+        result = CliRunner().invoke(
+            main,
+            ["--store", str(tmp_path / "store.db"), "session"],
+        )
+
+    assert isinstance(result.exception, RuntimeError)
+    assert "Error:" not in result.output
+
+
+@pytest.mark.parametrize(
+    ("error", "message"),
+    [
+        (OSError("permission denied"), "filesystem operation failed"),
+        (sqlite3.OperationalError("database is locked"), "store operation failed"),
+    ],
+)
+def test_expected_io_errors_are_actionable_click_errors(
+    tmp_path: Path,
+    error: OSError | sqlite3.Error,
+    message: str,
+) -> None:
+    with patch("agentlens.cli.create_store", side_effect=error):
+        result = CliRunner().invoke(
+            main,
+            ["--store", str(tmp_path / "store.db"), "session"],
+        )
+
+    assert result.exit_code != 0
+    assert "Error:" in result.output
+    assert message in result.output
+
+
+def test_version_matches_distribution_metadata() -> None:
+    result = CliRunner().invoke(main, ["--version"])
+
+    assert result.exit_code == 0
+    assert metadata.version("agentlens") in result.output
+
+
+def test_ambiguous_raw_session_id_is_actionable_click_error(tmp_path: Path) -> None:
+    claude_home = tmp_path / "claude-home"
+    for project in ("project-a", "project-b"):
+        project_dir = claude_home / "projects" / project
+        project_dir.mkdir(parents=True)
+        (project_dir / "shared.jsonl").write_text("{}\n")
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "--store",
+            str(tmp_path / "store.db"),
+            "session",
+            "shared",
+            "--claude-home",
+            str(claude_home),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "Error:" in result.output
+    assert "project-a/main" in result.output
+    assert "project-b/main" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_definition_discovery_failure_preserves_ingest_and_exits_nonzero(
+    tmp_path: Path,
+) -> None:
+    claude_home = tmp_path / "claude-home"
+    project_dir = claude_home / "projects" / "project"
+    project_dir.mkdir(parents=True)
+    (project_dir / "session.jsonl").write_text(
+        '{"type": "assistant", "message": {"content": []}}\n'
+    )
+    failed_path = str(claude_home / "agents")
+    store_path = tmp_path / "store.db"
+
+    with patch(
+        "agentlens.cli.sync_agent_definitions",
+        return_value=DefinitionSyncSummary(
+            n_synced=0,
+            failed_paths=(failed_path,),
+        ),
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "--store",
+                str(store_path),
+                "ingest",
+                "--claude-home",
+                str(claude_home),
+            ],
+        )
+
+    assert result.exit_code == 1
+    assert "Ingested: 1" in result.output
+    assert "Discovery failures: 1" in result.output
+    assert failed_path in result.output
+    with sqlite3.connect(store_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM fact_session").fetchone()[0] == 1

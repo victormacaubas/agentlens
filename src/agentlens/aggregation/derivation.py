@@ -10,37 +10,22 @@ passed straight through.
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from datetime import date
 from typing import Final
 
+from agentlens.parser.extraction import parse_timestamp
 from agentlens.parser.session import ParsedSession
 from agentlens.store.models import SessionRecord, SkillBridgeRecord, ToolEventRecord
 
-# Tools whose distinct `input_hash` values approximate distinct files
-# touched. `input_hash` is a hash of the full tool input (path-keyed for
-# these tools), so distinct hashes are a reasonable proxy for distinct
-# files without needing to retain raw (unhashed) tool inputs.
-FILE_TOUCHING_TOOLS: Final[frozenset[str]] = frozenset({"Read", "Edit", "Write"})
-
-_ISO_DATE_LEN: Final[int] = len("YYYY-MM-DD")
+FILE_TOUCHING_TOOLS: Final[frozenset[str]] = frozenset(
+    {"Read", "Edit", "Write", "MultiEdit", "NotebookEdit"}
+)
 
 
 def _safe_date_from_ts(ts: str | None) -> str | None:
-    """Return the `YYYY-MM-DD` date prefix of an ISO timestamp, or `None`
-    if `ts` is missing, too short to contain a full date, or the sliced
-    prefix is not a valid calendar date (BUG-03: a malformed short
-    timestamp like `'2026-07'` must not silently flow into
-    `fact_session.session_date`). Mirrors the validation in
-    `agentlens.ingest._backfill_dim_date`.
-    """
-    if ts is None or len(ts) < _ISO_DATE_LEN:
+    if ts is None:
         return None
-    candidate = ts[:_ISO_DATE_LEN]
-    try:
-        date.fromisoformat(candidate)
-    except ValueError:
-        return None
-    return candidate
+    parsed = parse_timestamp(ts)
+    return parsed.date().isoformat() if parsed is not None else None
 
 
 def derive_fact_session(parsed: ParsedSession) -> SessionRecord:
@@ -55,9 +40,9 @@ def derive_fact_session(parsed: ParsedSession) -> SessionRecord:
     n_bash = sum(1 for e in events if e.tool_name == "Bash")
     n_files_touched = len(
         {
-            e.input_hash
+            e.file_path_hash
             for e in events
-            if e.tool_name in FILE_TOUCHING_TOOLS and e.input_hash is not None
+            if e.tool_name in FILE_TOUCHING_TOOLS and e.file_path_hash is not None
         }
     )
     n_errors = sum(1 for e in events if e.is_error)
@@ -92,6 +77,14 @@ def derive_fact_session(parsed: ParsedSession) -> SessionRecord:
         cache_creation_tokens=parsed.cache_creation_tokens,
         task_prompt_len=len(parsed.task_description) if parsed.task_description else None,
         n_skills_fired=len(parsed.fired_skills),
+        raw_session_id=parsed.raw_session_id,
+        source_project=parsed.source_project,
+        source_revision=parsed.source_revision.identity,
+        source_mtime_ns=parsed.source_revision.mtime_ns,
+        source_size=parsed.source_revision.size,
+        source_content_hash=parsed.source_revision.content_hash,
+        judge_input_hash=parsed.judge_input_hash,
+        agent_definition_id=parsed.agent_definition_id,
     )
 
 

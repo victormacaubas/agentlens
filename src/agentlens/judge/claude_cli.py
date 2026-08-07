@@ -13,7 +13,13 @@ from pathlib import Path
 from typing import Any, Final
 
 from agentlens.errors import JudgeError, JudgeTimeoutError, JudgeUnavailableError
-from agentlens.judge.protocol import DimensionScore, SuggestedFix, Verdict
+from agentlens.judge.protocol import (
+    DimensionScore,
+    SuggestedFix,
+    Verdict,
+    bounded_diagnostic,
+    validate_verdict,
+)
 from agentlens.judge.rubric import (
     DIMENSION_NAMES,
     FIX_TARGETS,
@@ -25,7 +31,6 @@ DEFAULT_MODEL: Final[str] = "sonnet"
 DEFAULT_TIMEOUT_SECONDS: Final[int] = 180
 MAX_TURNS: Final[str] = "3"
 CLAUDE_EXECUTABLE: Final[str] = "claude"
-OUTPUT_EXCERPT_MAX_CHARS: Final[int] = 500
 NO_TOOLS: Final[str] = ""
 SETTING_SOURCES: Final[str] = "user"
 _ENV_PASSTHROUGH_NAMES: Final[frozenset[str]] = frozenset({"PATH", "HOME"})
@@ -83,13 +88,16 @@ class ClaudeCliJudge:
                 raise unavailable
             raise JudgeError(
                 f"claude -p exited with code {result.returncode}; "
-                f"stderr: {_excerpt(result.stderr)}; stdout: {_excerpt(result.stdout)}"
+                f"stderr: {bounded_diagnostic(result.stderr)}; "
+                f"stdout: {bounded_diagnostic(result.stdout)}"
             )
 
         envelope = _parse_envelope(result.stdout)
         if envelope.get("is_error"):
             result_text = envelope.get("result", "(no result)")
-            raise JudgeError(f"claude -p reported an error: {result_text}")
+            raise JudgeError(
+                f"claude -p reported an error: {bounded_diagnostic(result_text)}"
+            )
 
         verdict = _build_verdict(envelope, rubric_version=rubric_version)
         self.resolved_model = verdict.judge_model
@@ -161,29 +169,25 @@ def _detect_unavailable(stdout: str) -> JudgeUnavailableError | None:
     return JudgeUnavailableError(f"claude -p reported it is not logged in; {_AUTH_REMEDY}")
 
 
-def _excerpt(text: str) -> str:
-    text = text.strip()
-    if len(text) <= OUTPUT_EXCERPT_MAX_CHARS:
-        return text
-    return text[:OUTPUT_EXCERPT_MAX_CHARS] + "... [truncated]"
-
-
 def _parse_envelope(stdout: str) -> dict[str, Any]:
     try:
         envelope = json.loads(stdout)
     except json.JSONDecodeError as exc:
-        raise JudgeError(f"claude -p stdout was not valid JSON: {_excerpt(stdout)}") from exc
+        raise JudgeError(
+            f"claude -p stdout was not valid JSON: {bounded_diagnostic(stdout)}"
+        ) from exc
     if not isinstance(envelope, dict):
-        raise JudgeError(f"claude -p envelope was not a JSON object: {_excerpt(stdout)}")
+        raise JudgeError(
+            "claude -p envelope was not a JSON object: "
+            f"{bounded_diagnostic(envelope)}"
+        )
     return envelope
 
 
 def _build_verdict(envelope: dict[str, Any], *, rubric_version: str) -> Verdict:
     structured_output = envelope.get("structured_output")
     if not isinstance(structured_output, dict):
-        raise JudgeError(
-            f"claude -p envelope is missing a usable 'structured_output': {envelope!r}"
-        )
+        raise JudgeError("claude -p envelope is missing a usable 'structured_output' object")
 
     dimensions = _parse_dimensions(structured_output)
     suggested_fixes = _parse_suggested_fixes(structured_output)
@@ -201,16 +205,18 @@ def _build_verdict(envelope: dict[str, Any], *, rubric_version: str) -> Verdict:
 
     session_id = envelope.get("session_id")
 
-    return Verdict(
-        session_id=session_id if isinstance(session_id, str) else "",
-        rubric_version=rubric_version,
-        judge_model=resolved_model,
-        dimensions=dimensions,
-        overall_score=overall_score,
-        suggested_fixes=suggested_fixes,
-        judge_cost_usd=float(total_cost_usd) if isinstance(total_cost_usd, (int, float)) else 0.0,
-        judge_input_tokens=input_tokens,
-        judge_output_tokens=output_tokens,
+    return validate_verdict(
+        Verdict(
+            session_id=session_id if isinstance(session_id, str) else "",
+            rubric_version=rubric_version,
+            judge_model=resolved_model,
+            dimensions=dimensions,
+            overall_score=overall_score,
+            suggested_fixes=suggested_fixes,
+            judge_cost_usd=total_cost_usd,
+            judge_input_tokens=input_tokens,
+            judge_output_tokens=output_tokens,
+        )
     )
 
 
@@ -231,12 +237,11 @@ def _extract_model_usage(envelope: dict[str, Any]) -> tuple[str, dict[str, Any]]
     raw_model_usage = envelope.get("modelUsage")
     if not isinstance(raw_model_usage, dict) or len(raw_model_usage) != 1:
         raise JudgeError(
-            "claude -p envelope's modelUsage must carry exactly one entry, "
-            f"got: {raw_model_usage!r}"
+            "claude -p envelope's modelUsage must carry exactly one object entry"
         )
     ((model_key, entry),) = raw_model_usage.items()
     if not isinstance(entry, dict):
-        raise JudgeError(f"claude -p envelope's modelUsage entry is not an object: {entry!r}")
+        raise JudgeError("claude -p envelope's modelUsage entry must be an object")
 
     resolved_model = model_key if isinstance(model_key, str) and model_key else None
     if resolved_model is None:
@@ -245,22 +250,25 @@ def _extract_model_usage(envelope: dict[str, Any]) -> tuple[str, dict[str, Any]]
             canonical_model if isinstance(canonical_model, str) and canonical_model else None
         )
     if resolved_model is None:
-        raise JudgeError(
-            "claude -p envelope's modelUsage entry has no usable model "
-            f"identifier: {raw_model_usage!r}"
-        )
+        raise JudgeError("claude -p envelope's modelUsage entry has no usable model identifier")
     return resolved_model, entry
 
 
 def _numeric_field(mapping: dict[str, Any], key: str) -> int:
     value = mapping.get(key, 0)
-    return int(value) if isinstance(value, (int, float)) else 0
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise JudgeError(f"claude -p modelUsage.{key} must be a non-negative integer")
+    return value
 
 
 def _parse_dimensions(structured_output: dict[str, Any]) -> dict[str, DimensionScore]:
     raw_dimensions = structured_output.get("dimensions")
     if not isinstance(raw_dimensions, dict):
         raise JudgeError("structured_output.dimensions must be an object")
+    if set(raw_dimensions) != set(DIMENSION_NAMES):
+        raise JudgeError(
+            "structured_output.dimensions must contain exactly the four rubric dimensions"
+        )
 
     dimensions: dict[str, DimensionScore] = {}
     for name in DIMENSION_NAMES:
@@ -300,23 +308,27 @@ def _parse_suggested_fixes(structured_output: dict[str, Any]) -> list[SuggestedF
         raise JudgeError("structured_output.suggested_fixes must be a list")
 
     fixes: list[SuggestedFix] = []
-    for raw_fix in raw_fixes:
+    for index, raw_fix in enumerate(raw_fixes):
         if not isinstance(raw_fix, dict):
             raise JudgeError(
-                "structured_output.suggested_fixes must be a list of typed fix "
-                f"objects, not bare strings; got {raw_fix!r}"
+                f"structured_output.suggested_fixes[{index}] must be a typed fix object"
             )
         dimension = raw_fix.get("dimension")
         target = raw_fix.get("target")
         recommendation = raw_fix.get("recommendation")
         rationale = raw_fix.get("rationale")
         if dimension not in DIMENSION_NAMES:
-            raise JudgeError(f"suggested_fixes entry has an unknown dimension {dimension!r}")
+            raise JudgeError(
+                f"structured_output.suggested_fixes[{index}].dimension is not known"
+            )
         if target not in FIX_TARGETS:
-            raise JudgeError(f"suggested_fixes entry has an out-of-set target {target!r}")
+            raise JudgeError(
+                f"structured_output.suggested_fixes[{index}].target is not known"
+            )
         if not isinstance(recommendation, str) or not isinstance(rationale, str):
             raise JudgeError(
-                "suggested_fixes entry must have string 'recommendation' and 'rationale'"
+                f"structured_output.suggested_fixes[{index}] must have string "
+                "'recommendation' and 'rationale'"
             )
         fixes.append(
             SuggestedFix(
