@@ -9,25 +9,42 @@ necessarily the alias a caller configures the loop with — see
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import sqlite3
+import uuid
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final
 
-from agentlens.errors import JudgeError, JudgeUnavailableError
-from agentlens.judge.protocol import Judge, Verdict
+from agentlens.errors import JudgeError, JudgeUnavailableError, StaleVerdictError
+from agentlens.judge.protocol import Judge, Verdict, bounded_diagnostic, validate_verdict
+from agentlens.judge.rubric import MODEL_ALIASES
 from agentlens.judge.transcript_view import build_transcript_view
 from agentlens.parser.session import SESSION_KIND_SUBAGENT, ParsedSession
 from agentlens.reporting.date_window import WindowRange
-from agentlens.store.models import SessionRecord, ToolEventRecord
+from agentlens.store.models import (
+    ScoringClaimRecord,
+    SessionRecord,
+    ToolEventRecord,
+    VerdictRecord,
+)
+from agentlens.store.operations import (
+    acquire_scoring_claim,
+    finalize_scoring_claim,
+    release_scoring_claim,
+    set_session_judge_input_hash,
+    verdict_exists,
+)
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONSECUTIVE_FAILURE_LIMIT: Final[int] = 3
-KNOWN_MODEL_ALIASES: Final[frozenset[str]] = frozenset({"sonnet", "opus", "haiku", "opusplan"})
+DEFAULT_CLAIM_TTL_SECONDS: Final[int] = 15 * 60
+KNOWN_MODEL_ALIASES: Final[frozenset[str]] = MODEL_ALIASES
 
 
 def is_concrete_model_id(model: str) -> bool:
@@ -53,12 +70,49 @@ class ProgressEvent:
 
 @dataclass(frozen=True)
 class ScoringResult:
-    """Summary of one `ScoringLoop.run()` invocation."""
+    """Summary of one scoring invocation."""
 
     scored: int
     skipped: int
     total_cost_usd: float
     aborted: bool
+    attempts: int = 0
+    remaining: int = 0
+    resolved_model: str | None = None
+
+
+@dataclass
+class _RunState:
+    scored: int = 0
+    skipped: int = 0
+    total_cost_usd: float = 0.0
+    aborted: bool = False
+    attempts: int = 0
+    consecutive_failures: int = 0
+    progress_index: int = 0
+    processed_session_ids: set[str] = field(default_factory=set)
+
+    def result(
+        self,
+        *,
+        remaining: int = 0,
+        resolved_model: str | None = None,
+    ) -> ScoringResult:
+        return ScoringResult(
+            scored=self.scored,
+            skipped=self.skipped,
+            total_cost_usd=self.total_cost_usd,
+            aborted=self.aborted,
+            attempts=self.attempts,
+            remaining=remaining,
+            resolved_model=resolved_model,
+        )
+
+
+@dataclass(frozen=True)
+class _PreparedSession:
+    transcript_view: str
+    judge_input_hash: str
 
 
 class ScoringLoop:
@@ -78,6 +132,8 @@ class ScoringLoop:
         judge_model: str,
         max_sessions: int | None = None,
         consecutive_failure_limit: int = DEFAULT_CONSECUTIVE_FAILURE_LIMIT,
+        claim_ttl_seconds: int = DEFAULT_CLAIM_TTL_SECONDS,
+        owner_id: str | None = None,
     ) -> None:
         self.judge = judge
         self.conn = conn
@@ -85,6 +141,9 @@ class ScoringLoop:
         self.judge_model = judge_model
         self.max_sessions = max_sessions
         self.consecutive_failure_limit = consecutive_failure_limit
+        self.claim_ttl_seconds = claim_ttl_seconds
+        self.owner_id = owner_id or uuid.uuid4().hex
+        self._resolved_model = judge.resolved_model
 
     def find_unscored_sessions(
         self, *, window: WindowRange, agent_type: str | None = None
@@ -99,7 +158,7 @@ class ScoringLoop:
         session in the window matches. That over-count is the upper bound
         `score_window` resolves before scoring the remainder.
         """
-        resolved_model = self.judge.resolved_model
+        resolved_model = self._resolved_model
         query_model = resolved_model if resolved_model is not None else self.judge_model
         query = """
             SELECT fs.session_id, fs.agent_id, fs.agent_type, fs.name_source, fs.session_kind,
@@ -109,7 +168,10 @@ class ScoringLoop:
                    fs.n_errors, fs.n_permission_denials, fs.n_duplicate_tool_calls,
                    fs.final_report_flagged_partial, fs.duration_sec, fs.input_tokens,
                    fs.output_tokens, fs.cache_read_tokens, fs.cache_creation_tokens,
-                   fs.task_prompt_len, fs.n_skills_fired
+                   fs.task_prompt_len, fs.n_skills_fired, fs.raw_session_id,
+                   fs.source_project, fs.source_revision, fs.source_mtime_ns,
+                   fs.source_size, fs.source_content_hash, fs.judge_input_hash,
+                   fs.agent_definition_id
             FROM fact_session fs
             WHERE fs.session_kind = ?
               AND fs.session_date >= ?
@@ -128,15 +190,13 @@ class ScoringLoop:
               AND NOT EXISTS (
                   SELECT 1 FROM fact_verdict fv
                   WHERE fv.session_id = fs.session_id
+                    AND fv.judge_input_hash = fs.judge_input_hash
                     AND fv.rubric_version = ?
                     AND fv.judge_model = ?
               )
         """
         params.extend([self.rubric_version, query_model])
-
-        if self.max_sessions is not None:
-            query += " LIMIT ?"
-            params.append(self.max_sessions)
+        query += " ORDER BY fs.session_date, fs.session_id"
 
         rows = self.conn.execute(query, params).fetchall()
         return [_row_to_session_record(row) for row in rows]
@@ -157,51 +217,17 @@ class ScoringLoop:
                 credentials). Propagates instead of being counted as a skip,
                 since no session will succeed until the caller fixes it.
         """
-        scored = 0
-        skipped = 0
-        total_cost_usd = 0.0
-        consecutive_failures = 0
-        aborted = False
-        total = len(sessions)
-
-        for idx, session in enumerate(sessions):
-            try:
-                verdict = self._score_session(session, jsonl_paths=jsonl_paths)
-            except JudgeUnavailableError:
-                # Must precede the JudgeError clause below, which it subclasses.
-                raise
-            except JudgeError as exc:
-                logger.warning(
-                    "Skipping session %s: judge failed", session.session_id, exc_info=True
-                )
-                skipped += 1
-                consecutive_failures += 1
-                if on_progress:
-                    on_progress(ProgressEvent(
-                        index=idx, total=total, session=session,
-                        verdict=None, error=str(exc),
-                    ))
-                if consecutive_failures >= self.consecutive_failure_limit:
-                    logger.error(
-                        "Aborting scoring loop after %d consecutive failures",
-                        consecutive_failures,
-                    )
-                    aborted = True
-                    break
-                continue
-
-            self.persist_verdict(verdict)
-            scored += 1
-            total_cost_usd += verdict.judge_cost_usd
-            consecutive_failures = 0
-            if on_progress:
-                on_progress(ProgressEvent(
-                    index=idx, total=total, session=session,
-                    verdict=verdict, error=None,
-                ))
-
-        return ScoringResult(
-            scored=scored, skipped=skipped, total_cost_usd=total_cost_usd, aborted=aborted
+        state = _RunState()
+        self._run_sessions(
+            sessions,
+            state=state,
+            jsonl_paths=jsonl_paths,
+            on_progress=on_progress,
+            progress_total=len(sessions),
+        )
+        return state.result(
+            remaining=max(0, len(sessions) - state.scored),
+            resolved_model=self._resolved_model,
         )
 
     def score_window(
@@ -226,34 +252,207 @@ class ScoringLoop:
         the alias currently points at.
         """
         upper_bound = self.find_unscored_sessions(window=window, agent_type=agent_type)
+        state = _RunState()
         if not upper_bound:
-            return ScoringResult(scored=0, skipped=0, total_cost_usd=0.0, aborted=False)
+            return state.result(resolved_model=self._resolved_model)
 
-        if is_concrete_model_id(self.judge_model) or self.judge.resolved_model is not None:
-            return self.run(upper_bound, jsonl_paths=jsonl_paths, on_progress=on_progress)
+        if is_concrete_model_id(self.judge_model) or self._resolved_model is not None:
+            self._run_sessions(
+                upper_bound,
+                state=state,
+                jsonl_paths=jsonl_paths,
+                on_progress=on_progress,
+                progress_total=len(upper_bound),
+            )
+            return self._window_result(
+                state,
+                window=window,
+                agent_type=agent_type,
+            )
 
-        resolution_candidate, *_ = upper_bound
-        resolution_result = self.run(
-            [resolution_candidate], jsonl_paths=jsonl_paths, on_progress=on_progress
+        for candidate in upper_bound:
+            self._run_sessions(
+                [candidate],
+                state=state,
+                jsonl_paths=jsonl_paths,
+                on_progress=on_progress,
+                progress_total=len(upper_bound),
+            )
+            if self._resolved_model is not None or state.aborted or self._budget_exhausted(state):
+                break
+
+        if self._resolved_model is None or state.aborted or self._budget_exhausted(state):
+            return self._window_result(
+                state,
+                window=window,
+                agent_type=agent_type,
+            )
+
+        remainder = [
+            session
+            for session in self.find_unscored_sessions(window=window, agent_type=agent_type)
+            if session.session_id not in state.processed_session_ids
+        ]
+        self._run_sessions(
+            remainder,
+            state=state,
+            jsonl_paths=jsonl_paths,
+            on_progress=on_progress,
+            progress_total=state.progress_index + len(remainder),
         )
-        if self.judge.resolved_model is None:
-            # The one resolution attempt failed; nothing further can be
-            # resolved this run, so report what happened and stop here.
-            return resolution_result
-
-        remainder = self.find_unscored_sessions(window=window, agent_type=agent_type)
-        remainder_result = self.run(remainder, jsonl_paths=jsonl_paths, on_progress=on_progress)
-
-        return ScoringResult(
-            scored=resolution_result.scored + remainder_result.scored,
-            skipped=resolution_result.skipped + remainder_result.skipped,
-            total_cost_usd=resolution_result.total_cost_usd + remainder_result.total_cost_usd,
-            aborted=resolution_result.aborted or remainder_result.aborted,
+        return self._window_result(
+            state,
+            window=window,
+            agent_type=agent_type,
         )
 
-    def _score_session(
-        self, session: SessionRecord, *, jsonl_paths: dict[str, Path]
-    ) -> Verdict:
+    def _window_result(
+        self,
+        state: _RunState,
+        *,
+        window: WindowRange,
+        agent_type: str | None,
+    ) -> ScoringResult:
+        remaining = len(
+            self.find_unscored_sessions(
+                window=window,
+                agent_type=agent_type,
+            )
+        )
+        return state.result(
+            remaining=remaining,
+            resolved_model=self._resolved_model,
+        )
+
+    def _run_sessions(
+        self,
+        sessions: Sequence[SessionRecord],
+        *,
+        state: _RunState,
+        jsonl_paths: dict[str, Path],
+        on_progress: Callable[[ProgressEvent], None] | None,
+        progress_total: int,
+    ) -> None:
+        for session in sessions:
+            if state.aborted or self._budget_exhausted(state):
+                return
+            if session.session_id in state.processed_session_ids:
+                continue
+            state.processed_session_ids.add(session.session_id)
+            self._process_session(
+                session,
+                state=state,
+                jsonl_paths=jsonl_paths,
+                on_progress=on_progress,
+                progress_total=progress_total,
+            )
+
+    def _process_session(
+        self,
+        session: SessionRecord,
+        *,
+        state: _RunState,
+        jsonl_paths: dict[str, Path],
+        on_progress: Callable[[ProgressEvent], None] | None,
+        progress_total: int,
+    ) -> None:
+        try:
+            prepared = self._prepare_session(session, jsonl_paths=jsonl_paths)
+        except JudgeError as exc:
+            self._record_failure(
+                session,
+                exc,
+                state=state,
+                on_progress=on_progress,
+                progress_total=progress_total,
+            )
+            return
+
+        claim_model = self._resolved_model or self.judge_model
+        if is_concrete_model_id(claim_model) and verdict_exists(
+            self.conn,
+            _empty_verdict_record(
+                session_id=session.session_id,
+                judge_input_hash=prepared.judge_input_hash,
+                rubric_version=self.rubric_version,
+                judge_model=claim_model,
+            ),
+        ):
+            return
+
+        now = datetime.now(UTC)
+        claim = ScoringClaimRecord(
+            session_id=session.session_id,
+            judge_input_hash=prepared.judge_input_hash,
+            rubric_version=self.rubric_version,
+            judge_model=claim_model,
+            owner_id=self.owner_id,
+            expires_at=(now + timedelta(seconds=self.claim_ttl_seconds)).isoformat(),
+        )
+        if not acquire_scoring_claim(self.conn, claim, now=now.isoformat()):
+            diagnostic = "scoring identity is actively claimed by another run"
+            state.skipped += 1
+            self._emit_progress(
+                session,
+                verdict=None,
+                error=diagnostic,
+                state=state,
+                on_progress=on_progress,
+                progress_total=progress_total,
+            )
+            return
+
+        state.attempts += 1
+        try:
+            verdict = validate_verdict(
+                self.judge.score(prepared.transcript_view, self.rubric_version)
+            )
+            verdict = replace(
+                verdict,
+                session_id=session.session_id,
+                judge_input_hash=prepared.judge_input_hash,
+                rubric_version=self.rubric_version,
+            )
+            finalized_at = datetime.now(UTC).isoformat()
+            finalize_scoring_claim(
+                self.conn,
+                claim=claim,
+                verdict=_to_verdict_record(verdict),
+                now=finalized_at,
+            )
+        except JudgeUnavailableError:
+            raise
+        except JudgeError as exc:
+            self._record_failure(
+                session,
+                exc,
+                state=state,
+                on_progress=on_progress,
+                progress_total=progress_total,
+            )
+            return
+        finally:
+            release_scoring_claim(self.conn, claim)
+
+        self._resolved_model = verdict.judge_model
+        state.scored += 1
+        state.total_cost_usd += verdict.judge_cost_usd
+        state.consecutive_failures = 0
+        self._emit_progress(
+            session,
+            verdict=verdict,
+            error=None,
+            state=state,
+            on_progress=on_progress,
+            progress_total=progress_total,
+        )
+
+    def _prepare_session(
+        self,
+        session: SessionRecord,
+        *,
+        jsonl_paths: dict[str, Path],
+    ) -> _PreparedSession:
         jsonl_path = jsonl_paths.get(session.session_id)
         if jsonl_path is None:
             raise JudgeError(f"no transcript path provided for session {session.session_id}")
@@ -265,36 +464,77 @@ class ScoringLoop:
             raise JudgeError(
                 f"failed to read transcript for {session.session_id} at {jsonl_path}"
             ) from exc
-        verdict = self.judge.score(transcript_view, self.rubric_version)
-
-        return replace(
-            verdict,
+        judge_input_hash = hashlib.sha256(transcript_view.encode("utf-8")).hexdigest()
+        if not set_session_judge_input_hash(
+            self.conn,
             session_id=session.session_id,
-            rubric_version=self.rubric_version,
+            source_revision=session.source_revision,
+            judge_input_hash=judge_input_hash,
+        ):
+            raise StaleVerdictError(
+                f"session {session.session_id} changed before scoring could begin"
+            )
+        return _PreparedSession(
+            transcript_view=transcript_view,
+            judge_input_hash=judge_input_hash,
         )
 
-    def persist_verdict(self, verdict: Verdict) -> None:
-        """Upsert `verdict` into `fact_verdict`, keyed on
-        `(session_id, rubric_version, judge_model)`.
-        """
-        with self.conn:
-            self.conn.execute(
-                """
-                INSERT OR REPLACE INTO fact_verdict
-                    (session_id, rubric_version, judge_model, verdict_json,
-                     judge_cost_usd, judge_input_tokens, judge_output_tokens)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    verdict.session_id,
-                    verdict.rubric_version,
-                    verdict.judge_model,
-                    json.dumps(verdict.to_verdict_json()),
-                    verdict.judge_cost_usd,
-                    verdict.judge_input_tokens,
-                    verdict.judge_output_tokens,
-                ),
+    def _record_failure(
+        self,
+        session: SessionRecord,
+        exc: JudgeError,
+        *,
+        state: _RunState,
+        on_progress: Callable[[ProgressEvent], None] | None,
+        progress_total: int,
+    ) -> None:
+        diagnostic = bounded_diagnostic(exc)
+        logger.warning(
+            "Skipping session %s: judge failed: %s",
+            session.session_id,
+            diagnostic,
+        )
+        state.skipped += 1
+        state.consecutive_failures += 1
+        self._emit_progress(
+            session,
+            verdict=None,
+            error=diagnostic,
+            state=state,
+            on_progress=on_progress,
+            progress_total=progress_total,
+        )
+        if state.consecutive_failures >= self.consecutive_failure_limit:
+            logger.error(
+                "Aborting scoring loop after %d consecutive failures",
+                state.consecutive_failures,
             )
+            state.aborted = True
+
+    def _emit_progress(
+        self,
+        session: SessionRecord,
+        *,
+        verdict: Verdict | None,
+        error: str | None,
+        state: _RunState,
+        on_progress: Callable[[ProgressEvent], None] | None,
+        progress_total: int,
+    ) -> None:
+        if on_progress is not None:
+            on_progress(
+                ProgressEvent(
+                    index=state.progress_index,
+                    total=progress_total,
+                    session=session,
+                    verdict=verdict,
+                    error=error,
+                )
+            )
+        state.progress_index += 1
+
+    def _budget_exhausted(self, state: _RunState) -> bool:
+        return self.max_sessions is not None and state.attempts >= self.max_sessions
 
 
 def _row_to_session_record(row: tuple[Any, ...]) -> SessionRecord:
@@ -327,13 +567,22 @@ def _row_to_session_record(row: tuple[Any, ...]) -> SessionRecord:
         cache_creation_tokens=row[25],
         task_prompt_len=row[26],
         n_skills_fired=row[27],
+        raw_session_id=row[28],
+        source_project=row[29],
+        source_revision=row[30],
+        source_mtime_ns=row[31],
+        source_size=row[32],
+        source_content_hash=row[33],
+        judge_input_hash=row[34],
+        agent_definition_id=row[35],
     )
 
 
 def _fetch_events(conn: sqlite3.Connection, session_id: str) -> list[ToolEventRecord]:
     rows = conn.execute(
         """
-        SELECT session_id, seq, tool_name, is_error, denial_kind, ts, input_hash, output_bytes
+        SELECT session_id, seq, tool_name, is_error, denial_kind, ts, input_hash,
+               file_path_hash, output_bytes
         FROM fact_tool_event
         WHERE session_id = ?
         ORDER BY seq
@@ -349,10 +598,43 @@ def _fetch_events(conn: sqlite3.Connection, session_id: str) -> list[ToolEventRe
             denial_kind=row[4],
             ts=row[5],
             input_hash=row[6],
-            output_bytes=row[7],
+            file_path_hash=row[7],
+            output_bytes=row[8],
         )
         for row in rows
     ]
+
+
+def _empty_verdict_record(
+    *,
+    session_id: str,
+    judge_input_hash: str,
+    rubric_version: str,
+    judge_model: str,
+) -> VerdictRecord:
+    return VerdictRecord(
+        session_id=session_id,
+        judge_input_hash=judge_input_hash,
+        rubric_version=rubric_version,
+        judge_model=judge_model,
+        verdict_json="",
+        judge_cost_usd=0.0,
+        judge_input_tokens=0,
+        judge_output_tokens=0,
+    )
+
+
+def _to_verdict_record(verdict: Verdict) -> VerdictRecord:
+    return VerdictRecord(
+        session_id=verdict.session_id,
+        judge_input_hash=verdict.judge_input_hash,
+        rubric_version=verdict.rubric_version,
+        judge_model=verdict.judge_model,
+        verdict_json=json.dumps(verdict.to_verdict_json()),
+        judge_cost_usd=verdict.judge_cost_usd,
+        judge_input_tokens=verdict.judge_input_tokens,
+        judge_output_tokens=verdict.judge_output_tokens,
+    )
 
 
 def _to_parsed_session(record: SessionRecord, *, events: list[ToolEventRecord]) -> ParsedSession:

@@ -12,9 +12,11 @@ from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
 from click.testing import CliRunner
 
 from agentlens.cli import main
+from agentlens.discovery.models import SourceIdentity
 from agentlens.judge.rubric import RUBRIC_VERSION
 from agentlens.store.models import SessionRecord
 from agentlens.store.operations import upsert_session
@@ -95,37 +97,62 @@ def _setup_unscored_sessions(tmp_path: Path, n: int) -> tuple[Path, Path]:
     `.claude`-shaped tree of empty transcript files under a fresh
     `claude_home`, so `score`'s `_discover_jsonl_paths` can find them.
     """
-    
     claude_home = tmp_path / "claude-home"
     store_path = tmp_path / "store.db"
     conn = create_store(store_path)
     try:
         for i in range(n):
             agent_id = f"a{i}"
+            session_id = SourceIdentity("-proj", "subagent", agent_id).session_id
             subagents_dir = (
                 claude_home / "projects" / "-proj" / "parent-sid" / "subagents"
             )
             subagents_dir.mkdir(parents=True, exist_ok=True)
             (subagents_dir / f"agent-{agent_id}.jsonl").write_text("")
-            upsert_session(conn, _session_record(agent_id, f"task {i}"))
+            upsert_session(
+                conn,
+                _session_record(
+                    session_id,
+                    f"task {i}",
+                    raw_session_id=agent_id,
+                    source_project="-proj",
+                    agent_id=agent_id,
+                ),
+            )
     finally:
         conn.close()
     return store_path, claude_home
 
 
-def _insert_verdict(store_path: Path, session_id: str, *, judge_model: str = "sonnet") -> None:
+def _insert_verdict(
+    store_path: Path,
+    session_id: str,
+    *,
+    judge_model: str = "claude-sonnet-5",
+) -> None:
+    raw_session_id = session_id
     conn = sqlite3.connect(store_path)
     try:
+        stored_session_id = conn.execute(
+            "SELECT session_id FROM fact_session WHERE raw_session_id = ?",
+            (raw_session_id,),
+        ).fetchone()[0]
+        judge_input_hash = f"input-{stored_session_id}"
         with conn:
+            conn.execute(
+                "UPDATE fact_session SET judge_input_hash = ? WHERE session_id = ?",
+                (judge_input_hash, stored_session_id),
+            )
             conn.execute(
                 """
                 INSERT OR REPLACE INTO fact_verdict
-                    (session_id, rubric_version, judge_model, verdict_json,
+                    (session_id, judge_input_hash, rubric_version, judge_model, verdict_json,
                      judge_cost_usd, judge_input_tokens, judge_output_tokens)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    session_id,
+                    stored_session_id,
+                    judge_input_hash,
                     RUBRIC_VERSION,
                     judge_model,
                     json.dumps({"dimensions": {}, "overall_score": 4.0, "suggested_fixes": []}),
@@ -219,9 +246,8 @@ def test_confirmation_prompt_shows_upper_bound_for_alias(tmp_path: Path) -> None
 
 @patch("agentlens.judge.claude_cli.subprocess.run")
 @patch("agentlens.judge.claude_cli.shutil.which", return_value="/usr/bin/claude")
-@patch("agentlens.cli.shutil.which", return_value="/usr/bin/claude")
 def test_no_confirm_skips_prompt(
-    mock_cli_which: MagicMock, mock_judge_which: MagicMock, mock_run: MagicMock, tmp_path: Path
+    mock_judge_which: MagicMock, mock_run: MagicMock, tmp_path: Path
 ) -> None:
     mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(MOCK_ENVELOPE), stderr="")
     store_path, claude_home = _setup_unscored_sessions(tmp_path, 3)
@@ -242,7 +268,9 @@ def test_no_confirm_skips_prompt(
 
     assert result.exit_code == 0
     assert "Proceed?" not in result.output
-    assert "Scored 3/3" in result.output
+    assert "Attempts: 3" in result.output
+    assert "Scored: 3" in result.output
+    assert "Remaining: 0" in result.output
     # The configured value was the "sonnet" alias; the summary names the
     # concrete model the judge resolved it to.
     assert "Resolved 'sonnet' to claude-sonnet-5" in result.output
@@ -257,9 +285,8 @@ def test_no_confirm_skips_prompt(
 
 @patch("agentlens.judge.claude_cli.subprocess.run")
 @patch("agentlens.judge.claude_cli.shutil.which", return_value="/usr/bin/claude")
-@patch("agentlens.cli.shutil.which", return_value="/usr/bin/claude")
 def test_max_sessions_cap(
-    mock_cli_which: MagicMock, mock_judge_which: MagicMock, mock_run: MagicMock, tmp_path: Path
+    mock_judge_which: MagicMock, mock_run: MagicMock, tmp_path: Path
 ) -> None:
     mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(MOCK_ENVELOPE), stderr="")
     store_path, claude_home = _setup_unscored_sessions(tmp_path, 5)
@@ -281,7 +308,10 @@ def test_max_sessions_cap(
     )
 
     assert result.exit_code == 0
-    assert "2/5 scored" in result.output
+    assert "Attempts: 2" in result.output
+    assert "Scored: 2" in result.output
+    assert "Remaining: 3" in result.output
+    assert "--max-sessions reached" in result.output
     # A capped run still names the resolved model: each scored session's
     # own judge call resolves it even though `score_window`'s own
     # resolution flow is bypassed while the cap is in effect.
@@ -295,7 +325,7 @@ def test_max_sessions_cap(
         conn.close()
 
 
-@patch("agentlens.cli.shutil.which", return_value=None)
+@patch("agentlens.judge.claude_cli.shutil.which", return_value=None)
 def test_error_when_claude_missing(mock_which: MagicMock, tmp_path: Path) -> None:
     store_path, claude_home = _setup_unscored_sessions(tmp_path, 1)
 
@@ -314,13 +344,131 @@ def test_error_when_claude_missing(mock_which: MagicMock, tmp_path: Path) -> Non
     )
 
     assert result.exit_code != 0
-    assert "claude" in result.output.lower()
+    assert "judge unavailable" in result.output.lower()
+    assert "authenticate" in result.output.lower()
 
 
-def test_all_scored_message(tmp_path: Path) -> None:
+@patch(
+    "agentlens.judge.claude_cli.subprocess.run",
+    side_effect=AssertionError("all-scored cache hit invoked the real judge path"),
+)
+@patch(
+    "agentlens.judge.claude_cli.shutil.which",
+    side_effect=AssertionError("all-scored cache hit checked the real judge path"),
+)
+def test_all_scored_message(
+    mock_which: MagicMock,
+    mock_run: MagicMock,
+    tmp_path: Path,
+) -> None:
     store_path, claude_home = _setup_unscored_sessions(tmp_path, 2)
     _insert_verdict(store_path, "a0")
     _insert_verdict(store_path, "a1")
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "--store",
+            str(store_path),
+            "score",
+            "--since",
+            "30d",
+            "--no-confirm",
+            "--judge-model",
+            "claude-sonnet-5",
+            "--claude-home",
+            str(claude_home),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "all sessions already scored" in result.output
+    assert "Attempts: 0" in result.output
+    assert "Judge model: claude-sonnet-5" in result.output
+    mock_which.assert_not_called()
+    mock_run.assert_not_called()
+
+
+@pytest.mark.parametrize("value", ["0", "-3"])
+def test_non_positive_max_sessions_is_rejected_before_store_or_judge_work(
+    value: str,
+    tmp_path: Path,
+) -> None:
+    store_path = tmp_path / "store.db"
+    with (
+        patch("agentlens.cli.create_store") as create_store_mock,
+        patch("agentlens.judge.claude_cli.subprocess.run") as subprocess_mock,
+    ):
+        result = CliRunner().invoke(
+            main,
+            ["--store", str(store_path), "score", "--max-sessions", value],
+        )
+
+    assert result.exit_code == 2
+    assert "Invalid value for '--max-sessions'" in result.output
+    create_store_mock.assert_not_called()
+    subprocess_mock.assert_not_called()
+    assert not store_path.exists()
+
+
+@patch(
+    "agentlens.judge.claude_cli.shutil.which",
+    return_value="/usr/bin/claude",
+)
+@patch("agentlens.judge.claude_cli.subprocess.run")
+def test_capped_failure_summary_is_complete_and_exits_nonzero(
+    mock_run: MagicMock,
+    mock_which: MagicMock,
+    tmp_path: Path,
+) -> None:
+    failed = MagicMock(returncode=1, stdout="", stderr="synthetic judge failure")
+    succeeded = MagicMock(returncode=0, stdout=json.dumps(MOCK_ENVELOPE), stderr="")
+    mock_run.side_effect = [failed, succeeded]
+    store_path, claude_home = _setup_unscored_sessions(tmp_path, 3)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "--store",
+            str(store_path),
+            "score",
+            "--since",
+            "30d",
+            "--no-confirm",
+            "--max-sessions",
+            "2",
+            "--claude-home",
+            str(claude_home),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "Attempts: 2" in result.output
+    assert "Scored: 1" in result.output
+    assert "Skipped: 1" in result.output
+    assert "Remaining: 2" in result.output
+    assert "Aborted: no" in result.output
+    assert "--max-sessions reached" in result.output
+    assert "Resolved 'sonnet' to claude-sonnet-5" in result.output
+    assert mock_run.call_count == 2
+
+
+@patch(
+    "agentlens.judge.claude_cli.shutil.which",
+    return_value="/usr/bin/claude",
+)
+@patch("agentlens.judge.claude_cli.subprocess.run")
+def test_abort_summary_preserves_success_count_and_exits_nonzero(
+    mock_run: MagicMock,
+    mock_which: MagicMock,
+    tmp_path: Path,
+) -> None:
+    mock_run.return_value = MagicMock(
+        returncode=1,
+        stdout="",
+        stderr="synthetic judge failure",
+    )
+    store_path, claude_home = _setup_unscored_sessions(tmp_path, 4)
 
     result = CliRunner().invoke(
         main,
@@ -336,5 +484,11 @@ def test_all_scored_message(tmp_path: Path) -> None:
         ],
     )
 
-    assert result.exit_code == 0
-    assert "all sessions already scored" in result.output
+    assert result.exit_code == 1
+    assert "Attempts: 3" in result.output
+    assert "Scored: 0" in result.output
+    assert "Skipped: 3" in result.output
+    assert "Remaining: 4" in result.output
+    assert "Aborted: yes" in result.output
+    assert "Resolved model: unresolved" in result.output
+    assert mock_run.call_count == 3

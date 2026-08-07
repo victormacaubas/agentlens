@@ -1,20 +1,28 @@
 from __future__ import annotations
 
 import json
-import shutil
+import sqlite3
+from collections.abc import Callable
 from contextlib import closing
+from functools import wraps
+from importlib import metadata
 from pathlib import Path
-from typing import Final
+from typing import Final, ParamSpec, TypeVar
 
 import click
 
-from agentlens import __version__
 from agentlens.discovery.filesystem import (
     discover_available_skills,
     discover_main_sessions,
     discover_subagent_runs,
 )
-from agentlens.errors import WindowResolutionError
+from agentlens.errors import (
+    JudgeUnavailableError,
+    SessionLookupAmbiguityError,
+    StoreLocationError,
+    StoreSchemaError,
+    WindowResolutionError,
+)
 from agentlens.ingest.orchestrator import (
     ingest_all,
     ingest_target,
@@ -31,14 +39,36 @@ from agentlens.reporting.queries import (
     build_report,
 )
 from agentlens.reporting.rendering import render_terminal_summary
-from agentlens.store.schema import create_store, resolve_store_path
+from agentlens.store.schema import assert_readable_schema_version, create_store, resolve_store_path
 
-CLAUDE_EXECUTABLE: Final[str] = "claude"
 PER_SESSION_COST_ESTIMATE: Final[dict[str, float]] = {
     "sonnet": 0.15,
     "opus": 0.15,
 }
 DEFAULT_PER_SESSION_COST: Final[float] = 0.15
+P = ParamSpec("P")
+R = TypeVar("R")
+
+
+def _handle_cli_errors(func: Callable[P, R]) -> Callable[P, R]:
+    @wraps(func)
+    def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
+        try:
+            return func(*args, **kwargs)
+        except (StoreLocationError, StoreSchemaError) as exc:
+            raise click.ClickException(str(exc)) from exc
+        except JudgeUnavailableError as exc:
+            raise click.ClickException(
+                f"judge unavailable: {exc}. Install and authenticate the Claude CLI, then retry."
+            ) from exc
+        except SessionLookupAmbiguityError as exc:
+            raise click.ClickException(str(exc)) from exc
+        except sqlite3.Error as exc:
+            raise click.ClickException(f"store operation failed: {exc}") from exc
+        except OSError as exc:
+            raise click.ClickException(f"filesystem operation failed: {exc}") from exc
+
+    return wrapped
 
 
 @click.group()
@@ -52,7 +82,7 @@ DEFAULT_PER_SESSION_COST: Final[float] = 0.15
         "(default: ~/.cache/agentlens/agentlens.db, or $AGENTLENS_STORE)."
     ),
 )
-@click.version_option(__version__, prog_name="agentlens")
+@click.version_option(version=metadata.version("agentlens"), prog_name="agentlens")
 @click.pass_context
 def main(ctx: click.Context, store_path: Path | None) -> None:
     """Analyze, score, and improve Claude Code subagents from session logs."""
@@ -77,6 +107,7 @@ def main(ctx: click.Context, store_path: Path | None) -> None:
     help="Override the .claude directory to scan (default: ~/.claude).",
 )
 @click.pass_context
+@_handle_cli_errors
 def session(
     ctx: click.Context,
     session_id: str | None,
@@ -88,10 +119,13 @@ def session(
     claude_home = claude_home_override or Path.home() / ".claude"
 
     with closing(create_store(store_path)) as conn:
-        sync_agent_definitions(conn, claude_home=claude_home)
+        definition_failures = list(
+            sync_agent_definitions(conn, claude_home=claude_home).failed_paths
+        )
 
         if file_path is None and session_id is None:
             click.echo(f"store ready at {store_path} (no target given; nothing to ingest)")
+            _exit_after_definition_failures(ctx, definition_failures)
             return
 
         if file_path is not None and not file_path.exists():
@@ -102,12 +136,27 @@ def session(
             raise click.ClickException(f"could not find a session for {file_path or session_id}")
 
         parsed = ingest_target(target)
+        if parsed.project_root is not None:
+            project_summary = sync_agent_definitions(
+                conn,
+                claude_home=claude_home,
+                project_claude_dir=parsed.project_root.resolve(strict=False) / ".claude",
+                source_project=parsed.source_project,
+                include_user=False,
+            )
+            definition_failures.extend(project_summary.failed_paths)
         available_skills = discover_available_skills(claude_home)
-        persist_parsed_session(conn, parsed, available_skills=available_skills)
+        persisted = persist_parsed_session(conn, parsed, available_skills=available_skills)
+        if not persisted:
+            raise click.ClickException(
+                f"session {parsed.raw_session_id!r} was not persisted because its source changed "
+                "or was incomplete; retry after the transcript is stable"
+            )
         click.echo(
-            f"ingested {parsed.session_kind} session {parsed.session_id} "
+            f"ingested {parsed.session_kind} session {parsed.raw_session_id} "
             f"({len(parsed.events)} tool events, name_source={parsed.name_source})"
         )
+        _exit_after_definition_failures(ctx, definition_failures)
 
 
 @main.command()
@@ -120,11 +169,12 @@ def session(
 )
 @click.option(
     "--limit",
-    type=int,
+    type=click.IntRange(min=1),
     default=None,
     help="Ingest at most N sessions in this invocation.",
 )
 @click.pass_context
+@_handle_cli_errors
 def ingest(
     ctx: click.Context,
     claude_home_override: Path | None,
@@ -135,9 +185,23 @@ def ingest(
     claude_home = claude_home_override or Path.home() / ".claude"
 
     with closing(create_store(store_path)) as conn:
-        sync_agent_definitions(conn, claude_home=claude_home)
+        user_definition_summary = sync_agent_definitions(conn, claude_home=claude_home)
         summary = ingest_all(conn, claude_home=claude_home, limit=limit)
-        click.echo(f"ingested {summary.n_ingested} sessions from {claude_home}")
+        discovery_failed_paths = _unique_paths(
+            (*user_definition_summary.failed_paths, *summary.discovery_failed_paths)
+        )
+        failed_paths = _unique_paths(
+            (*user_definition_summary.failed_paths, *summary.failed_paths)
+        )
+        click.echo(
+            f"Ingested: {summary.n_ingested}. Skipped: {summary.n_skipped}. "
+            f"Degraded: {summary.n_degraded}. "
+            f"Discovery failures: {len(discovery_failed_paths)}."
+        )
+        for failed_path in failed_paths:
+            click.echo(f"  failed: {failed_path}")
+        if summary.n_skipped or discovery_failed_paths:
+            ctx.exit(1)
 
 
 @main.command()
@@ -155,7 +219,7 @@ def ingest(
 @click.option(
     "--max-sessions",
     "max_sessions",
-    type=int,
+    type=click.IntRange(min=1),
     default=None,
     help="Cap the number of sessions scored in this invocation.",
 )
@@ -181,6 +245,7 @@ def ingest(
     help="Override the .claude directory to scan for transcripts (default: ~/.claude).",
 )
 @click.pass_context
+@_handle_cli_errors
 def score(
     ctx: click.Context,
     since: str | None,
@@ -215,35 +280,30 @@ def score(
             conn=conn,
             rubric_version=RUBRIC_VERSION,
             judge_model=judge_model,
+            max_sessions=max_sessions,
         )
-        # An alias (e.g. "sonnet") has no stored verdict keyed under the
-        # alias itself, so the pre-resolution query below over-counts: it
-        # matches every session in the window rather than only the ones a
-        # concrete resolved model would still consider unscored. The count
-        # is therefore an upper bound until this run resolves the alias,
-        # which happens for every alias run since the mapping isn't cached.
         count_is_upper_bound = not is_concrete_model_id(judge_model)
-
-        # Fetch the full unscored set (uncapped) so the max-sessions summary
-        # can report "scored/total" — `--max-sessions` capping happens below
-        # in Python, not via the loop's own (also-supported) SQL LIMIT.
         all_unscored = loop.find_unscored_sessions(window=window, agent_type=agent_type)
         total_unscored = len(all_unscored)
 
         if total_unscored == 0:
-            click.echo("all sessions already scored")
+            summary = (
+                "all sessions already scored. Attempts: 0. Scored: 0. "
+                "Skipped: 0. Remaining: 0. Total judge cost: $0.00. Aborted: no."
+            )
+            summary += _resolved_model_note(judge_model, judge_model)
+            click.echo(summary)
             return
 
-        capped = max_sessions is not None and max_sessions < total_unscored
-        sessions_to_score = (
+        preview_sessions = (
             all_unscored[:max_sessions] if max_sessions is not None else all_unscored
         )
-        n_to_score = len(sessions_to_score)
+        n_to_score = len(preview_sessions)
         estimated_cost = _estimate_judge_cost(n_to_score, judge_model)
         count_display = f"up to {n_to_score}" if count_is_upper_bound else str(n_to_score)
 
         if dry_run:
-            for record in sessions_to_score:
+            for record in preview_sessions:
                 click.echo(f"{record.agent_type}\t{record.task_description}")
             click.echo(f"estimated cost: ~${estimated_cost:.2f} for {count_display} sessions")
             return
@@ -256,12 +316,6 @@ def score(
             )
             if not proceed:
                 return
-
-        if shutil.which(CLAUDE_EXECUTABLE) is None:
-            raise click.ClickException(
-                f"{CLAUDE_EXECUTABLE!r} was not found on PATH; "
-                "install and authenticate it before running `agentlens score`."
-            )
 
         def _on_progress(event: ProgressEvent) -> None:
             label = event.session.agent_type or "unknown"
@@ -281,35 +335,25 @@ def score(
                 )
 
         jsonl_paths = _discover_jsonl_paths(claude_home)
-        if capped:
-            result = loop.run(sessions_to_score, jsonl_paths=jsonl_paths, on_progress=_on_progress)
-        else:
-            result = loop.score_window(
-                window=window,
-                agent_type=agent_type,
-                jsonl_paths=jsonl_paths,
-                on_progress=_on_progress,
-            )
-
-        resolved_note = _resolved_model_note(judge_model, loop.judge.resolved_model)
-
-        if capped:
-            summary = f"{result.scored}/{total_unscored} scored (--max-sessions reached)."
-            summary += resolved_note
-            summary += " Re-run to continue."
-            click.echo(summary, err=True)
-            return
-
+        result = loop.score_window(
+            window=window,
+            agent_type=agent_type,
+            jsonl_paths=jsonl_paths,
+            on_progress=_on_progress,
+        )
+        resolved_note = _resolved_model_note(judge_model, result.resolved_model)
         summary = (
-            f"Scored {result.scored}/{n_to_score} sessions. "
-            f"Total judge cost: ${result.total_cost_usd:.2f}."
+            f"Attempts: {result.attempts}. Scored: {result.scored}. "
+            f"Skipped: {result.skipped}. Remaining: {result.remaining}. "
+            f"Total judge cost: ${result.total_cost_usd:.2f}. "
+            f"Aborted: {'yes' if result.aborted else 'no'}."
         )
         summary += resolved_note
-        if result.skipped:
-            summary += f" {result.skipped} skipped (re-run to retry)."
-        if result.aborted:
-            summary += " Aborted early after repeated judge failures."
+        if max_sessions is not None and result.attempts >= max_sessions and result.remaining:
+            summary += " --max-sessions reached; re-run to continue."
         click.echo(summary, err=True)
+        if result.skipped or result.aborted:
+            ctx.exit(1)
 
 
 def _estimate_judge_cost(n_sessions: int, judge_model: str) -> float:
@@ -323,29 +367,25 @@ def _estimate_judge_cost(n_sessions: int, judge_model: str) -> float:
 
 
 def _resolved_model_note(judge_model: str, resolved_model: str | None) -> str:
-    """Build the summary clause naming the concrete model an alias resolved to.
-
-    Empty when `judge_model` was already a concrete id (nothing to name
-    alongside it), or when nothing scored successfully this run and the
-    judge never resolved one.
-    """
-    if is_concrete_model_id(judge_model) or resolved_model is None:
-        return ""
+    """Build the summary clause describing configured and concrete model state."""
+    if is_concrete_model_id(judge_model):
+        return f" Judge model: {judge_model}."
+    if resolved_model is None:
+        return f" Configured model: {judge_model!r}. Resolved model: unresolved."
     return f" Resolved {judge_model!r} to {resolved_model}."
 
 
 def _discover_jsonl_paths(claude_home: Path) -> dict[str, Path]:
     """Map each session's store key to its transcript path.
 
-    Subagent `fact_session` rows are keyed by `agent_id`; main-session
-    rows are keyed by `session_id`. Both live under the same `session_id`
-    column in the store, so this maps `agent_id -> jsonl_path` for subagent
-    runs and `session_id -> jsonl_path` for main sessions into one dict.
+    Both main and subagent records use the qualified source identity stored
+    in `fact_session.session_id`; raw IDs are intentionally excluded because
+    they can collide across projects and session kinds.
     """
     projects_root = claude_home / "projects"
     jsonl_paths: dict[str, Path] = {}
     for run in discover_subagent_runs(projects_root):
-        jsonl_paths[run.agent_id] = run.jsonl_path
+        jsonl_paths[run.session_id] = run.jsonl_path
     for msf in discover_main_sessions(projects_root):
         jsonl_paths[msf.session_id] = msf.path
     return jsonl_paths
@@ -357,8 +397,20 @@ def _discover_jsonl_paths(claude_home: Path) -> dict[str, Path]:
 @click.option("--from", "from_", default=None, help="Explicit window start date (with --to).")
 @click.option("--to", default=None, help="Explicit window end date (with --from).")
 @click.option("--today", is_flag=True, default=False, help="Shortcut for --since 1d.")
+@click.option(
+    "--rubric-version",
+    default=RUBRIC_VERSION,
+    show_default=True,
+    help="Rubric version for the comparable verdict cohort.",
+)
+@click.option(
+    "--judge-model",
+    default=None,
+    help="Concrete judge model for the verdict cohort; required when stored models are ambiguous.",
+)
 @click.option("--json", "as_json", is_flag=True, default=False, help="Emit the verdict-JSON slice.")
 @click.pass_context
+@_handle_cli_errors
 def report(
     ctx: click.Context,
     agent_type: str | None,
@@ -366,6 +418,8 @@ def report(
     from_: str | None,
     to: str | None,
     today: bool,
+    rubric_version: str,
+    judge_model: str | None,
     as_json: bool,
 ) -> None:
     """Aggregate deterministic counts over the store for a window.
@@ -380,17 +434,50 @@ def report(
     except WindowResolutionError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    with closing(create_store(store_path)) as conn:
-        result = build_report(
-            conn,
-            window=window,
-            agent_type=agent_type,
-            min_sessions_for_trend=DEFAULT_MIN_SESSIONS_FOR_TREND,
-        )
+    with closing(_open_report_store_read_only(store_path)) as conn:
+        try:
+            result = build_report(
+                conn,
+                window=window,
+                agent_type=agent_type,
+                min_sessions_for_trend=DEFAULT_MIN_SESSIONS_FOR_TREND,
+                rubric_version=rubric_version,
+                judge_model=judge_model,
+            )
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
         if as_json:
             click.echo(json.dumps(result.to_verdict_slice()))
         else:
             click.echo(render_terminal_summary(result))
+
+
+def _open_report_store_read_only(path: Path) -> sqlite3.Connection:
+    """Open an existing report store without creating or modifying it."""
+    conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+    try:
+        conn.execute("PRAGMA query_only = ON")
+        assert_readable_schema_version(conn, path)
+    except BaseException:
+        conn.close()
+        raise
+    return conn
+
+
+def _unique_paths(paths: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(paths))
+
+
+def _exit_after_definition_failures(
+    ctx: click.Context,
+    failed_paths: list[str],
+) -> None:
+    unique_paths = _unique_paths(tuple(failed_paths))
+    if not unique_paths:
+        return
+    for failed_path in unique_paths:
+        click.echo(f"  definition discovery failed: {failed_path}", err=True)
+    ctx.exit(1)
 
 
 if __name__ == "__main__":

@@ -1,18 +1,17 @@
-"""Build the judge's prepared transcript view: a condensed text
-document derived from a `ParsedSession` and its raw JSONL transcript, sized
-for a single judge call rather than the full raw transcript.
-"""
+"""Build the bounded transcript view supplied to the judge."""
 
 from __future__ import annotations
 
 import json
 import re
+from collections import OrderedDict, deque
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
 from agentlens.aggregation.derivation import count_duplicate_tool_calls
-from agentlens.parser.extraction import read_jsonl_records
+from agentlens.parser.extraction import consume_jsonl_records
 from agentlens.parser.session import ParsedSession
 
 TASK_DESCRIPTION_MAX_CHARS: Final[int] = 2000
@@ -26,7 +25,18 @@ TOKENS_PER_K: Final[int] = 1000
 VIEW_MAX_BYTES: Final[int] = 20_480
 TOOL_SEQUENCE_HEAD: Final[int] = 40
 TOOL_SEQUENCE_TAIL: Final[int] = 10
-_REPORT_BUDGET_FRACTION: Final[float] = 0.6
+ERROR_SAMPLE_HEAD: Final[int] = 5
+ERROR_SAMPLE_TAIL: Final[int] = 5
+MAX_PENDING_TOOL_USES: Final[int] = 4096
+TOOL_LINE_MAX_BYTES: Final[int] = 500
+ERROR_LINE_MAX_BYTES: Final[int] = 400
+
+_TASK_SECTION_MAX_BYTES: Final[int] = 2400
+_IDENTITY_SECTION_MAX_BYTES: Final[int] = 1500
+_FACTS_SECTION_MAX_BYTES: Final[int] = 1500
+_TOOL_SECTION_MAX_BYTES: Final[int] = 5800
+_ERRORS_SECTION_MAX_BYTES: Final[int] = 4500
+_FINAL_SECTION_MAX_BYTES: Final[int] = 4770
 _SECTION_SEPARATOR: Final[str] = "\n\n"
 _NUM_SECTIONS: Final[int] = 6
 
@@ -34,70 +44,252 @@ _EXIT_CODE_RE: Final[re.Pattern[str]] = re.compile(r"^Exit code (\d+)")
 
 
 @dataclass(frozen=True)
-class _ToolCall:
-    """One resolved tool_use/tool_result pair, kept in file order."""
-
+class _PendingToolUse:
     tool_name: str
-    tool_input: Any
+    summary: str
+
+
+@dataclass(frozen=True)
+class _ResolvedToolCall:
+    step: int
+    tool_name: str
+    summary: str
     is_error: bool
     denial_kind: str | None
-    result_content: Any
+    error_excerpt: str
+
+
+@dataclass(frozen=True)
+class _ViewSections:
+    task: str
+    tool_sequence: str
+    errors: str
+    final_report: str
+
+
+@dataclass(frozen=True)
+class _Section:
+    title: str
+    body: str
+
+    def render(self) -> str:
+        return f"## {self.title}\n{self.body}"
+
+
+class _TranscriptViewReducer:
+    def __init__(self, parsed: ParsedSession) -> None:
+        self._parsed = parsed
+        self._task: str | None = None
+        self._final_report: str | None = None
+        self._pending: OrderedDict[str, _PendingToolUse] = OrderedDict()
+        self._pending_overflow_count = 0
+        self._tool_count = 0
+        self._tool_head: list[str] = []
+        self._tool_tail: deque[str] = deque(maxlen=TOOL_SEQUENCE_TAIL)
+        self._error_count = 0
+        self._error_head: list[str] = []
+        self._error_tail: deque[str] = deque(maxlen=ERROR_SAMPLE_TAIL)
+
+    def consume(self, records: Iterable[dict[str, Any]]) -> _ViewSections:
+        for record in records:
+            self._consume_record(record)
+
+        task = self._task
+        if task is None and self._parsed.task_description:
+            task = _truncate(
+                self._parsed.task_description,
+                max_chars=TASK_DESCRIPTION_MAX_CHARS,
+            )
+        return _ViewSections(
+            task=task or NO_TASK_DESCRIPTION,
+            tool_sequence=self._tool_sequence_body(),
+            errors=self._errors_body(),
+            final_report=self._final_report or NO_FINAL_REPORT,
+        )
+
+    def _consume_record(self, record: dict[str, Any]) -> None:
+        message = record.get("message")
+        if not isinstance(message, dict):
+            return
+        record_type = record.get("type")
+        if record_type == "assistant":
+            self._consume_assistant(message)
+        elif record_type == "user":
+            self._consume_user(record, message)
+
+    def _consume_assistant(self, message: dict[str, Any]) -> None:
+        text = _message_text_prefix(
+            message,
+            max_chars=_FINAL_SECTION_MAX_BYTES,
+        )
+        if text:
+            self._final_report = _truncate_bytes(
+                text,
+                max_bytes=_FINAL_SECTION_MAX_BYTES,
+            )
+
+        for item in _content_items(message):
+            if item.get("type") != "tool_use":
+                continue
+            tool_use_id = item.get("id")
+            tool_name = item.get("name")
+            if not isinstance(tool_use_id, str) or not isinstance(tool_name, str):
+                continue
+            self._pending[tool_use_id] = _PendingToolUse(
+                tool_name=tool_name,
+                summary=_summarize_tool_use(tool_name, item.get("input")),
+            )
+            self._pending.move_to_end(tool_use_id)
+            if len(self._pending) > MAX_PENDING_TOOL_USES:
+                self._pending.popitem(last=False)
+                self._pending_overflow_count += 1
+
+    def _consume_user(
+        self,
+        record: dict[str, Any],
+        message: dict[str, Any],
+    ) -> None:
+        if self._task is None:
+            task = _message_text_prefix(
+                message,
+                max_chars=TASK_DESCRIPTION_MAX_CHARS + 1,
+            ).strip()
+            if task:
+                self._task = _truncate(task, max_chars=TASK_DESCRIPTION_MAX_CHARS)
+
+        denial_kind = record.get("toolDenialKind")
+        denial = denial_kind if isinstance(denial_kind, str) else None
+        for item in _content_items(message):
+            if item.get("type") != "tool_result":
+                continue
+            tool_use_id = item.get("tool_use_id")
+            if not isinstance(tool_use_id, str):
+                continue
+            pending = self._pending.pop(tool_use_id, None)
+            if pending is None:
+                continue
+            self._record_tool_call(
+                pending,
+                is_error=bool(item.get("is_error", False)),
+                denial_kind=denial,
+                result_content=item.get("content"),
+            )
+
+    def _record_tool_call(
+        self,
+        pending: _PendingToolUse,
+        *,
+        is_error: bool,
+        denial_kind: str | None,
+        result_content: Any,
+    ) -> None:
+        self._tool_count += 1
+        call = _ResolvedToolCall(
+            step=self._tool_count,
+            tool_name=pending.tool_name,
+            summary=_resolve_tool_summary(
+                pending,
+                is_error=is_error,
+                result_content=result_content,
+            ),
+            is_error=is_error,
+            denial_kind=denial_kind,
+            error_excerpt=_error_excerpt(result_content),
+        )
+        tool_line = _truncate_bytes(
+            f"{call.step}. {call.summary}",
+            max_bytes=TOOL_LINE_MAX_BYTES,
+        )
+        if call.step <= TOOL_SEQUENCE_HEAD:
+            self._tool_head.append(tool_line)
+        else:
+            self._tool_tail.append(tool_line)
+
+        if not call.is_error and call.denial_kind is None:
+            return
+        self._error_count += 1
+        kind = "denial" if call.denial_kind is not None else "error"
+        error_line = _truncate_bytes(
+            f"- [step {call.step}] {call.tool_name} {kind}: {call.error_excerpt}",
+            max_bytes=ERROR_LINE_MAX_BYTES,
+        )
+        if self._error_count <= ERROR_SAMPLE_HEAD:
+            self._error_head.append(error_line)
+        else:
+            self._error_tail.append(error_line)
+
+    def _tool_sequence_body(self) -> str:
+        lines = [f"Total tool calls: {self._tool_count}"]
+        if self._pending_overflow_count:
+            lines.append(f"Pending tool pairs evicted: {self._pending_overflow_count}")
+        if self._tool_count == 0:
+            lines.append("(no tool calls)")
+            return "\n".join(lines)
+        if self._tool_count <= TOOL_SEQUENCE_HEAD + TOOL_SEQUENCE_TAIL:
+            lines.extend(self._tool_head)
+            lines.extend(self._tool_tail)
+            return "\n".join(lines)
+
+        omitted = self._tool_count - TOOL_SEQUENCE_HEAD - TOOL_SEQUENCE_TAIL
+        lines.extend(self._tool_head)
+        lines.append(f"{TRUNCATION_MARKER} ({omitted} tool calls omitted)")
+        lines.extend(self._tool_tail)
+        return "\n".join(lines)
+
+    def _errors_body(self) -> str:
+        lines = [f"Total errors/denials: {self._error_count}"]
+        if self._error_count == 0:
+            lines.append("(none)")
+            return "\n".join(lines)
+        if self._error_count <= ERROR_SAMPLE_HEAD + ERROR_SAMPLE_TAIL:
+            lines.extend(self._error_head)
+            lines.extend(self._error_tail)
+            return "\n".join(lines)
+
+        omitted = self._error_count - ERROR_SAMPLE_HEAD - ERROR_SAMPLE_TAIL
+        lines.extend(self._error_head)
+        lines.append(f"{TRUNCATION_MARKER} ({omitted} errors/denials omitted)")
+        lines.extend(self._error_tail)
+        return "\n".join(lines)
 
 
 def build_transcript_view(parsed: ParsedSession, jsonl_path: Path) -> str:
-    """Build the structured text document a judge scores instead of the raw
-    JSONL transcript: Task, Agent Identity, Deterministic Facts, Tool
-    Sequence, Errors & Denials, Final Report.
-
-    The result is byte-budgeted to `VIEW_MAX_BYTES`: the four fixed sections
-    (Task, Identity, Facts, Errors & Denials) are already bounded, and the
-    remaining budget is split between the two unbounded sections (Final
-    Report, Tool Sequence), reallocating any unused share from one to the
-    other before truncating whichever still exceeds its budget.
-    """
-    records = read_jsonl_records(jsonl_path)
-    tool_calls = _extract_tool_calls(records)
-
-    task_section = _build_task_section(_extract_task_description(records, parsed))
-    identity_section = _build_identity_section(parsed)
-    facts_section = _build_facts_section(parsed)
-    errors_section = _build_errors_section(tool_calls)
-
-    fixed_bytes = sum(
-        len(section.encode("utf-8"))
-        for section in (task_section, identity_section, facts_section, errors_section)
-    )
-    separator_overhead = len(_SECTION_SEPARATOR.encode("utf-8")) * (_NUM_SECTIONS - 1)
-    remaining_budget = max(VIEW_MAX_BYTES - fixed_bytes - separator_overhead, 0)
-
-    report_section_full = f"## Final Report\n{_extract_final_report(records)}"
-    tool_section_full = f"## Tool Sequence\n{_build_tool_sequence_body(tool_calls)}"
-
-    report_budget = int(remaining_budget * _REPORT_BUDGET_FRACTION)
-    tool_budget = remaining_budget - report_budget
-
-    report_natural_bytes = len(report_section_full.encode("utf-8"))
-    tool_natural_bytes = len(tool_section_full.encode("utf-8"))
-
-    if report_natural_bytes <= report_budget:
-        tool_budget += report_budget - report_natural_bytes
-        report_budget = report_natural_bytes
-    elif tool_natural_bytes <= tool_budget:
-        report_budget += tool_budget - tool_natural_bytes
-        tool_budget = tool_natural_bytes
-
-    final_report_section = _truncate_bytes(report_section_full, max_bytes=report_budget)
-    tool_sequence_section = _truncate_bytes(tool_section_full, max_bytes=tool_budget)
-
+    """Build a six-section view while retaining bounded streaming state."""
+    reducer = _TranscriptViewReducer(parsed)
+    extracted = consume_jsonl_records(
+        jsonl_path,
+        reducer.consume,
+        raise_on_unicode_error=True,
+    ).value
     sections = [
-        task_section,
-        identity_section,
-        facts_section,
-        tool_sequence_section,
-        errors_section,
-        final_report_section,
+        _bounded_section("Task", extracted.task, _TASK_SECTION_MAX_BYTES),
+        _bounded_section(
+            "Agent Identity",
+            _build_identity_body(parsed),
+            _IDENTITY_SECTION_MAX_BYTES,
+        ),
+        _bounded_section(
+            "Deterministic Facts",
+            _build_facts_body(parsed),
+            _FACTS_SECTION_MAX_BYTES,
+        ),
+        _bounded_section(
+            "Tool Sequence",
+            extracted.tool_sequence,
+            _TOOL_SECTION_MAX_BYTES,
+        ),
+        _bounded_section(
+            "Errors & Denials",
+            extracted.errors,
+            _ERRORS_SECTION_MAX_BYTES,
+        ),
+        _bounded_section(
+            "Final Report",
+            extracted.final_report,
+            _FINAL_SECTION_MAX_BYTES,
+        ),
     ]
-    return _SECTION_SEPARATOR.join(sections)
+    return _enforce_view_byte_gate(sections)
 
 
 def _display(value: object) -> str:
@@ -111,16 +303,18 @@ def _truncate(text: str, *, max_chars: int) -> str:
 
 
 def _truncate_bytes(text: str, *, max_bytes: int, marker: str = TRUNCATION_MARKER) -> str:
-    """Truncate `text` to at most `max_bytes` UTF-8 bytes, appending `marker`
-    when truncation occurs. Never returns text whose encoded length exceeds
-    `max_bytes` under normal (non-degenerate) budgets.
-    """
-    encoded = text.encode("utf-8")
-    if len(encoded) <= max_bytes:
-        return text
+    """Return a UTF-8-safe bounded prefix without encoding an unbounded string."""
+    if max_bytes <= 0:
+        return ""
+    if len(text) <= max_bytes:
+        encoded = text.encode("utf-8")
+        if len(encoded) <= max_bytes:
+            return text
+    else:
+        encoded = text[:max_bytes].encode("utf-8")
     marker_bytes = marker.encode("utf-8")
     if max_bytes <= len(marker_bytes):
-        return marker.encode("utf-8")[: max(max_bytes, 0)].decode("utf-8", errors="ignore")
+        return marker_bytes[:max_bytes].decode("utf-8", errors="ignore")
     budget = max_bytes - len(marker_bytes)
     truncated = encoded[:budget].decode("utf-8", errors="ignore")
     return truncated + marker
@@ -130,142 +324,138 @@ def _format_tokens_k(tokens: int) -> str:
     return f"{round(tokens / TOKENS_PER_K)}K"
 
 
-def _content_items(message: dict[str, Any]) -> list[dict[str, Any]]:
+def _content_items(message: dict[str, Any]) -> Iterator[dict[str, Any]]:
     content = message.get("content")
     if isinstance(content, list):
-        return [item for item in content if isinstance(item, dict)]
-    return []
+        yield from (item for item in content if isinstance(item, dict))
 
 
-def _reconstruct_user_text(content: Any) -> str:
-    """Reconstruct a user record's text, handling both a plain string, a
-    list of content blocks (`{"type": "text", ...}`), and the streaming
-    char-by-char shape some transcripts use (a list of single-character
-    strings with no block structure).
-    """
-    
+def _message_text_parts(message: dict[str, Any]) -> Iterator[str]:
+    content = message.get("content")
     if isinstance(content, str):
-        return content
-    if not isinstance(content, list) or not content:
-        return ""
+        yield content
+        return
+    if not isinstance(content, list):
+        return
     if all(isinstance(item, str) for item in content):
-        return "".join(content)
-    parts = [
-        item.get("text")
-        for item in content
-        if isinstance(item, dict)
-        and item.get("type") == "text"
-        and isinstance(item.get("text"), str)
-    ]
-    return "\n".join(text for text in parts if text)
-
-
-def _extract_task_description(records: list[dict[str, Any]], parsed: ParsedSession) -> str:
-    for record in records:
-        if record.get("type") != "user":
+        for item in content:
+            yield item
+        return
+    for item in content:
+        if not isinstance(item, dict) or item.get("type") != "text":
             continue
-        message = record.get("message")
-        if not isinstance(message, dict):
-            continue
-        text = _reconstruct_user_text(message.get("content")).strip()
-        if text:
-            return _truncate(text, max_chars=TASK_DESCRIPTION_MAX_CHARS)
-        break
-    if parsed.task_description:
-        return _truncate(parsed.task_description, max_chars=TASK_DESCRIPTION_MAX_CHARS)
-    return NO_TASK_DESCRIPTION
+        text = item.get("text")
+        if isinstance(text, str) and text:
+            yield text
 
 
-def _extract_tool_calls(records: list[dict[str, Any]]) -> list[_ToolCall]:
-    """Re-pair `tool_use`/`tool_result` from the raw transcript, keeping the
-    full (unhashed) input and result content the view needs to summarize —
-    `ParsedSession.events` only carries hashes and byte counts.
-    """
-    tool_uses: dict[str, tuple[str, Any]] = {}
-    calls: list[_ToolCall] = []
-    for record in records:
-        message = record.get("message")
-        if not isinstance(message, dict):
-            continue
-        record_type = record.get("type")
-        if record_type == "assistant":
-            for item in _content_items(message):
-                if item.get("type") != "tool_use":
-                    continue
-                tool_use_id = item.get("id")
-                tool_name = item.get("name")
-                if isinstance(tool_use_id, str) and isinstance(tool_name, str):
-                    tool_uses[tool_use_id] = (tool_name, item.get("input"))
-        elif record_type == "user":
-            denial_kind = record.get("toolDenialKind")
-            for item in _content_items(message):
-                if item.get("type") != "tool_result":
-                    continue
-                tool_use_id = item.get("tool_use_id")
-                if not isinstance(tool_use_id, str) or tool_use_id not in tool_uses:
-                    continue
-                tool_name, tool_input = tool_uses[tool_use_id]
-                calls.append(
-                    _ToolCall(
-                        tool_name=tool_name,
-                        tool_input=tool_input,
-                        is_error=bool(item.get("is_error", False)),
-                        denial_kind=denial_kind if isinstance(denial_kind, str) else None,
-                        result_content=item.get("content"),
-                    )
-                )
-    return calls
+def _message_text_prefix(message: dict[str, Any], *, max_chars: int) -> str:
+    parts: list[str] = []
+    retained_chars = 0
+    has_structured_parts = isinstance(message.get("content"), list) and any(
+        isinstance(item, dict) and item.get("type") == "text"
+        for item in message.get("content", [])
+    )
+    separator = "\n" if has_structured_parts else ""
+    for text in _message_text_parts(message):
+        if parts and separator:
+            if retained_chars >= max_chars:
+                break
+            parts.append(separator)
+            retained_chars += 1
+        remaining = max_chars - retained_chars
+        if remaining <= 0:
+            break
+        retained = text[:remaining]
+        parts.append(retained)
+        retained_chars += len(retained)
+        if len(retained) < len(text):
+            break
+    return "".join(parts)
 
 
-def _extract_exit_code(call: _ToolCall) -> int:
-    """Bash tool_results carry `Exit code N` as a content prefix only on
-    failure; a clean run has no such marker, so success implies exit 0.
-    """
-    if not call.is_error:
+def _extract_exit_code(*, is_error: bool, result_content: Any) -> int:
+    if not is_error:
         return 0
-    content = call.result_content
-    text = content if isinstance(content, str) else ""
+    text = result_content if isinstance(result_content, str) else ""
     match = _EXIT_CODE_RE.match(text)
     return int(match.group(1)) if match else 1
 
 
-def _summarize_tool_call(call: _ToolCall) -> str:
-    tool_input = call.tool_input if isinstance(call.tool_input, dict) else {}
-    if call.tool_name == "Read":
-        return f"Read {tool_input.get('file_path', UNKNOWN_PATH)}"
-    if call.tool_name == "Write":
+def _bounded_field(value: object, *, max_bytes: int = TOOL_LINE_MAX_BYTES // 2) -> str:
+    return _truncate_bytes(str(value), max_bytes=max_bytes)
+
+
+def _summarize_tool_use(tool_name: str, tool_input_value: Any) -> str:
+    tool_input = tool_input_value if isinstance(tool_input_value, dict) else {}
+    if tool_name == "Read":
+        return f"Read {_bounded_field(tool_input.get('file_path', UNKNOWN_PATH))}"
+    if tool_name == "Write":
         path = tool_input.get("file_path", UNKNOWN_PATH)
         content = tool_input.get("content")
         size = len(content.encode("utf-8")) if isinstance(content, str) else 0
-        return f"Write {path} ({size} bytes)"
-    if call.tool_name == "Edit":
-        return f"Edit {tool_input.get('file_path', UNKNOWN_PATH)}"
-    if call.tool_name == "Bash":
+        return f"Write {_bounded_field(path)} ({size} bytes)"
+    if tool_name == "Edit":
+        return f"Edit {_bounded_field(tool_input.get('file_path', UNKNOWN_PATH))}"
+    if tool_name == "Bash":
         command = tool_input.get("command", "")
         command = command if isinstance(command, str) else ""
-        return f"Bash: {command[:BASH_COMMAND_MAX_CHARS]} → exit {_extract_exit_code(call)}"
-    return call.tool_name
+        return f"Bash: {command[:BASH_COMMAND_MAX_CHARS]}"
+    return _bounded_field(tool_name)
+
+
+def _resolve_tool_summary(
+    pending: _PendingToolUse,
+    *,
+    is_error: bool,
+    result_content: Any,
+) -> str:
+    if pending.tool_name != "Bash":
+        return pending.summary
+    exit_code = _extract_exit_code(
+        is_error=is_error,
+        result_content=result_content,
+    )
+    return f"{pending.summary} → exit {exit_code}"
 
 
 def _error_excerpt(content: Any) -> str:
-    text = content if isinstance(content, str) else json.dumps(content, default=str)
+    if isinstance(content, str):
+        text = content[: ERROR_EXCERPT_MAX_CHARS + 1]
+    else:
+        encoder = json.JSONEncoder(default=str)
+        parts: list[str] = []
+        retained = 0
+        for part in encoder.iterencode(content):
+            remaining = ERROR_EXCERPT_MAX_CHARS + 1 - retained
+            if remaining <= 0:
+                break
+            excerpt = part[:remaining]
+            parts.append(excerpt)
+            retained += len(excerpt)
+            if len(excerpt) < len(part):
+                break
+        text = "".join(parts)
     return _truncate(text, max_chars=ERROR_EXCERPT_MAX_CHARS)
 
 
-def _build_task_section(task_description: str) -> str:
-    return f"## Task\n{task_description}"
-
-
-def _build_identity_section(parsed: ParsedSession) -> str:
+def _build_identity_body(parsed: ParsedSession) -> str:
     lines = [
-        f"- type: {_display(parsed.name)}",
-        f"- spawn_depth: {_display(parsed.spawn_depth)}",
-        f"- parent_session: {_display(parsed.parent_session_id)}",
+        f"- type: {_bounded_identity_value(parsed.name)}",
+        f"- spawn_depth: {_bounded_identity_value(parsed.spawn_depth)}",
+        f"- parent_session: {_bounded_identity_value(parsed.parent_session_id)}",
     ]
-    return "## Agent Identity\n" + "\n".join(lines)
+    return "\n".join(lines)
 
 
-def _build_facts_section(parsed: ParsedSession) -> str:
+def _bounded_identity_value(value: object) -> str:
+    return _truncate_bytes(
+        _display(value),
+        max_bytes=_IDENTITY_SECTION_MAX_BYTES // 2,
+    )
+
+
+def _build_facts_body(parsed: ParsedSession) -> str:
     events = parsed.events
     n_errors = sum(1 for event in events if event.is_error)
     n_permission_denials = sum(1 for event in events if event.denial_kind is not None)
@@ -279,74 +469,45 @@ def _build_facts_section(parsed: ParsedSession) -> str:
         f"cache_read={_format_tokens_k(parsed.cache_read_tokens)}",
         f"- final_report_flagged_partial: {str(parsed.final_report_flagged_partial).lower()}",
     ]
-    return "## Deterministic Facts\n" + "\n".join(lines)
-
-
-def _build_tool_sequence_body(tool_calls: list[_ToolCall]) -> str:
-    """Render the Tool Sequence body, sampling to head/tail when there are
-    more calls than `TOOL_SEQUENCE_HEAD + TOOL_SEQUENCE_TAIL`. Every
-    error/denial entry that would otherwise fall in the omitted middle range
-    is preserved so critical facts survive the sampling.
-    """
-    total = len(tool_calls)
-    if total == 0:
-        return "(no tool calls)"
-    if total <= TOOL_SEQUENCE_HEAD + TOOL_SEQUENCE_TAIL:
-        return "\n".join(
-            f"{i}. {_summarize_tool_call(call)}" for i, call in enumerate(tool_calls, start=1)
-        )
-
-    head = tool_calls[:TOOL_SEQUENCE_HEAD]
-    tail_start_index = total - TOOL_SEQUENCE_TAIL
-    tail = tool_calls[tail_start_index:]
-    middle = tool_calls[TOOL_SEQUENCE_HEAD:tail_start_index]
-
-    lines = [f"{i}. {_summarize_tool_call(call)}" for i, call in enumerate(head, start=1)]
-
-    omitted = total - TOOL_SEQUENCE_HEAD - TOOL_SEQUENCE_TAIL
-    lines.append(f"... [{omitted} calls omitted] ...")
-
-    preserved = [
-        (idx, call)
-        for idx, call in enumerate(middle, start=TOOL_SEQUENCE_HEAD + 1)
-        if call.is_error or call.denial_kind is not None
-    ]
-    if preserved:
-        lines.append("Preserved errors/denials from omitted range:")
-        lines.extend(f"{idx}. {_summarize_tool_call(call)}" for idx, call in preserved)
-
-    lines.extend(
-        f"{i}. {_summarize_tool_call(call)}"
-        for i, call in enumerate(tail, start=tail_start_index + 1)
-    )
     return "\n".join(lines)
 
 
-def _build_errors_section(tool_calls: list[_ToolCall]) -> str:
-    lines = []
-    for i, call in enumerate(tool_calls, start=1):
-        if not call.is_error and call.denial_kind is None:
-            continue
-        kind = "denial" if call.denial_kind is not None else "error"
-        lines.append(f"- [step {i}] {call.tool_name} {kind}: {_error_excerpt(call.result_content)}")
-    body = "\n".join(lines) if lines else "(none)"
-    return f"## Errors & Denials\n{body}"
+def _bounded_section(title: str, body: str, max_bytes: int) -> _Section:
+    header_bytes = len(f"## {title}\n".encode())
+    return _Section(
+        title=title,
+        body=_truncate_bytes(body, max_bytes=max(max_bytes - header_bytes, 0)),
+    )
 
 
-def _extract_final_report(records: list[dict[str, Any]]) -> str:
-    last_text_parts: list[str] | None = None
-    for record in records:
-        if record.get("type") != "assistant":
-            continue
-        message = record.get("message")
-        if not isinstance(message, dict):
-            continue
-        last_text_parts = [
-            text
-            for item in _content_items(message)
-            if item.get("type") == "text" and isinstance(text := item.get("text"), str)
+def _enforce_view_byte_gate(sections: list[_Section]) -> str:
+    """Apply the final byte gate while preserving every section header."""
+    if len(sections) != _NUM_SECTIONS:
+        raise ValueError(f"expected {_NUM_SECTIONS} transcript-view sections")
+
+    bounded = sections
+    rendered = _SECTION_SEPARATOR.join(section.render() for section in bounded)
+    while len(rendered.encode("utf-8")) > VIEW_MAX_BYTES:
+        overage = len(rendered.encode("utf-8")) - VIEW_MAX_BYTES
+        index = max(
+            range(len(bounded)),
+            key=lambda candidate: len(bounded[candidate].body.encode("utf-8")),
+        )
+        section = bounded[index]
+        current_body_bytes = len(section.body.encode("utf-8"))
+        target_body_bytes = max(current_body_bytes - overage, 0)
+        bounded = [
+            (
+                _Section(
+                    title=item.title,
+                    body=_truncate_bytes(item.body, max_bytes=target_body_bytes),
+                )
+                if position == index
+                else item
+            )
+            for position, item in enumerate(bounded)
         ]
-    if not last_text_parts:
-        return NO_FINAL_REPORT
-    text = "\n".join(part for part in last_text_parts if part)
-    return text if text else NO_FINAL_REPORT
+        rendered = _SECTION_SEPARATOR.join(section.render() for section in bounded)
+
+    assert len(rendered.encode("utf-8")) <= VIEW_MAX_BYTES
+    return rendered

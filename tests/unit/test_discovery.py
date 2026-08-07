@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from agentlens.discovery.filesystem import (
     discover_agent_defs,
     discover_main_sessions,
@@ -22,14 +24,16 @@ def test_discover_main_sessions_finds_top_level_jsonl(tmp_path: Path) -> None:
     (project_dir / "sid-1.jsonl").write_text("{}\n")
     (project_dir / "sid-2.jsonl").write_text("{}\n")
 
-    sessions = discover_main_sessions(projects_root)
+    sessions = list(discover_main_sessions(projects_root))
 
-    assert {s.session_id for s in sessions} == {"sid-1", "sid-2"}
+    assert {s.raw_session_id for s in sessions} == {"sid-1", "sid-2"}
+    assert len({s.session_id for s in sessions}) == 2
+    assert {s.source_project for s in sessions} == {"-Users-x-project"}
     assert all(s.project_dir == project_dir for s in sessions)
 
 
 def test_discover_main_sessions_missing_root_returns_empty(tmp_path: Path) -> None:
-    assert discover_main_sessions(tmp_path / "does-not-exist") == []
+    assert list(discover_main_sessions(tmp_path / "does-not-exist")) == []
 
 
 def test_discover_subagent_runs_pairs_meta_sidecar(tmp_path: Path) -> None:
@@ -43,12 +47,13 @@ def test_discover_subagent_runs_pairs_meta_sidecar(tmp_path: Path) -> None:
     runs = {run.agent_id: run for run in discover_subagent_runs(projects_root)}
 
     assert runs["a1"].meta_path is not None
-    assert runs["a1"].parent_session_id == "sid-1"
+    assert runs["a1"].raw_parent_session_id == "sid-1"
+    assert runs["a1"].parent_session_id != "sid-1"
     assert runs["a2"].meta_path is None
 
 
 def test_discover_subagent_runs_missing_root_returns_empty(tmp_path: Path) -> None:
-    assert discover_subagent_runs(tmp_path / "does-not-exist") == []
+    assert list(discover_subagent_runs(tmp_path / "does-not-exist")) == []
 
 
 def test_discover_agent_defs_flat_and_nested_user_and_project(tmp_path: Path) -> None:
@@ -82,3 +87,34 @@ def test_discover_agent_defs_without_project_dir_only_scans_user(tmp_path: Path)
 
 def test_discover_agent_defs_missing_dirs_returns_empty(tmp_path: Path) -> None:
     assert discover_agent_defs(claude_home=tmp_path / "does-not-exist") == []
+
+
+def test_discovery_isolates_unreadable_project(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    projects_root = tmp_path / "projects"
+    bad_project = projects_root / "a-bad"
+    good_project = projects_root / "z-good"
+    bad_project.mkdir(parents=True)
+    good_project.mkdir()
+    (good_project / "session.jsonl").write_text("{}\n")
+    original_iterdir = Path.iterdir
+
+    def selective_iterdir(path: Path):  # type: ignore[no-untyped-def]
+        if path == bad_project:
+            raise PermissionError("synthetic unreadable project")
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", selective_iterdir)
+    failed: list[Path] = []
+
+    sessions = list(
+        discover_main_sessions(
+            projects_root,
+            on_error=lambda path, _error: failed.append(path),
+        )
+    )
+
+    assert [session.raw_session_id for session in sessions] == ["session"]
+    assert failed == [bad_project]

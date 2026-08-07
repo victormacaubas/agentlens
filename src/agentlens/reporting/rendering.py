@@ -13,6 +13,16 @@ def render_terminal_summary(result: ReportResult) -> str:
     ]
     if result.agent_type_filter is not None:
         lines.append(f"agent filter: {result.agent_type_filter}")
+    if result.verdict_cohort.judge_model is None:
+        lines.append(
+            f"verdict cohort: rubric {result.verdict_cohort.rubric_version}, "
+            "no concrete model available"
+        )
+    else:
+        lines.append(
+            f"verdict cohort: rubric {result.verdict_cohort.rubric_version}, "
+            f"model {result.verdict_cohort.judge_model}, current judge input"
+        )
 
     if not result.agents:
         lines.append("no spawns in this window")
@@ -29,10 +39,23 @@ def render_terminal_summary(result: ReportResult) -> str:
             line += f" (Δ spawns vs prior window: {agent_result.delta['n_spawns']:+.0f})"
         lines.append(line)
 
-    for row in result.parent_lens:
+    for parent_row in result.parent_lens:
         lines.append(
-            f"parent {row.parent_session_id}: {row.n_spawns} spawns, "
-            f"{row.n_spawns_with_errors} had errors, {row.n_denial_spawns} hit denials"
+            f"parent {parent_row.parent_session_id}: {parent_row.n_spawns} spawns, "
+            f"{parent_row.n_spawns_with_errors} had errors, "
+            f"{parent_row.n_denial_spawns} hit denials"
+        )
+
+    for session_row in result.sessions:
+        score = (
+            f"score {float(session_row.verdict['overall_score']):.1f}/5"
+            if session_row.verdict is not None
+            else "unscored"
+        )
+        lines.append(
+            f"spawn {session_row.source_project}/{session_row.session_kind}/"
+            f"{session_row.raw_session_id} [{session_row.session_id}] "
+            f"{session_row.agent_type or 'unknown'}: {score}"
         )
 
     return "\n".join(lines)

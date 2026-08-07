@@ -9,10 +9,12 @@ import json
 import sqlite3
 from datetime import date
 from pathlib import Path
+from statistics import mean
 
 import pytest
 
 from agentlens.errors import WindowResolutionError
+from agentlens.judge.rubric import RUBRIC_VERSION
 from agentlens.reporting.date_window import WindowRange, resolve_window
 from agentlens.reporting.queries import (
     DEFAULT_MIN_SESSIONS_FOR_TREND,
@@ -36,6 +38,9 @@ def _session(
     n_errors: int = 0,
     n_permission_denials: int = 0,
     final_report_flagged_partial: bool = False,
+    raw_session_id: str | None = None,
+    source_project: str = "project-a",
+    judge_input_hash: str | None = None,
 ) -> SessionRecord:
     return SessionRecord(
         session_id=session_id,
@@ -66,6 +71,9 @@ def _session(
         cache_creation_tokens=0,
         task_prompt_len=1,
         n_skills_fired=0,
+        raw_session_id=raw_session_id or f"raw-{session_id}",
+        source_project=source_project,
+        judge_input_hash=judge_input_hash or f"input-{session_id}",
     )
 
 
@@ -331,20 +339,29 @@ def _insert_verdict(
     conn: sqlite3.Connection,
     session_id: str,
     *,
-    rubric_version: str = "v1",
-    judge_model: str = "sonnet",
+    rubric_version: str = RUBRIC_VERSION,
+    judge_model: str = "claude-sonnet-5",
     overall_score: float = 4.0,
+    judge_input_hash: str | None = None,
 ) -> None:
+    if judge_input_hash is None:
+        row = conn.execute(
+            "SELECT judge_input_hash FROM fact_session WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        assert row is not None
+        judge_input_hash = str(row[0])
     with conn:
         conn.execute(
             """
             INSERT OR REPLACE INTO fact_verdict
-                (session_id, rubric_version, judge_model, verdict_json,
+                (session_id, judge_input_hash, rubric_version, judge_model, verdict_json,
                  judge_cost_usd, judge_input_tokens, judge_output_tokens)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id,
+                judge_input_hash,
                 rubric_version,
                 judge_model,
                 json.dumps(_verdict_json(overall_score)),
@@ -406,6 +423,9 @@ def test_report_mixed_scored_and_unscored(tmp_path: Path) -> None:
 
         assert len(report.agents) == 1
         assert report.agents[0].aggregate.n_spawns == 3
+        assert len(report.sessions) == 3
+        assert [row.session_id for row in report.sessions] == ["s1", "s2", "s3"]
+        assert [row.verdict is not None for row in report.sessions] == [False, True, False]
         assert set(report.verdicts) == {"s2"}
         assert report.agents[0].aggregate.avg_verdict_score == 3.0
     finally:
@@ -441,5 +461,134 @@ def test_verdict_slice_json_includes_verdicts(tmp_path: Path) -> None:
 
         assert "verdicts" in slice_dict
         assert slice_dict["verdicts"]["s1"]["overall_score"] == 4.0
+        assert slice_dict["verdict_cohort"] == {
+            "rubric_version": RUBRIC_VERSION,
+            "judge_model": "claude-sonnet-5",
+            "judge_input_policy": "current",
+        }
+        assert slice_dict["sessions"][0]["session_id"] == "s1"
+        assert slice_dict["sessions"][0]["raw_session_id"] == "raw-s1"
+        assert slice_dict["sessions"][0]["source_project"] == "project-a"
+    finally:
+        conn.close()
+
+
+def test_report_explicit_cohort_excludes_other_rubrics_models_and_stale_input(
+    tmp_path: Path,
+) -> None:
+    conn = _store(tmp_path)
+    try:
+        upsert_session(conn, _session("s1"))
+        _insert_verdict(conn, "s1", overall_score=4.0)
+        _insert_verdict(
+            conn,
+            "s1",
+            rubric_version="legacy",
+            judge_model="claude-sonnet-5",
+            overall_score=1.0,
+        )
+        _insert_verdict(
+            conn,
+            "s1",
+            judge_model="claude-opus-5",
+            overall_score=2.0,
+        )
+        _insert_verdict(
+            conn,
+            "s1",
+            judge_model="claude-sonnet-5",
+            overall_score=0.0,
+            judge_input_hash="stale-input",
+        )
+
+        report = build_report(
+            conn,
+            window=WindowRange(start=date(2026, 7, 4), end=date(2026, 7, 11)),
+            rubric_version=RUBRIC_VERSION,
+            judge_model="claude-sonnet-5",
+        )
+
+        assert report.verdict_cohort.judge_model == "claude-sonnet-5"
+        assert report.sessions[0].verdict is not None
+        assert report.sessions[0].verdict["overall_score"] == 4.0
+        assert report.agents[0].aggregate.avg_verdict_score == 4.0
+    finally:
+        conn.close()
+
+
+def test_report_requires_model_when_current_cohort_is_ambiguous(tmp_path: Path) -> None:
+    conn = _store(tmp_path)
+    try:
+        upsert_session(conn, _session("s1"))
+        _insert_verdict(conn, "s1", judge_model="claude-sonnet-5")
+        _insert_verdict(conn, "s1", judge_model="claude-opus-5")
+
+        with pytest.raises(ValueError, match="pass --judge-model"):
+            build_report(
+                conn,
+                window=WindowRange(start=date(2026, 7, 4), end=date(2026, 7, 11)),
+            )
+    finally:
+        conn.close()
+
+
+def test_report_rejects_floating_model_alias(tmp_path: Path) -> None:
+    conn = _store(tmp_path)
+    try:
+        with pytest.raises(ValueError, match="must be concrete"):
+            build_report(
+                conn,
+                window=WindowRange(start=date(2026, 7, 4), end=date(2026, 7, 11)),
+                judge_model="sonnet",
+            )
+    finally:
+        conn.close()
+
+
+def test_report_payload_is_independent_of_verdict_insertion_order(tmp_path: Path) -> None:
+    payloads: list[dict[str, object]] = []
+    for store_name, insertion_order in (
+        ("forward.db", ("s1", "s2")),
+        ("reverse.db", ("s2", "s1")),
+    ):
+        conn = create_store(tmp_path / store_name)
+        try:
+            upsert_session(conn, _session("s1"))
+            upsert_session(conn, _session("s2"))
+            scores = {"s1": 5.0, "s2": 3.0}
+            for session_id in insertion_order:
+                _insert_verdict(conn, session_id, overall_score=scores[session_id])
+            report = build_report(
+                conn,
+                window=WindowRange(start=date(2026, 7, 4), end=date(2026, 7, 11)),
+                judge_model="claude-sonnet-5",
+            )
+            payloads.append(report.to_verdict_slice())
+        finally:
+            conn.close()
+
+    assert payloads[0] == payloads[1]
+
+
+def test_agent_aggregate_reconciles_to_same_type_session_rows(tmp_path: Path) -> None:
+    conn = _store(tmp_path)
+    try:
+        for session_id in ("s1", "s2", "s3"):
+            upsert_session(conn, _session(session_id, parent_session_id="parent"))
+        _insert_verdict(conn, "s1", overall_score=5.0)
+        _insert_verdict(conn, "s2", overall_score=3.0)
+
+        report = build_report(
+            conn,
+            window=WindowRange(start=date(2026, 7, 4), end=date(2026, 7, 11)),
+            judge_model="claude-sonnet-5",
+        )
+
+        scored_rows = [row for row in report.sessions if row.verdict is not None]
+        assert report.agents[0].aggregate.n_spawns == len(report.sessions) == 3
+        assert report.agents[0].aggregate.avg_verdict_score == mean(
+            float(row.verdict["overall_score"]) for row in scored_rows if row.verdict
+        )
+        assert report.parent_lens[0].n_spawns == len(report.sessions)
     finally:
         conn.close()

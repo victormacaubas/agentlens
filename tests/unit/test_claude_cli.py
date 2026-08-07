@@ -14,7 +14,13 @@ import pytest
 
 from agentlens.errors import JudgeError, JudgeTimeoutError, JudgeUnavailableError
 from agentlens.judge.claude_cli import DEFAULT_TIMEOUT_SECONDS, ClaudeCliJudge
-from agentlens.judge.protocol import SuggestedFix
+from agentlens.judge.protocol import DIAGNOSTIC_EXCERPT_MAX_CHARS, SuggestedFix
+from agentlens.judge.rubric import (
+    MAX_EVIDENCE_ITEM_LENGTH,
+    MAX_EVIDENCE_ITEMS,
+    MAX_FIX_RECOMMENDATION_LENGTH,
+    MAX_SUGGESTED_FIXES,
+)
 
 NOT_LOGGED_IN_ENVELOPE: dict[str, Any] = {
     "is_error": True,
@@ -618,3 +624,140 @@ def test_judge_input_tokens_counts_cache_creation_not_nominal_usage(
     assert verdict.judge_input_tokens == 12844
     assert verdict.judge_output_tokens == 1523
     assert verdict.judge_cost_usd == 0.0710
+
+
+@pytest.mark.parametrize(
+    "invalid_cost",
+    [-0.01, True, float("nan"), float("inf"), "0.01"],
+)
+@patch("agentlens.judge.claude_cli.subprocess.run")
+@patch("agentlens.judge.claude_cli.shutil.which", return_value="/usr/bin/claude")
+def test_invalid_cost_accounting_raises_judge_error(
+    mock_which: MagicMock,
+    mock_run: MagicMock,
+    invalid_cost: object,
+) -> None:
+    envelope = {**MOCK_ENVELOPE, "total_cost_usd": invalid_cost}
+    mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(envelope), stderr="")
+
+    with pytest.raises(JudgeError):
+        ClaudeCliJudge(model="sonnet").score("transcript text", "v1")
+
+
+@pytest.mark.parametrize(
+    "invalid_tokens",
+    [-1, True, 1.5, float("nan"), float("inf"), "100"],
+)
+@patch("agentlens.judge.claude_cli.subprocess.run")
+@patch("agentlens.judge.claude_cli.shutil.which", return_value="/usr/bin/claude")
+def test_invalid_token_accounting_raises_judge_error(
+    mock_which: MagicMock,
+    mock_run: MagicMock,
+    invalid_tokens: object,
+) -> None:
+    model_usage = _model_usage_entry()
+    model_usage["inputTokens"] = invalid_tokens
+    envelope = {**MOCK_ENVELOPE, "modelUsage": {"claude-sonnet-5": model_usage}}
+    mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(envelope), stderr="")
+
+    with pytest.raises(JudgeError):
+        ClaudeCliJudge(model="sonnet").score("transcript text", "v1")
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        ["evidence"] * (MAX_EVIDENCE_ITEMS + 1),
+        ["x" * (MAX_EVIDENCE_ITEM_LENGTH + 1)],
+    ],
+)
+@patch("agentlens.judge.claude_cli.subprocess.run")
+@patch("agentlens.judge.claude_cli.shutil.which", return_value="/usr/bin/claude")
+def test_oversized_model_evidence_raises_judge_error(
+    mock_which: MagicMock,
+    mock_run: MagicMock,
+    evidence: list[str],
+) -> None:
+    dimensions = dict(MOCK_ENVELOPE["structured_output"]["dimensions"])
+    dimensions["honesty"] = {"score": 4, "evidence": evidence}
+    envelope = {
+        **MOCK_ENVELOPE,
+        "structured_output": {
+            **MOCK_ENVELOPE["structured_output"],
+            "dimensions": dimensions,
+        },
+    }
+    mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(envelope), stderr="")
+
+    with pytest.raises(JudgeError):
+        ClaudeCliJudge(model="sonnet").score("transcript text", "v1")
+
+
+@pytest.mark.parametrize(
+    "suggested_fixes",
+    [
+        [
+            {
+                "dimension": "efficiency",
+                "target": "agent_instructions",
+                "recommendation": "change",
+                "rationale": "reason",
+            }
+        ]
+        * (MAX_SUGGESTED_FIXES + 1),
+        [
+            {
+                "dimension": "efficiency",
+                "target": "agent_instructions",
+                "recommendation": "x" * (MAX_FIX_RECOMMENDATION_LENGTH + 1),
+                "rationale": "reason",
+            }
+        ],
+    ],
+)
+@patch("agentlens.judge.claude_cli.subprocess.run")
+@patch("agentlens.judge.claude_cli.shutil.which", return_value="/usr/bin/claude")
+def test_oversized_model_fixes_raise_judge_error(
+    mock_which: MagicMock,
+    mock_run: MagicMock,
+    suggested_fixes: list[dict[str, str]],
+) -> None:
+    envelope = _envelope_with_suggested_fixes(suggested_fixes)
+    mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(envelope), stderr="")
+
+    with pytest.raises(JudgeError):
+        ClaudeCliJudge(model="sonnet").score("transcript text", "v1")
+
+
+@patch("agentlens.judge.claude_cli.subprocess.run")
+@patch("agentlens.judge.claude_cli.shutil.which", return_value="/usr/bin/claude")
+def test_malformed_envelope_does_not_dump_long_private_sentinel(
+    mock_which: MagicMock,
+    mock_run: MagicMock,
+) -> None:
+    sentinel = "private-sentinel-" + "x" * 10_000
+    envelope = {**MOCK_ENVELOPE, "structured_output": sentinel}
+    mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(envelope), stderr="")
+
+    with pytest.raises(JudgeError) as exc_info:
+        ClaudeCliJudge(model="sonnet").score("transcript text", "v1")
+
+    assert sentinel not in str(exc_info.value)
+
+
+@patch("agentlens.judge.claude_cli.subprocess.run")
+@patch("agentlens.judge.claude_cli.shutil.which", return_value="/usr/bin/claude")
+def test_model_error_result_uses_bounded_diagnostic(
+    mock_which: MagicMock,
+    mock_run: MagicMock,
+) -> None:
+    sentinel = "private-sentinel-" + "x" * 10_000
+    envelope = {"is_error": True, "result": sentinel}
+    mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(envelope), stderr="")
+
+    with pytest.raises(JudgeError) as exc_info:
+        ClaudeCliJudge(model="sonnet").score("transcript text", "v1")
+
+    message = str(exc_info.value)
+    assert sentinel not in message
+    assert len(message) < DIAGNOSTIC_EXCERPT_MAX_CHARS + 100
