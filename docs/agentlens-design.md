@@ -265,11 +265,11 @@ Discover main sessions (`projects/**/*.jsonl`), subagent runs (`projects/**/<sid
 ### Phase 2 — Deterministic signals & aggregation (*COMPLETED*)
 Derive `fact_session` from events, build `bridge_session_skill` (declared/available/fired), implement windows + prior-window deltas + low-volume guards, emit the deterministic slice of the verdict JSON. **Exit:** `report --since 7d` produces real numbers with no LLM.
 
-### Phase 3 — LLM judge
+### Phase 3 — LLM judge (*COMPLETED*)
 Pluggable judge interface, `claude -p` backend, rubric v1 (pinned + versioned), caching, `fact_verdict`. **Exit:** sessions get scored + fix proposals; re-runs hit cache.
 
-### Phase 4 — Design system ⟂ (starts after Phase 0)
-Dedicated session. Visual identity, design tokens, component library (score/verdict cards, timeline, trend charts, fix-proposal cards), static HTML mockups with fake data. Use the `impeccable` skill. **Exit:** an approved, reusable design spec + mockups.
+### Phase 4 — Design system ⟂ (*COMPLETED*)
+Dedicated session. Visual identity, design tokens, component library (score/verdict cards, timeline, trend charts, fix-proposal cards), static HTML mockups with fake data. Use the `impeccable` skill. **Exit:** an approved, reusable design spec + mockups. Deliverables: `PRODUCT.md`, `DESIGN.md`, `design/report-mockup.html` (dark theme, primary), `design/report-mockup-light.html` (reference).
 
 ### Phase 5 — Renderers
 Implement markdown (handoff) + JSON export + thin terminal summary + HTML report (Phase 4 design over real verdict JSON). Every renderer that surfaces fixes or evidence must present them inside an explicitly marked untrusted block and must not emit anything shaped like a patch, diff, or command for direct application — see [ADR 0011](adr/0011-handoff-trust-boundary.md). **Exit:** all four surfaces render from one verdict core. **Depends on:** 3 + 4.
