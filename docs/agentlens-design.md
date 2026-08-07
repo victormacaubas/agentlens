@@ -51,7 +51,22 @@ Four stages, each a thin layer over the previous. Read-only against the user's `
 ### Entry commands
 
 - `agentlens session <id|--file path>` — analyze one session, full detail. The primitive; everything else builds on it. Cheapest path, ideal for "how did my new agent do?"
-- `agentlens report --agent <name> --since 7d` — aggregate rollup across sessions in a window, grouped by agent, with prior-window deltas.
+- `agentlens report --agent <name> --since 7d` — aggregate rollup across sessions in a window, grouped by agent, with prior-window deltas. Modeled scores name one explicit `(rubric_version, concrete judge_model)` cohort; ambiguous multi-model windows require `--judge-model`.
+
+### Source identity and snapshot integrity
+
+Raw Claude IDs are not globally unique: the same value can appear as a main-session ID,
+a subagent ID, or in more than one project bucket. Discovery therefore derives an internal
+`session_id` as a deterministic SHA-256 of `(source_project, session_kind, raw_session_id)`.
+The tuple remains stored for display and unambiguous lookup. Qualified parent IDs use the
+same project and the `main` kind, so lineage cannot cross projects accidentally. See
+[ADR 0012](adr/0012-qualified-source-identity.md).
+
+Each parse is a versioned snapshot. The parser streams JSONL while recording parse-health
+counters and a source revision `(mtime_ns, size, content_hash)`, then verifies that the file
+did not change during the read. A malformed, incomplete, changed-during-read, or stale
+snapshot cannot replace a newer sound grain. The store remains a disposable cache, so this
+schema change uses rebuild-from-source rather than an in-place migration.
 
 ### Judge coupling
 
@@ -110,6 +125,7 @@ A star schema. Keeping grains separate is what makes windows trivial (date filte
 | `denial_kind` | native `toolDenialKind` (permission denials are typed, not inferred) |
 | `ts` | ISO timestamp |
 | `input_hash` | to detect retry loops (same tool + same args) |
+| `file_path_hash` | normalized path identity for distinct-file counts; independent of offsets, ranges, or replacement text |
 | `output_bytes` | |
 
 Everything in `fact_session` is an aggregation of this — store this, derive the rest.
@@ -118,8 +134,9 @@ Everything in `fact_session` is an aggregation of this — store this, derive th
 
 The grain is a single agent run, not an agent *type*. Four `implementer` spawns in one parent session = four rows, each with its own `agentId`. Never dedupe by `agent_type`; the spawn is the unit.
 
-- **Identity:** `session_id`, `agent_id` (per-spawn hash from the filename), `agent_type` (canonical name), `name_source`, `session_kind` (`subagent` \| `main`), `spawn_depth`
-- **Lineage:** `parent_session_id` (the `<sid>` folder the `subagents/` dir sits under), `spawn_tool_use_id` (from `.meta.json` — joins to the exact `Task` block in the parent), `task_description` (from `.meta.json`)
+- **Source identity:** `session_id` (qualified internal key), `raw_session_id`, `source_project`, `session_kind` (`subagent` \| `main`), `source_revision`, `source_mtime_ns`, `source_size`, `source_content_hash`, `judge_input_hash`
+- **Agent identity:** `agent_id` (raw per-spawn filename ID), `agent_type` (canonical name), `agent_definition_id` (the effective versioned definition), `name_source`, `spawn_depth`
+- **Lineage:** qualified `parent_session_id`, `spawn_tool_use_id` (from `.meta.json` — joins to the exact `Task` block in the parent), `task_description` (from `.meta.json`)
 - **Volume:** `n_turns`, `n_tool_calls`, `n_reads`, `n_edits`, `n_writes`, `n_bash`, `n_files_touched`
 - **Health:** `n_errors`, `n_permission_denials`, `n_duplicate_tool_calls`, `final_report_flagged_partial` (raw boolean marker — *not* a completion verdict; see [ADR 0003](adr/0003-deterministic-layer-emits-counts-not-verdicts.md))
 - **Cost/time:** `duration_sec`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_creation_tokens`
@@ -150,20 +167,27 @@ It's a first-class parser input and the **authoritative** source for:
 | `skill_name` | |
 | `declared` | referenced in the agent's `.md` |
 | `available` | present in `.claude/skills/` (incl. plugins) |
-| `fired` | `Skill` tool_use and/or `SKILL.md` read and/or injected content (best-effort) |
+| `fired` | `Skill` tool_use and/or injected skill marker; a `SKILL.md` read alone does not count |
 
 Whether a *missing* fire was a mistake is a judgment call → belongs in the judge layer, not here.
 
 ### Dimensions
 
-- **`dim_agent`** (SCD from `.claude/agents` scan, keyed on `agent_type`): `name`, `model`, `effort`, `declared_tools[]`, `declared_skills[]`, `definition_hash`. Hash lets you attribute score shifts to definition changes. Resolves flat (`<name>.md`) and nested (`<name>/<name>.md`), project- and user-level.
+- **`dim_agent`** (versioned from `.claude/agents` scans): keyed by agent type, scope, source project for project-scoped definitions, and `definition_hash`; stores `name`, `model`, `effort`, `declared_tools[]`, and `declared_skills[]`. Each session binds the effective definition version at ingest. Project scope overrides user scope only inside that project, so later definition edits do not rewrite historical attribution.
 - **`dim_date`**, **`dim_tool`** — conformed dims for cheap slicing.
 
 ### `fact_verdict` — LLM judge output (separate, never mixed with deterministic facts)
 
-- Key: `session_id` + `rubric_version` + `judge_model`
+- Key: `session_id` + `judge_input_hash` + `rubric_version` + `judge_model`
 - `verdict_json` shape: `{dimensions: {task_completion, honesty, efficiency, scope_adherence} (each {score, evidence[]}), overall_score, suggested_fixes[] (each {dimension, target, recommendation, rationale}), provenance: {locally_derived[], untrusted_model_output[]}}`. `session_id`, `rubric_version`, `judge_model`, and the three judge cost/token fields are `fact_verdict` columns, not part of the JSON blob. `provenance` marks which fields are locally derived and validated (scores) versus untrusted model output (evidence, and each fix's recommendation/rationale) — see [ADR 0011](adr/0011-handoff-trust-boundary.md).
 - **Judge run-cost:** `judge_cost_usd`, `judge_input_tokens`, `judge_output_tokens` (from the `claude -p` envelope's `total_cost_usd` / `usage`) — the tool's *own* footprint, so agentlens is honest about what a run costs.
+
+`judge_input_hash` is the SHA-256 of the exact prepared transcript view. An unchanged
+re-ingest remains a cache hit; changed judge input creates a distinct verdict identity.
+Verdict finalization rechecks the session's current hash so an in-flight score cannot attach
+to a newer ingest. Concurrent scorers use expiring owner-scoped SQLite claims and never
+hold a transaction during the external judge call. See
+[ADR 0013](adr/0013-input-bound-verdicts-and-scoring-claims.md).
 
 ### Token & cost reporting
 
@@ -200,7 +224,7 @@ Ground-truth signals, cheapest first: self-report vs. transcript consistency (ju
 
 ### Caching
 
-Cache key = `hash(session_id + rubric_version + judge_model)`, stored in `~/.cache/agentlens/`, where `judge_model` is the resolved concrete model identifier, never the alias supplied at the CLI (see [ADR 0010](adr/0010-verdict-comparability.md)). Only miss → call judge. Re-running a 30-day window never re-pays for already-scored sessions.
+Cache identity = `session_id + judge_input_hash + rubric_version + judge_model`, stored in `~/.cache/agentlens/`, where `judge_model` is the resolved concrete model identifier, never the alias supplied at the CLI (see [ADR 0010](adr/0010-verdict-comparability.md)). Only a current-input miss calls the judge. Floating aliases resolve through healthy candidates under one invocation-wide attempt budget; failed candidates do not wedge later sessions. Atomic expiring claims prevent concurrent processes from paying twice for the same identity.
 
 ---
 
@@ -212,6 +236,8 @@ Cache key = `hash(session_id + rubric_version + judge_model)`, stored in `~/.cac
 - **Low-volume guard:** below `min_sessions_for_trend` (default 5), show raw scores + count but **suppress trend arrows**, labeled "insufficient data."
 - **N counts spawns, not parent sessions.** "implementer: 12 runs this week" may be 3 sessions × 4 spawns — label it as spawns so trends and the low-volume guard aren't misread. Use `task_description` to distinguish same-type spawns in detail views.
 - **Intra-session view (parent lens):** because spawns carry `parent_session_id`, roll up "this session fanned out 4 implementers + 3 explorers; 1 failed, 1 hit denials" — a health lens per parent session, not just per agent type.
+- **One comparable verdict cohort:** a report selects one rubric version and concrete model, joins verdicts on the session's current input hash, and averages at most one score per spawn. It never combines model or rubric cohorts or chooses a row by insertion order. See [ADR 0014](adr/0014-reports-select-one-verdict-cohort.md).
+- **Complete deterministic slice:** JSON includes one typed row for every qualified spawn, including unscored spawns, then derives agent and parent rollups from those rows.
 
 ---
 
@@ -231,7 +257,7 @@ Never write into `.claude/` — read-only.
 
 Running multiple times a day must not duplicate data or clutter the folder. Two layers, two behaviors:
 
-- **Store = append-only truth.** Upsert by `session_id`; re-runs add only new sessions, never duplicates. Verdicts are cached by `session_id + rubric_version + judge_model` (`judge_model` being the resolved concrete identifier, not the configured alias), so repeat runs re-pay the judge **only** for genuinely new sessions.
+- **Store = append-only truth.** Upsert by qualified `session_id`; re-runs add only new source identities and replace a grain only with a sound, non-stale snapshot. Verdicts are cached by `session_id + judge_input_hash + rubric_version + judge_model` (`judge_model` being the resolved concrete identifier, not the configured alias), so repeat runs re-pay the judge only for changed prepared input, rubric, or model.
 - **Reports = overwrite-in-place views.** History lives in the store, *not* in report files — trends and prior-window deltas are always read from the store, never from stale HTML. So report files are disposable, always-current renders.
 
 Naming & overwrite policy:
