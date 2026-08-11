@@ -268,9 +268,9 @@ def parse_agent_definition(
 def _parse_frontmatter(text: str) -> dict[str, str] | None:
     """Parse the flat `key: value` YAML frontmatter agent defs use.
 
-    Deliberately not a general YAML parser (no new dependency, D per
-    standard-library-first) — every observed agent def frontmatter is a flat
-    key/value block, so a line-oriented split is sufficient.
+    Deliberately not a general YAML parser, which would mean a new
+    dependency: every observed agent def frontmatter is a flat key/value
+    block, so a line-oriented split is sufficient.
     """
     lines = text.splitlines()
     if not lines or lines[0].strip() != _FRONTMATTER_DELIM:

@@ -1,5 +1,5 @@
 """Derive the deterministic `fact_session` grain and `bridge_session_skill`
-rows from a `ParsedSession` (Phase 2 — see `docs/agentlens-design.md` §8).
+rows from a `ParsedSession`.
 
 `fact_session` is not a pure rollup of `fact_tool_event`: tool
 counts are aggregated from `ParsedSession.events` here, while usage, turn
@@ -32,7 +32,7 @@ def derive_fact_session(parsed: ParsedSession) -> SessionRecord:
     """Combine event-derived tool counts with the parser's transcript-read
     usage/turn/duration fields into one `fact_session` row.
     """
-    
+
     events = parsed.events
     n_reads = sum(1 for e in events if e.tool_name == "Read")
     n_edits = sum(1 for e in events if e.tool_name == "Edit")

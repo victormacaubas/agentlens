@@ -206,7 +206,7 @@ def _message_text(message: dict[str, Any]) -> str:
 def flags_partial(text: str | None) -> bool:
     """True iff `text` matches a marker in `PARTIAL_MARKERS` (case-insensitive).
 
-    Word-based markers require `\\b` word boundaries on both sides (BUG-01):
+    Word-based markers require `\\b` word boundaries on both sides:
     `partial` matches `partially complete` -> False, `The task was
     blocked.` -> True. The checkbox marker matches as a plain substring.
 
@@ -334,7 +334,7 @@ def _task_subagent_type_from_item(item: dict[str, Any]) -> tuple[str, str] | Non
     """Return `(tool_use_id, subagent_type)` if `item` is a `Task` tool_use
     with a string `subagent_type`, else `None`.
     """
-    
+
     if item.get("type") != "tool_use" or item.get("name") != "Task":
         return None
     tool_use_id = item.get("id")
@@ -356,8 +356,8 @@ def extract_task_subagent_types(records: Iterable[dict[str, Any]]) -> dict[str, 
     looking up the parent's spawning `Task`). Iterates only assistant
     records and allocates no `ToolEventRecord`s, hashes no inputs, and pairs
     no `tool_result`s — this is the cheap path for the parent transcript,
-    which bulk ingestion (Phase 2) would otherwise re-parse in full once per
-    sibling subagent (see ARCH-01).
+    which bulk ingestion would otherwise re-parse in full once per
+    sibling subagent.
     """
     task_subagent_types: dict[str, str] = {}
     for record in records:
@@ -375,7 +375,7 @@ def extract_task_subagent_types(records: Iterable[dict[str, Any]]) -> dict[str, 
 
 def _usage_int(usage: dict[str, Any], key: str) -> int:
     """Read an integer usage field defensively; anything else, or a
-    negative value (BUG-02: a corrupted JSONL can carry one), contributes 0.
+    negative value (a corrupted JSONL can carry one), contributes 0.
     """
     value = usage.get(key)
     if isinstance(value, bool) or not isinstance(value, int):

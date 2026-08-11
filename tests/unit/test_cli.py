@@ -128,7 +128,7 @@ def test_session_ingests_synthetic_subagent_with_events_and_lineage(
     """8.1: full pipeline (discover -> parse -> persist) over a synthetic subagent
     transcript; fact_tool_event rows land and parent lineage resolves.
     """
-    
+
     store_path = tmp_path / "store.db"
     subagents_dir = isolated_home / ".claude" / "projects" / "-proj" / "parent-sid" / "subagents"
     subagents_dir.mkdir(parents=True)
