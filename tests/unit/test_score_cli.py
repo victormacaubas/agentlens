@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -21,6 +22,7 @@ from agentlens.judge.rubric import RUBRIC_VERSION
 from agentlens.store.models import SessionRecord
 from agentlens.store.operations import upsert_session
 from agentlens.store.schema import create_store
+from tests.factories.judge import FakeCommandRunner
 
 _TODAY = date.today().isoformat()
 
@@ -244,12 +246,9 @@ def test_confirmation_prompt_shows_upper_bound_for_alias(tmp_path: Path) -> None
         conn.close()
 
 
-@patch("agentlens.judge.claude_cli.subprocess.run")
-@patch("agentlens.judge.claude_cli.shutil.which", return_value="/usr/bin/claude")
-def test_no_confirm_skips_prompt(
-    mock_judge_which: MagicMock, mock_run: MagicMock, tmp_path: Path
-) -> None:
-    mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(MOCK_ENVELOPE), stderr="")
+@patch("agentlens.cli.SubprocessCommandRunner")
+def test_no_confirm_skips_prompt(mock_runner_cls: MagicMock, tmp_path: Path) -> None:
+    mock_runner_cls.return_value = FakeCommandRunner(stdout=json.dumps(MOCK_ENVELOPE))
     store_path, claude_home = _setup_unscored_sessions(tmp_path, 3)
 
     result = CliRunner().invoke(
@@ -283,12 +282,9 @@ def test_no_confirm_skips_prompt(
         conn.close()
 
 
-@patch("agentlens.judge.claude_cli.subprocess.run")
-@patch("agentlens.judge.claude_cli.shutil.which", return_value="/usr/bin/claude")
-def test_max_sessions_cap(
-    mock_judge_which: MagicMock, mock_run: MagicMock, tmp_path: Path
-) -> None:
-    mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(MOCK_ENVELOPE), stderr="")
+@patch("agentlens.cli.SubprocessCommandRunner")
+def test_max_sessions_cap(mock_runner_cls: MagicMock, tmp_path: Path) -> None:
+    mock_runner_cls.return_value = FakeCommandRunner(stdout=json.dumps(MOCK_ENVELOPE))
     store_path, claude_home = _setup_unscored_sessions(tmp_path, 5)
 
     result = CliRunner().invoke(
@@ -325,8 +321,9 @@ def test_max_sessions_cap(
         conn.close()
 
 
-@patch("agentlens.judge.claude_cli.shutil.which", return_value=None)
-def test_error_when_claude_missing(mock_which: MagicMock, tmp_path: Path) -> None:
+@patch("agentlens.cli.SubprocessCommandRunner")
+def test_error_when_claude_missing(mock_runner_cls: MagicMock, tmp_path: Path) -> None:
+    mock_runner_cls.return_value = FakeCommandRunner(which_result=None)
     store_path, claude_home = _setup_unscored_sessions(tmp_path, 1)
 
     result = CliRunner().invoke(
@@ -348,19 +345,13 @@ def test_error_when_claude_missing(mock_which: MagicMock, tmp_path: Path) -> Non
     assert "authenticate" in result.output.lower()
 
 
-@patch(
-    "agentlens.judge.claude_cli.subprocess.run",
-    side_effect=AssertionError("all-scored cache hit invoked the real judge path"),
-)
-@patch(
-    "agentlens.judge.claude_cli.shutil.which",
-    side_effect=AssertionError("all-scored cache hit checked the real judge path"),
-)
-def test_all_scored_message(
-    mock_which: MagicMock,
-    mock_run: MagicMock,
-    tmp_path: Path,
-) -> None:
+@patch("agentlens.cli.SubprocessCommandRunner")
+def test_all_scored_message(mock_runner_cls: MagicMock, tmp_path: Path) -> None:
+    fake_runner = FakeCommandRunner(
+        run_exception=AssertionError("all-scored cache hit invoked the real judge path"),
+        which_exception=AssertionError("all-scored cache hit checked the real judge path"),
+    )
+    mock_runner_cls.return_value = fake_runner
     store_path, claude_home = _setup_unscored_sessions(tmp_path, 2)
     _insert_verdict(store_path, "a0")
     _insert_verdict(store_path, "a1")
@@ -385,8 +376,8 @@ def test_all_scored_message(
     assert "all sessions already scored" in result.output
     assert "Attempts: 0" in result.output
     assert "Judge model: claude-sonnet-5" in result.output
-    mock_which.assert_not_called()
-    mock_run.assert_not_called()
+    assert fake_runner.which_calls == []
+    assert fake_runner.calls == []
 
 
 @pytest.mark.parametrize("value", ["0", "-3"])
@@ -397,7 +388,7 @@ def test_non_positive_max_sessions_is_rejected_before_store_or_judge_work(
     store_path = tmp_path / "store.db"
     with (
         patch("agentlens.cli.create_store") as create_store_mock,
-        patch("agentlens.judge.claude_cli.subprocess.run") as subprocess_mock,
+        patch("agentlens.cli.SubprocessCommandRunner") as runner_cls_mock,
     ):
         result = CliRunner().invoke(
             main,
@@ -407,23 +398,23 @@ def test_non_positive_max_sessions_is_rejected_before_store_or_judge_work(
     assert result.exit_code == 2
     assert "Invalid value for '--max-sessions'" in result.output
     create_store_mock.assert_not_called()
-    subprocess_mock.assert_not_called()
+    runner_cls_mock.assert_not_called()
     assert not store_path.exists()
 
 
-@patch(
-    "agentlens.judge.claude_cli.shutil.which",
-    return_value="/usr/bin/claude",
-)
-@patch("agentlens.judge.claude_cli.subprocess.run")
+@patch("agentlens.cli.SubprocessCommandRunner")
 def test_capped_failure_summary_is_complete_and_exits_nonzero(
-    mock_run: MagicMock,
-    mock_which: MagicMock,
+    mock_runner_cls: MagicMock,
     tmp_path: Path,
 ) -> None:
-    failed = MagicMock(returncode=1, stdout="", stderr="synthetic judge failure")
-    succeeded = MagicMock(returncode=0, stdout=json.dumps(MOCK_ENVELOPE), stderr="")
-    mock_run.side_effect = [failed, succeeded]
+    failed = subprocess.CompletedProcess(
+        args=[], returncode=1, stdout="", stderr="synthetic judge failure"
+    )
+    succeeded = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout=json.dumps(MOCK_ENVELOPE), stderr=""
+    )
+    fake_runner = FakeCommandRunner(responses=[failed, succeeded])
+    mock_runner_cls.return_value = fake_runner
     store_path, claude_home = _setup_unscored_sessions(tmp_path, 3)
 
     result = CliRunner().invoke(
@@ -450,24 +441,16 @@ def test_capped_failure_summary_is_complete_and_exits_nonzero(
     assert "Aborted: no" in result.output
     assert "--max-sessions reached" in result.output
     assert "Resolved 'sonnet' to claude-sonnet-5" in result.output
-    assert mock_run.call_count == 2
+    assert len(fake_runner.calls) == 2
 
 
-@patch(
-    "agentlens.judge.claude_cli.shutil.which",
-    return_value="/usr/bin/claude",
-)
-@patch("agentlens.judge.claude_cli.subprocess.run")
+@patch("agentlens.cli.SubprocessCommandRunner")
 def test_abort_summary_preserves_success_count_and_exits_nonzero(
-    mock_run: MagicMock,
-    mock_which: MagicMock,
+    mock_runner_cls: MagicMock,
     tmp_path: Path,
 ) -> None:
-    mock_run.return_value = MagicMock(
-        returncode=1,
-        stdout="",
-        stderr="synthetic judge failure",
-    )
+    fake_runner = FakeCommandRunner(returncode=1, stdout="", stderr="synthetic judge failure")
+    mock_runner_cls.return_value = fake_runner
     store_path, claude_home = _setup_unscored_sessions(tmp_path, 4)
 
     result = CliRunner().invoke(
@@ -491,4 +474,4 @@ def test_abort_summary_preserves_success_count_and_exits_nonzero(
     assert "Remaining: 4" in result.output
     assert "Aborted: yes" in result.output
     assert "Resolved model: unresolved" in result.output
-    assert mock_run.call_count == 3
+    assert len(fake_runner.calls) == 3

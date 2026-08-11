@@ -48,6 +48,7 @@ from typing import Any, Final
 import pytest
 
 from agentlens.judge.claude_cli import ClaudeCliJudge, _build_subprocess_env
+from agentlens.judge.process import SubprocessCommandRunner
 from agentlens.judge.transcript_view import build_transcript_view
 from agentlens.parser.session import ParsedSession
 
@@ -198,7 +199,7 @@ def test_no_tools_flag_loads_no_filesystem_or_shell_tool(tmp_path: Path) -> None
     transcript_view = build_transcript_view(parsed, jsonl_path)
     assert str(canary_path) in transcript_view, "the injection attempt must actually be present"
 
-    judge = ClaudeCliJudge()
+    judge = ClaudeCliJudge(runner=SubprocessCommandRunner(), claude_home=Path.home() / ".claude")
     probe_args = _build_probe_args(judge)
 
     # Mirror score()'s isolation (temp cwd, filtered env) so this probe's

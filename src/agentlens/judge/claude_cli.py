@@ -6,13 +6,13 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any, Final
 
 from agentlens.errors import JudgeError, JudgeTimeoutError, JudgeUnavailableError
+from agentlens.judge.process import CommandRunner
 from agentlens.judge.protocol import (
     DimensionScore,
     SuggestedFix,
@@ -53,10 +53,17 @@ class ClaudeCliJudge:
     """
 
     def __init__(
-        self, *, model: str = DEFAULT_MODEL, timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS
+        self,
+        *,
+        model: str = DEFAULT_MODEL,
+        timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+        runner: CommandRunner,
+        claude_home: Path,
     ) -> None:
         self.model = model
         self.timeout_seconds = timeout_seconds
+        self.runner = runner
+        self.claude_home = claude_home
         self.resolved_model: str | None = None
         self._checked_available = False
 
@@ -66,7 +73,7 @@ class ClaudeCliJudge:
 
         with tempfile.TemporaryDirectory() as tmp_cwd:
             try:
-                result = subprocess.run(
+                result = self.runner.run(
                     args,
                     input=transcript_view,
                     capture_output=True,
@@ -106,7 +113,7 @@ class ClaudeCliJudge:
     def _check_claude_available(self) -> None:
         if self._checked_available:
             return
-        if shutil.which(CLAUDE_EXECUTABLE) is None:
+        if self.runner.which(CLAUDE_EXECUTABLE) is None:
             raise JudgeUnavailableError(f"{CLAUDE_EXECUTABLE!r} was not found on PATH")
         self._checked_available = True
 
@@ -126,7 +133,7 @@ class ClaudeCliJudge:
             "--tools",
             NO_TOOLS,
             "--settings",
-            str(_user_settings_path()),
+            str(_user_settings_path(self.claude_home)),
             "--setting-sources",
             SETTING_SOURCES,
             "--append-system-prompt",
@@ -134,8 +141,8 @@ class ClaudeCliJudge:
         ]
 
 
-def _user_settings_path() -> Path:
-    return Path.home() / ".claude" / "settings.json"
+def _user_settings_path(claude_home: Path) -> Path:
+    return claude_home / "settings.json"
 
 
 def _build_subprocess_env() -> dict[str, str]:

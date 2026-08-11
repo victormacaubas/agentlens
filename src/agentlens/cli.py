@@ -31,6 +31,7 @@ from agentlens.ingest.orchestrator import (
     sync_agent_definitions,
 )
 from agentlens.judge.claude_cli import ClaudeCliJudge
+from agentlens.judge.process import SubprocessCommandRunner
 from agentlens.judge.rubric import RUBRIC_VERSION
 from agentlens.judge.scoring import ProgressEvent, ScoringLoop, is_concrete_model_id
 from agentlens.reporting.date_window import resolve_window
@@ -276,7 +277,11 @@ def score(
 
     with closing(create_store(store_path)) as conn:
         loop = ScoringLoop(
-            judge=ClaudeCliJudge(model=judge_model),
+            judge=ClaudeCliJudge(
+                model=judge_model,
+                runner=SubprocessCommandRunner(),
+                claude_home=claude_home,
+            ),
             conn=conn,
             rubric_version=RUBRIC_VERSION,
             judge_model=judge_model,
