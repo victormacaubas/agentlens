@@ -41,6 +41,48 @@ REQUIRED_TABLES: Final[tuple[str, ...]] = (
     "scoring_claim",
 )
 
+# Declaration order matches the `fact_session` DDL below. Both the INSERT's
+# column list and its values tuple are generated from this, so the two cannot
+# drift apart; `SessionRecord`'s own field order is independent and irrelevant.
+FACT_SESSION_COLUMNS: Final[tuple[str, ...]] = (
+    "session_id",
+    "raw_session_id",
+    "source_project",
+    "agent_id",
+    "agent_type",
+    "agent_definition_id",
+    "name_source",
+    "session_kind",
+    "source_revision",
+    "source_mtime_ns",
+    "source_size",
+    "source_content_hash",
+    "judge_input_hash",
+    "spawn_depth",
+    "parent_session_id",
+    "spawn_tool_use_id",
+    "task_description",
+    "session_date",
+    "n_turns",
+    "n_tool_calls",
+    "n_reads",
+    "n_edits",
+    "n_writes",
+    "n_bash",
+    "n_files_touched",
+    "n_errors",
+    "n_permission_denials",
+    "n_duplicate_tool_calls",
+    "final_report_flagged_partial",
+    "duration_sec",
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_creation_tokens",
+    "task_prompt_len",
+    "n_skills_fired",
+)
+
 _DDL = """
 CREATE TABLE IF NOT EXISTS fact_tool_event (
     session_id TEXT NOT NULL,

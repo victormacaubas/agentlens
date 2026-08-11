@@ -292,7 +292,9 @@ def _resolve_judge_model(
         params.append(agent_type)
     sql += " ORDER BY fv.judge_model"
 
-    models = [str(row[0]) for row in conn.execute(sql, params).fetchall()]
+    cursor = conn.cursor()
+    cursor.row_factory = sqlite3.Row
+    models = [str(row["judge_model"]) for row in cursor.execute(sql, params).fetchall()]
     aliases = [model for model in models if model in MODEL_ALIASES]
     if aliases:
         names = ", ".join(aliases)
@@ -327,16 +329,16 @@ def _query_report_sessions(
             fs.parent_session_id,
             fs.task_description,
             fs.session_date,
-            COALESCE(fs.n_tool_calls, 0),
-            COALESCE(fs.n_errors, 0),
-            COALESCE(fs.n_permission_denials, 0),
-            COALESCE(fs.n_duplicate_tool_calls, 0),
+            COALESCE(fs.n_tool_calls, 0) AS n_tool_calls,
+            COALESCE(fs.n_errors, 0) AS n_errors,
+            COALESCE(fs.n_permission_denials, 0) AS n_permission_denials,
+            COALESCE(fs.n_duplicate_tool_calls, 0) AS n_duplicate_tool_calls,
             fs.final_report_flagged_partial,
             COALESCE(fs.input_tokens, 0)
                 + COALESCE(fs.output_tokens, 0)
                 + COALESCE(fs.cache_read_tokens, 0)
-                + COALESCE(fs.cache_creation_tokens, 0),
-            COALESCE(fs.duration_sec, 0.0),
+                + COALESCE(fs.cache_creation_tokens, 0) AS total_tokens,
+            COALESCE(fs.duration_sec, 0.0) AS duration_sec,
             fv.verdict_json
         FROM fact_session fs
         LEFT JOIN fact_verdict fv
@@ -359,26 +361,32 @@ def _query_report_sessions(
         params.append(agent_type)
     sql += " ORDER BY fs.session_id"
 
-    rows = conn.execute(sql, params).fetchall()
+    cursor = conn.cursor()
+    cursor.row_factory = sqlite3.Row
+    rows = cursor.execute(sql, params).fetchall()
     return [
         ReportSessionRow(
-            session_id=str(row[0]),
-            raw_session_id=str(row[1]),
-            source_project=str(row[2]),
-            session_kind=str(row[3]),
-            agent_id=str(row[4]) if row[4] is not None else None,
-            agent_type=str(row[5]) if row[5] is not None else None,
-            parent_session_id=str(row[6]) if row[6] is not None else None,
-            task_description=str(row[7]) if row[7] is not None else None,
-            session_date=str(row[8]) if row[8] is not None else None,
-            n_tool_calls=int(row[9]),
-            n_errors=int(row[10]),
-            n_permission_denials=int(row[11]),
-            n_duplicate_tool_calls=int(row[12]),
-            final_report_flagged_partial=bool(row[13]),
-            total_tokens=int(row[14]),
-            duration_sec=float(row[15]),
-            verdict=_parse_verdict(row[16]),
+            session_id=str(row["session_id"]),
+            raw_session_id=str(row["raw_session_id"]),
+            source_project=str(row["source_project"]),
+            session_kind=str(row["session_kind"]),
+            agent_id=str(row["agent_id"]) if row["agent_id"] is not None else None,
+            agent_type=str(row["agent_type"]) if row["agent_type"] is not None else None,
+            parent_session_id=(
+                str(row["parent_session_id"]) if row["parent_session_id"] is not None else None
+            ),
+            task_description=(
+                str(row["task_description"]) if row["task_description"] is not None else None
+            ),
+            session_date=str(row["session_date"]) if row["session_date"] is not None else None,
+            n_tool_calls=int(row["n_tool_calls"]),
+            n_errors=int(row["n_errors"]),
+            n_permission_denials=int(row["n_permission_denials"]),
+            n_duplicate_tool_calls=int(row["n_duplicate_tool_calls"]),
+            final_report_flagged_partial=bool(row["final_report_flagged_partial"]),
+            total_tokens=int(row["total_tokens"]),
+            duration_sec=float(row["duration_sec"]),
+            verdict=_parse_verdict(row["verdict_json"]),
         )
         for row in rows
     ]
@@ -472,18 +480,20 @@ def _query_agent_aggregates(
         params.append(agent_type)
     sql += " GROUP BY COALESCE(agent_type, 'unknown')"
 
-    rows = conn.execute(sql, params).fetchall()
+    cursor = conn.cursor()
+    cursor.row_factory = sqlite3.Row
+    rows = cursor.execute(sql, params).fetchall()
     return {
-        str(row[0]): AgentAggregate(
-            agent_type=str(row[0]),
-            n_spawns=int(row[1]),
-            n_spawns_with_errors=int(row[2]),
-            n_denial_spawns=int(row[3]),
-            n_errors=int(row[4]),
-            n_duplicate_tool_calls=int(row[5]),
-            n_tool_calls=int(row[6]),
-            total_tokens=int(row[7]),
-            avg_duration_sec=float(row[8]),
+        str(row["agent_type"]): AgentAggregate(
+            agent_type=str(row["agent_type"]),
+            n_spawns=int(row["n_spawns"]),
+            n_spawns_with_errors=int(row["n_spawns_with_errors"]),
+            n_denial_spawns=int(row["n_denial_spawns"]),
+            n_errors=int(row["n_errors"]),
+            n_duplicate_tool_calls=int(row["n_duplicate_tool_calls"]),
+            n_tool_calls=int(row["n_tool_calls"]),
+            total_tokens=int(row["total_tokens"]),
+            avg_duration_sec=float(row["avg_duration_sec"]),
         )
         for row in rows
     }

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import stat
+from dataclasses import fields
 from pathlib import Path
 
 import pytest
@@ -38,6 +39,7 @@ from agentlens.store.operations import (
     upsert_session_skills,
 )
 from agentlens.store.schema import (
+    FACT_SESSION_COLUMNS,
     REQUIRED_TABLES,
     SCHEMA_VERSION,
     STORE_PATH_ENV_VAR,
@@ -921,3 +923,18 @@ def test_equal_stat_metadata_with_different_hash_is_conflict(tmp_path: Path) -> 
         ).fetchone() == (1,)
     finally:
         conn.close()
+
+
+def test_every_fact_session_column_resolves_to_a_session_record_field() -> None:
+    """`_fact_session_values` reads `SessionRecord` via `getattr` over
+    `FACT_SESSION_COLUMNS`, which mypy cannot check, so a field rename that
+    missed the constant would surface only as a runtime `AttributeError`.
+
+    Declaration order deliberately differs between the two: the INSERT's column
+    list and its values tuple are both generated from `FACT_SESSION_COLUMNS`, so
+    they stay aligned with each other whatever the dataclass field order is. Only
+    the name sets have to agree.
+    """
+    record_fields = {field.name for field in fields(SessionRecord)}
+    assert set(FACT_SESSION_COLUMNS) == record_fields
+    assert len(FACT_SESSION_COLUMNS) == len(set(FACT_SESSION_COLUMNS))

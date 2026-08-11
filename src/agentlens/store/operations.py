@@ -14,6 +14,12 @@ from agentlens.store.models import (
     ToolEventRecord,
     VerdictRecord,
 )
+from agentlens.store.schema import FACT_SESSION_COLUMNS
+
+_FACT_SESSION_INSERT_SQL = (
+    f"INSERT OR REPLACE INTO fact_session ({', '.join(FACT_SESSION_COLUMNS)}) "
+    f"VALUES ({', '.join('?' for _ in FACT_SESSION_COLUMNS)})"
+)
 
 
 def _replace_session_events(
@@ -107,7 +113,9 @@ def fetch_declared_skills(
     agent definition should not block skill-bridge derivation.
     """
     if definition_id is not None:
-        row = conn.execute(
+        cursor = conn.cursor()
+        cursor.row_factory = sqlite3.Row
+        row = cursor.execute(
             "SELECT declared_skills FROM dim_agent WHERE agent_definition_id = ?",
             (definition_id,),
         ).fetchone()
@@ -120,10 +128,10 @@ def fetch_declared_skills(
         if effective is None:
             return []
         return list(effective.declared_skills)
-    if row is None or row[0] is None:
+    if row is None or row["declared_skills"] is None:
         return []
     try:
-        data = json.loads(row[0])
+        data = json.loads(row["declared_skills"])
     except json.JSONDecodeError:
         return []
     return data if isinstance(data, list) else []
@@ -136,8 +144,10 @@ def fetch_effective_agent_definition(
     source_project: str,
 ) -> AgentDefRecord | None:
     """Resolve the latest project definition before the latest user fallback."""
+    cursor = conn.cursor()
+    cursor.row_factory = sqlite3.Row
     for scope, project in (("project", source_project), ("user", None)):
-        row = conn.execute(
+        row = cursor.execute(
             """
             SELECT agent_definition_id, agent_type, scope, source_project, name, model,
                    effort, declared_tools, declared_skills, definition_hash
@@ -162,7 +172,9 @@ def resolve_session_agent_definition(
     source_project: str,
 ) -> AgentDefRecord | None:
     """Preserve a session's prior binding for the same source revision."""
-    row = conn.execute(
+    cursor = conn.cursor()
+    cursor.row_factory = sqlite3.Row
+    row = cursor.execute(
         """
         SELECT da.agent_definition_id, da.agent_type, da.scope, da.source_project,
                da.name, da.model, da.effort, da.declared_tools, da.declared_skills,
@@ -182,20 +194,22 @@ def resolve_session_agent_definition(
     )
 
 
-def _agent_definition_from_row(row: sqlite3.Row | tuple[object, ...]) -> AgentDefRecord:
-    declared_tools = _decode_string_list(row[7])
-    declared_skills = _decode_string_list(row[8])
+def _agent_definition_from_row(row: sqlite3.Row) -> AgentDefRecord:
+    declared_tools = _decode_string_list(row["declared_tools"])
+    declared_skills = _decode_string_list(row["declared_skills"])
     return AgentDefRecord(
-        definition_id=str(row[0]),
-        agent_type=str(row[1]),
-        scope=str(row[2]),
-        source_project=str(row[3]) if row[3] is not None else None,
-        name=str(row[4]),
-        model=str(row[5]) if row[5] is not None else None,
-        effort=str(row[6]) if row[6] is not None else None,
+        definition_id=str(row["agent_definition_id"]),
+        agent_type=str(row["agent_type"]),
+        scope=str(row["scope"]),
+        source_project=(
+            str(row["source_project"]) if row["source_project"] is not None else None
+        ),
+        name=str(row["name"]),
+        model=str(row["model"]) if row["model"] is not None else None,
+        effort=str(row["effort"]) if row["effort"] is not None else None,
         declared_tools=declared_tools,
         declared_skills=declared_skills,
-        definition_hash=str(row[9]),
+        definition_hash=str(row["definition_hash"]),
     )
 
 
@@ -212,60 +226,19 @@ def _decode_string_list(value: object) -> list[str]:
 
 
 def _upsert_session(conn: sqlite3.Connection, record: SessionRecord) -> None:
-    conn.execute(
-        """
-        INSERT OR REPLACE INTO fact_session (
-            session_id, raw_session_id, source_project, agent_id, agent_type,
-            agent_definition_id, name_source, session_kind, source_revision,
-            source_mtime_ns, source_size, source_content_hash, judge_input_hash,
-            spawn_depth, parent_session_id, spawn_tool_use_id, task_description,
-            session_date, n_turns, n_tool_calls, n_reads, n_edits, n_writes, n_bash,
-            n_files_touched, n_errors, n_permission_denials, n_duplicate_tool_calls,
-            final_report_flagged_partial, duration_sec, input_tokens, output_tokens,
-            cache_read_tokens, cache_creation_tokens, task_prompt_len, n_skills_fired
-        ) VALUES (
-            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-        )
-        """,
-        (
-            record.session_id,
-            record.raw_session_id,
-            record.source_project,
-            record.agent_id,
-            record.agent_type,
-            record.agent_definition_id,
-            record.name_source,
-            record.session_kind,
-            record.source_revision,
-            record.source_mtime_ns,
-            record.source_size,
-            record.source_content_hash,
-            record.judge_input_hash,
-            record.spawn_depth,
-            record.parent_session_id,
-            record.spawn_tool_use_id,
-            record.task_description,
-            record.session_date,
-            record.n_turns,
-            record.n_tool_calls,
-            record.n_reads,
-            record.n_edits,
-            record.n_writes,
-            record.n_bash,
-            record.n_files_touched,
-            record.n_errors,
-            record.n_permission_denials,
-            record.n_duplicate_tool_calls,
-            int(record.final_report_flagged_partial),
-            record.duration_sec,
-            record.input_tokens,
-            record.output_tokens,
-            record.cache_read_tokens,
-            record.cache_creation_tokens,
-            record.task_prompt_len,
-            record.n_skills_fired,
-        ),
+    conn.execute(_FACT_SESSION_INSERT_SQL, _fact_session_values(record))
+
+
+def _fact_session_values(record: SessionRecord) -> tuple[object, ...]:
+    """Read `record` in `FACT_SESSION_COLUMNS` order, matching `_FACT_SESSION_INSERT_SQL`.
+
+    `SessionRecord`'s field names match the `fact_session` column names, so
+    the column list drives the value order directly rather than a second
+    hand-maintained tuple.
+    """
+    return tuple(
+        int(value) if isinstance(value, bool) else value
+        for value in (getattr(record, column) for column in FACT_SESSION_COLUMNS)
     )
 
 
@@ -568,11 +541,13 @@ def finalize_scoring_claim(
             ),
         )
         if inserted.rowcount != 1:
-            session_row = conn.execute(
+            session_cursor = conn.cursor()
+            session_cursor.row_factory = sqlite3.Row
+            session_row = session_cursor.execute(
                 "SELECT judge_input_hash FROM fact_session WHERE session_id = ?",
                 (claim.session_id,),
             ).fetchone()
-            if session_row is None or session_row[0] != claim.judge_input_hash:
+            if session_row is None or session_row["judge_input_hash"] != claim.judge_input_hash:
                 raise StaleVerdictError(
                     f"session {claim.session_id} changed while scoring was in flight"
                 )
@@ -663,7 +638,9 @@ def _source_revision_can_replace(
     conn: sqlite3.Connection,
     record: SessionRecord,
 ) -> bool:
-    row = conn.execute(
+    cursor = conn.cursor()
+    cursor.row_factory = sqlite3.Row
+    row = cursor.execute(
         """
         SELECT source_mtime_ns, source_size, source_content_hash
         FROM fact_session
@@ -674,9 +651,9 @@ def _source_revision_can_replace(
     if row is None:
         return True
 
-    stored_mtime_ns = int(row[0])
-    stored_size = int(row[1])
-    stored_content_hash = str(row[2])
+    stored_mtime_ns = int(row["source_mtime_ns"])
+    stored_size = int(row["source_size"])
+    stored_content_hash = str(row["source_content_hash"])
     if record.source_mtime_ns < stored_mtime_ns:
         return False
     return not (

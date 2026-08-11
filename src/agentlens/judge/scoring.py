@@ -24,12 +24,16 @@ from agentlens.errors import JudgeError, JudgeUnavailableError, StaleVerdictErro
 from agentlens.judge.protocol import Judge, Verdict, bounded_diagnostic, validate_verdict
 from agentlens.judge.rubric import MODEL_ALIASES
 from agentlens.judge.transcript_view import build_transcript_view
-from agentlens.parser.session import SESSION_KIND_SUBAGENT, ParsedSession
+from agentlens.parser.session import SESSION_KIND_SUBAGENT
 from agentlens.reporting.date_window import WindowRange
+from agentlens.store.hydration import (
+    fetch_session_events,
+    hydrate_parsed_session,
+    hydrate_session_record,
+)
 from agentlens.store.models import (
     ScoringClaimRecord,
     SessionRecord,
-    ToolEventRecord,
     VerdictRecord,
 )
 from agentlens.store.operations import (
@@ -39,12 +43,16 @@ from agentlens.store.operations import (
     set_session_judge_input_hash,
     verdict_exists,
 )
+from agentlens.store.schema import FACT_SESSION_COLUMNS
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONSECUTIVE_FAILURE_LIMIT: Final[int] = 3
 DEFAULT_CLAIM_TTL_SECONDS: Final[int] = 15 * 60
 KNOWN_MODEL_ALIASES: Final[frozenset[str]] = MODEL_ALIASES
+_FACT_SESSION_SELECT_COLUMNS: Final[str] = ", ".join(
+    f"fs.{column}" for column in FACT_SESSION_COLUMNS
+)
 
 
 def is_concrete_model_id(model: str) -> bool:
@@ -160,18 +168,8 @@ class ScoringLoop:
         """
         resolved_model = self._resolved_model
         query_model = resolved_model if resolved_model is not None else self.judge_model
-        query = """
-            SELECT fs.session_id, fs.agent_id, fs.agent_type, fs.name_source, fs.session_kind,
-                   fs.spawn_depth, fs.parent_session_id, fs.spawn_tool_use_id,
-                   fs.task_description, fs.session_date, fs.n_turns, fs.n_tool_calls,
-                   fs.n_reads, fs.n_edits, fs.n_writes, fs.n_bash, fs.n_files_touched,
-                   fs.n_errors, fs.n_permission_denials, fs.n_duplicate_tool_calls,
-                   fs.final_report_flagged_partial, fs.duration_sec, fs.input_tokens,
-                   fs.output_tokens, fs.cache_read_tokens, fs.cache_creation_tokens,
-                   fs.task_prompt_len, fs.n_skills_fired, fs.raw_session_id,
-                   fs.source_project, fs.source_revision, fs.source_mtime_ns,
-                   fs.source_size, fs.source_content_hash, fs.judge_input_hash,
-                   fs.agent_definition_id
+        query = f"""
+            SELECT {_FACT_SESSION_SELECT_COLUMNS}
             FROM fact_session fs
             WHERE fs.session_kind = ?
               AND fs.session_date >= ?
@@ -198,8 +196,10 @@ class ScoringLoop:
         params.extend([self.rubric_version, query_model])
         query += " ORDER BY fs.session_date, fs.session_id"
 
-        rows = self.conn.execute(query, params).fetchall()
-        return [_row_to_session_record(row) for row in rows]
+        cursor = self.conn.cursor()
+        cursor.row_factory = sqlite3.Row
+        rows = cursor.execute(query, params).fetchall()
+        return [hydrate_session_record(row) for row in rows]
 
     def run(
         self,
@@ -457,7 +457,8 @@ class ScoringLoop:
         if jsonl_path is None:
             raise JudgeError(f"no transcript path provided for session {session.session_id}")
 
-        parsed = _to_parsed_session(session, events=_fetch_events(self.conn, session.session_id))
+        events = fetch_session_events(self.conn, session.session_id)
+        parsed = hydrate_parsed_session(session, events=events)
         try:
             transcript_view = build_transcript_view(parsed, jsonl_path)
         except (OSError, UnicodeError) as exc:
@@ -537,74 +538,6 @@ class ScoringLoop:
         return self.max_sessions is not None and state.attempts >= self.max_sessions
 
 
-def _row_to_session_record(row: tuple[Any, ...]) -> SessionRecord:
-    return SessionRecord(
-        session_id=row[0],
-        agent_id=row[1],
-        agent_type=row[2],
-        name_source=row[3],
-        session_kind=row[4],
-        spawn_depth=row[5],
-        parent_session_id=row[6],
-        spawn_tool_use_id=row[7],
-        task_description=row[8],
-        session_date=row[9],
-        n_turns=row[10],
-        n_tool_calls=row[11],
-        n_reads=row[12],
-        n_edits=row[13],
-        n_writes=row[14],
-        n_bash=row[15],
-        n_files_touched=row[16],
-        n_errors=row[17],
-        n_permission_denials=row[18],
-        n_duplicate_tool_calls=row[19],
-        final_report_flagged_partial=bool(row[20]),
-        duration_sec=row[21],
-        input_tokens=row[22],
-        output_tokens=row[23],
-        cache_read_tokens=row[24],
-        cache_creation_tokens=row[25],
-        task_prompt_len=row[26],
-        n_skills_fired=row[27],
-        raw_session_id=row[28],
-        source_project=row[29],
-        source_revision=row[30],
-        source_mtime_ns=row[31],
-        source_size=row[32],
-        source_content_hash=row[33],
-        judge_input_hash=row[34],
-        agent_definition_id=row[35],
-    )
-
-
-def _fetch_events(conn: sqlite3.Connection, session_id: str) -> list[ToolEventRecord]:
-    rows = conn.execute(
-        """
-        SELECT session_id, seq, tool_name, is_error, denial_kind, ts, input_hash,
-               file_path_hash, output_bytes
-        FROM fact_tool_event
-        WHERE session_id = ?
-        ORDER BY seq
-        """,
-        (session_id,),
-    ).fetchall()
-    return [
-        ToolEventRecord(
-            session_id=row[0],
-            seq=row[1],
-            tool_name=row[2],
-            is_error=bool(row[3]),
-            denial_kind=row[4],
-            ts=row[5],
-            input_hash=row[6],
-            file_path_hash=row[7],
-            output_bytes=row[8],
-        )
-        for row in rows
-    ]
-
-
 def _empty_verdict_record(
     *,
     session_id: str,
@@ -634,37 +567,4 @@ def _to_verdict_record(verdict: Verdict) -> VerdictRecord:
         judge_cost_usd=verdict.judge_cost_usd,
         judge_input_tokens=verdict.judge_input_tokens,
         judge_output_tokens=verdict.judge_output_tokens,
-    )
-
-
-def _to_parsed_session(record: SessionRecord, *, events: list[ToolEventRecord]) -> ParsedSession:
-    """Reconstruct the `ParsedSession` fields `build_transcript_view` needs
-    from a stored `fact_session` row plus its `fact_tool_event` rows.
-
-    `ambiguous`, `first_ts`, and `fired_skills` aren't read by
-    `build_transcript_view` and carry placeholder values here — they're
-    name-resolution/skill-bridge concerns settled at ingest time, not
-    re-derivable (or needed) from the store alone.
-    """
-    return ParsedSession(
-        session_id=record.session_id,
-        session_kind=record.session_kind or SESSION_KIND_SUBAGENT,
-        agent_id=record.agent_id,
-        name=record.agent_type,
-        name_source=record.name_source,
-        ambiguous=False,
-        parent_session_id=record.parent_session_id,
-        spawn_tool_use_id=record.spawn_tool_use_id,
-        task_description=record.task_description,
-        spawn_depth=record.spawn_depth,
-        events=events,
-        n_turns=record.n_turns,
-        duration_sec=record.duration_sec,
-        first_ts=None,
-        input_tokens=record.input_tokens,
-        output_tokens=record.output_tokens,
-        cache_read_tokens=record.cache_read_tokens,
-        cache_creation_tokens=record.cache_creation_tokens,
-        fired_skills=[],
-        final_report_flagged_partial=record.final_report_flagged_partial,
     )
