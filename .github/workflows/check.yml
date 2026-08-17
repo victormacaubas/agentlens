@@ -17,6 +17,4 @@ jobs:
           python-version-file: .python-version
 
       - run: uv sync --locked
-
-      # Must stay `make check` so local and CI check the same set.
       - run: make check
