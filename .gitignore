@@ -220,5 +220,9 @@ __marimo__/
 # agentic
 .claude/
 .code-audit/
+.structure-review/
 .agents/
 sample-data/
+
+# MacOS
+.DS_Store
