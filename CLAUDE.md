@@ -17,8 +17,7 @@ before claiming anything is finished. CI runs the same command.
 
 A change is **not done when the gate passes.** The gate proves the code runs and
 the imports point the right way. It proves nothing about whether the code is
-shaped the way this project decided. Run the `structure-review` skill before a
-change is archived; a review asking for changes blocks the archive.
+shaped the way this project decided.
 
 Integration tests are opt-in via `make integration`. They invoke the real
 `claude` CLI, so they need auth and cost money.

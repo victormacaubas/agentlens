@@ -4806,7 +4806,7 @@
       "norm_label": "duplicate ordinals within one snapshot violate the tool-event key. the write..."
     },
     {
-      "label": "Guards name-keyed store row writes and reads against positional drift. A\u2026",
+      "label": "Guards name-keyed store row writes and reads against positional drift. A column\u2026",
       "file_type": "rationale",
       "source_file": "tests/unit/test_store_rows.py",
       "source_location": "L1",
@@ -4814,7 +4814,7 @@
       "id": "tests_unit_test_store_rows_rationale_1",
       "community": 6,
       "community_name": "Store",
-      "norm_label": "guards name-keyed store row writes and reads against positional drift. a..."
+      "norm_label": "guards name-keyed store row writes and reads against positional drift. a column..."
     },
     {
       "label": "A projection that reverses the declared column order must still round-trip.\u2026",

@@ -43,24 +43,49 @@ RUF100 confirms none of the four is dead weight.
 
 ## 4. Make writes name-keyed
 
-- [ ] 4.1 Replace the positional tuple in `fact_session_to_row` with a mapping from column name to a function extracting that value from `FactSession`, including the flattening of `identity` and `revision` and the enum-to-text conversions.
-- [ ] 4.2 Do the same for `fact_tool_event_to_row`, preserving the existing `timestamp.isoformat()` and `int(event.is_error)` conversions.
-- [ ] 4.3 Assemble each row tuple by walking the column declaration and calling each extractor, so no position is ever written by hand.
-- [ ] 4.4 Add a test asserting, for both tables, that the extractor map's key set equals the declaration's column-name set exactly. This is the guard that makes a forgotten column fail loudly instead of silently shifting values.
-- [ ] 4.5 Run `make check`.
+- [x] 4.1 Replace the positional tuple in `fact_session_to_row` with a mapping from column name to a function extracting that value from `FactSession`, including the flattening of `identity` and `revision` and the enum-to-text conversions.
+- [x] 4.2 Do the same for `fact_tool_event_to_row`, preserving the existing `timestamp.isoformat()` and `int(event.is_error)` conversions.
+- [x] 4.3 Assemble each row tuple by walking the column declaration and calling each extractor, so no position is ever written by hand.
+- [x] 4.4 Add a test asserting, for both tables, that the extractor map's key set equals the declaration's column-name set exactly. This is the guard that makes a forgotten column fail loudly instead of silently shifting values.
+- [x] 4.5 Run `make check`.
+
+`FACT_SESSION_VALUE_EXTRACTORS` and `FACT_TOOL_EVENT_VALUE_EXTRACTORS` now
+drive the write tuples in declaration order, and two focused coverage tests
+guard both key sets. Gate green at 86 tests.
 
 ## 5. Make reads name-keyed
 
-- [ ] 5.1 Set `row_factory = sqlite3.Row` on the connection in `store/connection.py`.
-- [ ] 5.2 Rewrite `row_to_fact_session` to read each value by column name, deleting the 28-name positional destructuring.
-- [ ] 5.3 Rewrite `row_to_fact_tool_event` the same way.
-- [ ] 5.4 Confirm the staleness path's `stored_hash_row[0]` still works under `sqlite3.Row`, which supports integer indexing, and that `read_session`'s `tuple(...)` conversions are removed or adjusted consistently.
-- [ ] 5.5 Run `make check`.
+- [x] 5.1 Set `row_factory = sqlite3.Row` on the connection in `store/connection.py`.
+- [x] 5.2 Rewrite `row_to_fact_session` to read each value by column name, deleting the 28-name positional destructuring.
+- [x] 5.3 Rewrite `row_to_fact_tool_event` the same way.
+- [x] 5.4 Confirm the staleness path's `stored_hash_row[0]` still works under `sqlite3.Row`, which supports integer indexing, and that `read_session`'s `tuple(...)` conversions are removed or adjusted consistently.
+- [x] 5.5 Run `make check`.
+
+The store connection now returns `sqlite3.Row` values; reads consume names,
+while the staleness check retains supported integer indexing. All five import
+contracts remain kept.
 
 ## 6. Verify the refactor preserved behavior
 
-- [ ] 6.1 Run `git diff` over `tests/` and confirm it contains only additions. Any modification to one of the original 82 tests means behavior changed — stop and re-examine rather than updating the test.
-- [ ] 6.2 Confirm `lint-imports` still reports 5 contracts kept and that no `sqlite3.Row` appears in a signature outside `store`.
-- [ ] 6.3 Write a store with the pre-change code, then read it with the post-change code and confirm the session round-trips identically. This proves the no-migration claim in `design.md`.
-- [ ] 6.4 Run the `structure-review` skill against the change. A review asking for changes blocks the archive.
-- [ ] 6.5 Run `make check` one final time and confirm a clean gate.
+- [x] 6.1 Run `git diff` over `tests/` and confirm it contains only additions. Any modification to one of the original 82 tests means behavior changed — stop and re-examine rather than updating the test.
+- [x] 6.2 Confirm `lint-imports` still reports 5 contracts kept and that no `sqlite3.Row` appears in a signature outside `store`.
+- [x] 6.3 Write a store with the pre-change code, then read it with the post-change code and confirm the session round-trips identically. This proves the no-migration claim in `design.md`.
+- [x] 6.4a Add one regression test per row converter using a real `sqlite3.Row` whose projection order differs from the table declaration, proving reads are name-keyed.
+- [x] 6.4 Run the `structure-review` skill against the change. A review asking for changes blocks the archive.
+- [x] 6.5 Run `make check` one final time and confirm a clean gate.
+
+Both test files are additions; no original test changed. `lint-imports` reports
+5 kept and 0 broken contracts, with `sqlite3.Row` confined to `store`. An
+isolated `HEAD` worktree wrote a store containing two differently shaped tool
+events, and the post-change code read back the expected `SessionFacts`
+identically.
+
+Both row converters now have a focused regression test using a reversed
+projection from a real SQLite table. The tests fail under positional
+reconstruction and pass under name-keyed reads.
+
+The initial structure review requested those tests. Re-review verified the
+finding fixed and returned `approve_with_comments`; its non-blocking module
+docstring comment was also applied.
+
+Final gate green: formatting, lint, 5 import contracts, mypy, and 88 tests.

@@ -8,83 +8,57 @@ from agentlens.store.rows import (
     row_to_fact_session,
     row_to_fact_tool_event,
 )
+from agentlens.store.schema import FACT_SESSION_COLUMN_NAMES, FACT_TOOL_EVENT_COLUMN_NAMES
+
+_SESSION_CONFLICT_TARGET = "session_id"
+
+_SESSION_COLUMN_LIST = ", ".join(FACT_SESSION_COLUMN_NAMES)
+_SESSION_PLACEHOLDERS = ", ".join(["?"] * len(FACT_SESSION_COLUMN_NAMES))
+_SESSION_UPDATE_ASSIGNMENTS = ",\n    ".join(
+    f"{name} = excluded.{name}"
+    for name in FACT_SESSION_COLUMN_NAMES
+    if name != _SESSION_CONFLICT_TARGET
+)
+
+_TOOL_EVENT_COLUMN_LIST = ", ".join(FACT_TOOL_EVENT_COLUMN_NAMES)
+_TOOL_EVENT_PLACEHOLDERS = ", ".join(["?"] * len(FACT_TOOL_EVENT_COLUMN_NAMES))
 
 _DELETE_TOOL_EVENTS_SQL = "DELETE FROM fact_tool_event WHERE session_id = ?"
 
-_INSERT_TOOL_EVENT_SQL = """
+_INSERT_TOOL_EVENT_SQL = f"""
 INSERT INTO fact_tool_event (
-    session_id, ordinal, tool_name, input_fingerprint, file_identity,
-    timestamp, is_error, denial_kind, result_size
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-"""
+    {_TOOL_EVENT_COLUMN_LIST}
+) VALUES ({_TOOL_EVENT_PLACEHOLDERS})
+"""  # noqa: S608
 
-_UPSERT_SESSION_SQL = """
+_UPSERT_SESSION_SQL = f"""
 INSERT INTO fact_session (
-    session_id, source_project, session_kind, raw_session_id,
-    revision_mtime_ns, revision_size, revision_content_hash,
-    agent_type, name_source, task_description, spawning_tool_use_id, spawn_depth,
-    n_turns, n_invocations, n_reads, n_edits, n_writes, n_bash,
-    n_distinct_files, n_errors, n_denials, n_repeated_invocations,
-    duration_ms, input_tokens, output_tokens, cache_read_tokens,
-    cache_creation_tokens, unreadable_line_count
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    {_SESSION_COLUMN_LIST}
+) VALUES ({_SESSION_PLACEHOLDERS})
 ON CONFLICT(session_id) DO UPDATE SET
-    source_project = excluded.source_project,
-    session_kind = excluded.session_kind,
-    raw_session_id = excluded.raw_session_id,
-    revision_mtime_ns = excluded.revision_mtime_ns,
-    revision_size = excluded.revision_size,
-    revision_content_hash = excluded.revision_content_hash,
-    agent_type = excluded.agent_type,
-    name_source = excluded.name_source,
-    task_description = excluded.task_description,
-    spawning_tool_use_id = excluded.spawning_tool_use_id,
-    spawn_depth = excluded.spawn_depth,
-    n_turns = excluded.n_turns,
-    n_invocations = excluded.n_invocations,
-    n_reads = excluded.n_reads,
-    n_edits = excluded.n_edits,
-    n_writes = excluded.n_writes,
-    n_bash = excluded.n_bash,
-    n_distinct_files = excluded.n_distinct_files,
-    n_errors = excluded.n_errors,
-    n_denials = excluded.n_denials,
-    n_repeated_invocations = excluded.n_repeated_invocations,
-    duration_ms = excluded.duration_ms,
-    input_tokens = excluded.input_tokens,
-    output_tokens = excluded.output_tokens,
-    cache_read_tokens = excluded.cache_read_tokens,
-    cache_creation_tokens = excluded.cache_creation_tokens,
-    unreadable_line_count = excluded.unreadable_line_count
+    {_SESSION_UPDATE_ASSIGNMENTS}
 WHERE excluded.revision_content_hash != fact_session.revision_content_hash
   AND excluded.revision_mtime_ns >= fact_session.revision_mtime_ns
-"""
+"""  # noqa: S608
 
 _SELECT_STORED_CONTENT_HASH_SQL = (
     "SELECT revision_content_hash FROM fact_session WHERE session_id = ?"
 )
 
-_SELECT_SESSION_SQL = """
+_SELECT_SESSION_SQL = f"""
 SELECT
-    session_id, source_project, session_kind, raw_session_id,
-    revision_mtime_ns, revision_size, revision_content_hash,
-    agent_type, name_source, task_description, spawning_tool_use_id, spawn_depth,
-    n_turns, n_invocations, n_reads, n_edits, n_writes, n_bash,
-    n_distinct_files, n_errors, n_denials, n_repeated_invocations,
-    duration_ms, input_tokens, output_tokens, cache_read_tokens,
-    cache_creation_tokens, unreadable_line_count
+    {_SESSION_COLUMN_LIST}
 FROM fact_session
 WHERE session_id = ?
-"""
+"""  # noqa: S608
 
-_SELECT_TOOL_EVENTS_SQL = """
+_SELECT_TOOL_EVENTS_SQL = f"""
 SELECT
-    session_id, ordinal, tool_name, input_fingerprint, file_identity,
-    timestamp, is_error, denial_kind, result_size
+    {_TOOL_EVENT_COLUMN_LIST}
 FROM fact_tool_event
 WHERE session_id = ?
 ORDER BY ordinal
-"""
+"""  # noqa: S608
 
 
 class _StalenessRefusalError(Exception):
@@ -128,6 +102,6 @@ def read_session(connection: sqlite3.Connection, session_id: str) -> SessionFact
         return None
     event_rows = connection.execute(_SELECT_TOOL_EVENTS_SQL, (session_id,)).fetchall()
     return SessionFacts(
-        session=row_to_fact_session(tuple(session_row)),
-        tool_events=tuple(row_to_fact_tool_event(tuple(row)) for row in event_rows),
+        session=row_to_fact_session(session_row),
+        tool_events=tuple(row_to_fact_tool_event(row) for row in event_rows),
     )

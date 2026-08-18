@@ -3,9 +3,10 @@
 Soundness is stat, read, stat, compare: the file's modification time and size
 are captured before the read and compared against the same stat taken
 immediately after it, so a file appended to mid-read is caught rather than
-half-ingested. The content hash is computed incrementally in the same pass,
-so the whole file is never held in memory at once, which matters because
-transcript size is unbounded.
+half-ingested. The raw text is streamed line by line and hashed incrementally
+in the same pass, rather than read into memory as one buffer, but every parsed
+record is retained and returned, so peak memory still grows with transcript
+size.
 """
 
 import hashlib
