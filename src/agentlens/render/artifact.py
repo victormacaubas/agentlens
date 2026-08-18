@@ -1,7 +1,8 @@
-import json
 import logging
 from collections.abc import Mapping
 from pathlib import Path
+
+from agentlens.render.document import render_document_json
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,6 @@ def write_session_artifact(
     """
     path = session_artifact_path(session_id, reports_dir=reports_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(document, indent=2), encoding="utf-8")
+    path.write_text(render_document_json(document), encoding="utf-8")
     logger.debug("Wrote report artifact for session %s to %s", session_id, path)
     return path

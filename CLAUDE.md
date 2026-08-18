@@ -17,8 +17,7 @@ before claiming anything is finished. CI runs the same command.
 
 A change is **not done when the gate passes.** The gate proves the code runs and
 the imports point the right way. It proves nothing about whether the code is
-shaped the way this project decided. Run the `structure-review` skill before a
-change is archived; a review asking for changes blocks the archive.
+shaped the way this project decided.
 
 Integration tests are opt-in via `make integration`. They invoke the real
 `claude` CLI, so they need auth and cost money.
@@ -223,3 +222,13 @@ Work goes through OpenSpec: `/opsx:propose`, then `/orchestrate`, then
 layer at a time. A slice that touches `ingest`, `store`, and `render` for a single
 capability is right; a slice that builds all of `store` is not. This is what keeps
 the wiring exercised from the first change onward.
+
+## graphify
+
+This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+
+Rules:
+- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
+- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).

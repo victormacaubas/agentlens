@@ -41,6 +41,7 @@ class SessionArgs:
     dry_run: bool
 
 
+# Parses `session` flags only; never invoked directly, so it carries no callback.
 _SESSION_COMMAND = click.Command(
     name=SESSION_SUBCOMMAND,
     params=[
@@ -70,7 +71,6 @@ _SESSION_COMMAND = click.Command(
         ),
     ],
 )
-"""Parses ``session`` flags only; never invoked, so it carries no callback."""
 
 
 def parse_session_args(argv: Sequence[str]) -> SessionArgs:

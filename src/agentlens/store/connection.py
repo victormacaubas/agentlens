@@ -29,6 +29,7 @@ class Store:
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             connection = sqlite3.connect(self._path)
+            connection.row_factory = sqlite3.Row
             ensure_schema(connection)
         except (OSError, sqlite3.Error) as exc:
             raise StoreError(f"could not open store at {self._path}") from exc
