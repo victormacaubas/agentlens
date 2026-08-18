@@ -1,6 +1,11 @@
-"""One fake per Protocol in ``agentlens.models.protocols``.
+from datetime import datetime
 
-Tests inject these instead of patching, so a test breaks when a contract changes
-rather than when an import moves. A fake is written in the same commit as the
-Protocol it satisfies, which is what gives that Protocol a second implementation.
-"""
+
+class FakeClock:
+    """A fixed instant, standing in for ``agentlens.models.protocols.Clock``."""
+
+    def __init__(self, *, instant: datetime) -> None:
+        self._instant = instant
+
+    def now(self) -> datetime:
+        return self._instant

@@ -1,17 +1,3 @@
-"""Identity types: what one record is, and what makes it unique.
-
-Raw Claude Code IDs are not globally unique, so agentlens derives a qualified
-``session_id`` rather than keying on what it read off disk. See
-``docs/adr/0003`` for the grain, the natural key, and the re-run behavior.
-
-These types hold no logic and perform no I/O. Deriving a ``session_id`` from a
-:class:`SessionIdentity`'s other three fields is ``ingest``'s job.
-
-The enums are :class:`~enum.StrEnum` so ``store`` binds members straight into SQL
-and ``render`` writes them straight into JSON, without ``.value`` at every call
-site and without a plain ``Enum`` reaching a driver that cannot adapt it.
-"""
-
 from dataclasses import dataclass
 from enum import StrEnum
 

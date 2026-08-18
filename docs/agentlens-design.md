@@ -50,7 +50,7 @@ Four stages, each a thin layer over the previous. Read-only against the user's `
 
 ### Entry commands
 
-- `agentlens session <id|--file path>` — analyze one session, full detail. The primitive; everything else builds on it. Cheapest path, ideal for "how did my new agent do?"
+- `agentlens session --file <path>` — analyze one subagent transcript, full detail. **Implemented** (`ingest-single-transcript`). Flags: `--format json` (JSON to stdout, nothing else on that stream), `--store <path>` (override the default store location), `--dryrun` (report what would be written without writing the store or the artifact). Lookup by an already-ingested `<id>` without `--file` is not yet built.
 - `agentlens report --agent <name> --since 7d` — aggregate rollup across sessions in a window, grouped by agent, with prior-window deltas. Modeled scores name one explicit `(rubric_version, concrete judge_model)` cohort; ambiguous multi-model windows require `--judge-model`.
 
 ### Source identity and snapshot integrity
@@ -247,7 +247,7 @@ Cache identity = `session_id + judge_input_hash + rubric_version + judge_model`,
 | **HTML** | hero, designed, self-contained single file, shareable, `file://` | `./reports/<scope>.html` |
 | **Markdown** | Claude handoff — fixes are advisory, rendered as untrusted content | `./reports/<scope>.md` |
 | **JSON** | scripting / piping / dashboard feed | `./reports/<scope>.json` or `--format json` to stdout |
-| **Store** | append-only dimensional SQLite (source of truth) | `~/.cache/agentlens/` (or configurable) |
+| **Store** | append-only dimensional SQLite (source of truth) | the platform's app-data directory (`click.get_app_dir("agentlens")`), overridable with `--store <path>` |
 
 Never write into `.claude/` — read-only.
 
@@ -285,6 +285,12 @@ Repo init, language/runtime decision (see Open Decisions), CLI skeleton with `se
 
 ### Phase 1 — Parser core (deterministic, no LLM)
 Discover main sessions (`projects/**/*.jsonl`), subagent runs (`projects/**/<sid>/subagents/agent-*.jsonl`) + their `.meta.json` sidecars, and agent defs (`.claude/agents/**`). Parse into `fact_tool_event` + `dim_agent`, persist to SQLite. Path-based parent linkage + `.meta.json` pairing + name-resolution fallback chain. Ingest `main` sessions too (`session_kind`), even though they aren't scored until v2. Single-session path first. **Exit:** point it at the sample `agent-*.jsonl` (+ meta) and get a correctly populated store with parent lineage resolved. ~60% of the value ships here.
+
+**Single-session slice shipped** (`ingest-single-transcript`, archived 2026-08-18): `agentlens session --file <path>` parses one subagent transcript end to end — qualified identity, snapshot soundness, tool-invocation pairing, two-link name resolution (`.meta.json` sidecar, then an `agent_id`-hash fallback), and a `fact_session`/`fact_tool_event` write to SQLite, with a JSON artifact and terminal summary. The behavior contract now lives in `openspec/specs/{session-command,session-parser,session-report,store-schema}/spec.md`; the "row derived in Python, inside `ingest`" decision is `docs/adr/0008-session-row-derivation.md`.
+
+Still open within Phase 1: bulk discovery under `projects/**` (this slice takes one `--file` at a time, not a directory walk), `main` sessions, `dim_agent`/agent-definition scanning, `bridge_session_skill`, parent lineage through `spawn_tool_use_id`, and name-resolution links 2–3 (`attribution_agent`, the parent's `Task` `subagent_type`). The exit criterion above is therefore only partly met: the store is correctly populated, but parent lineage is not yet resolved.
+
+A few column names landed differently than the sketch in §3 below: on `fact_tool_event`, `seq`→`ordinal`, `input_hash`→`input_fingerprint`, `file_path_hash`→`file_identity`, `output_bytes`→`result_size`; on `fact_session`, `spawn_tool_use_id`→`spawning_tool_use_id`, `n_tool_calls`→`n_invocations`, `n_permission_denials`→`n_denials`, `n_duplicate_tool_calls`→`n_repeated_invocations`. `agent_id`, `agent_definition_id`, `parent_session_id`, `final_report_flagged_partial`, `task_prompt_len`, and `n_skills_fired` are not yet columns — each depends on one of the still-open items above. Treat §3 as the original sketch and the `openspec/specs/` files as the authoritative names going forward.
 
 ### Phase 2 — Deterministic signals & aggregation
 Derive `fact_session` from events, build `bridge_session_skill` (declared/available/fired), implement windows + prior-window deltas + low-volume guards, emit the deterministic slice of the verdict JSON. **Exit:** `report --since 7d` produces real numbers with no LLM.

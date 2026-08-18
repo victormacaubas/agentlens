@@ -24,6 +24,9 @@ dependencies = [
 Homepage = "https://github.com/victormacaubas/agentlens"
 Repository = "https://github.com/victormacaubas/agentlens"
 
+[project.scripts]
+agentlens = "agentlens.cli:main"
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",
@@ -108,6 +111,10 @@ source_modules = [
     "agentlens.utils",
 ]
 forbidden_modules = ["sqlite3"]
+# Direct imports only: cli and core legitimately depend on store as a whole for
+# orchestration, which reaches sqlite3 transitively. What the rule forbids is a
+# sqlite3 type or import statement escaping the store package itself.
+allow_indirect_imports = "true"
 
 [[tool.importlinter.contracts]]
 name = "Only judge spawns processes"

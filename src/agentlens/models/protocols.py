@@ -1,14 +1,3 @@
-"""Protocols for the injected seams.
-
-Neither Protocol is implemented inside this package. The implementations are a
-real client and a fake in ``tests/fakes.py``, which is what makes the indirection
-a seam rather than speculation.
-
-Callers accept these as required constructor arguments, never as defaulted ones.
-See ``docs/adr/0004`` for the rule that decides what becomes a seam and which
-candidates were rejected.
-"""
-
 from datetime import datetime
 from typing import Protocol
 

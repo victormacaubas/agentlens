@@ -1,13 +1,3 @@
-"""Boundary types for the judge seam.
-
-:class:`JudgeResponse` mirrors the envelope an LLM backend returns. It is a
-transport contract rather than a verdict: the model's own output is still
-unvalidated text or an unverified mapping at this point, and turning it into a
-verdict with explicit provenance is ``judge``'s job.
-
-See ``docs/adr/0004`` for why the backend is a seam.
-"""
-
 from collections.abc import Mapping
 from dataclasses import dataclass
 

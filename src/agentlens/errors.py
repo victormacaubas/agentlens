@@ -1,14 +1,3 @@
-"""Exception taxonomy for agentlens.
-
-Every error agentlens raises deliberately inherits from :class:`AgentlensError`,
-so a caller never has to catch a builtin and hope it came from the right place.
-Each package translates foreign exceptions into these at its own boundary; see
-``docs/adr/0005`` for the boundary table and the exit codes.
-
-Imports nothing else in the project, and the layers contract keeps it that way.
-"""
-
-
 class AgentlensError(Exception):
     """Base class for every error agentlens raises deliberately."""
 

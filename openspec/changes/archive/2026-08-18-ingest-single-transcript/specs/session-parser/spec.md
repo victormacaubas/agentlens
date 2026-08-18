@@ -43,7 +43,8 @@ revision after reading.
 
 - **WHEN** the source file's revision after the read differs from the revision
   before it
-- **THEN** the parse is reported as unsound and nothing is written to the store
+- **THEN** the run fails with the source-error exit code, names the soundness rule
+  that was violated, and writes nothing to the store
 
 #### Scenario: Revision travels with the record
 
@@ -136,4 +137,8 @@ silently discarded or allowed to abort an otherwise sound read.
 
 - **WHEN** a transcript yields no usable records at all, or lacks the data needed
   to establish an identity
-- **THEN** the parse is reported as unsound and nothing is written to the store
+- **THEN** the run fails with the source-error exit code and writes nothing to the
+  store
+
+Rationale: an unsound parse is a failure, not a partial result. Surfacing it as a
+value a caller may forget to check would let a half-read snapshot reach the store.

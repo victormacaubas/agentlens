@@ -1,10 +1,12 @@
+# Session Command Specification
+
 ## Purpose
 
 The `agentlens session` command surface: how a caller asks for one agent run to be
 analyzed, what the command promises about the user's data, and how failures are
 reported to a script rather than only to a human reader.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Analyze one transcript by explicit path
 
@@ -62,6 +64,19 @@ data as running it once.
 - **THEN** the stored record count is unchanged, no duplicate session or
   tool-invocation records exist, and the report is regenerated with equivalent
   content
+
+### Requirement: `--dryrun` writes nothing
+
+The command SHALL accept `--dryrun`, and under it SHALL write neither the store
+nor the report artifact, logging what it would have written instead.
+
+#### Scenario: Dry run reports without writing
+
+- **WHEN** `--dryrun` is given
+- **THEN** the command still parses the transcript and prints its usual report
+  content, but no store file and no report artifact are created or modified, and
+  the diagnostic stream names the store row and artifact path that would have
+  been written
 
 ### Requirement: Failures are distinguishable by exit code
 
