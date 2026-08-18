@@ -43,17 +43,37 @@ class FactSession:
     ``spawn_depth`` come from the metadata sidecar (or its fallback) and are not
     derivable from any invocation.
 
+    ``agent_id`` is the raw subagent identifier read off the transcript.
+    ``agent_definition_id`` is the effective agent-definition identity the
+    spawn was bound to, or ``None`` when no historically applicable
+    definition could be proven. ``n_skills_fired`` is unresolved in this
+    slice (always ``0``); later work binds it to the skill bridge.
+    ``parent_session_id`` is the qualified key of the spawning main session, or
+    ``None`` when a parent could not be derived. ``started_at`` is the earliest
+    usable transcript timestamp, and ``task_prompt_len`` is ``task_description``'s
+    character length.
+
+    ``derivation_fingerprint`` and ``derivation_observed_mtime_ns`` are distinct
+    from ``revision``: they cover every input that shaped this row, not only the
+    transcript, so a sidecar or other context change can be detected even when
+    the transcript's own content is unchanged.
+
     ``unreadable_line_count`` is the number of transcript lines the parser could
     not read; a session can still be sound and reported with this above zero.
     """
 
     identity: SessionIdentity
     revision: SourceRevision
+    agent_id: str
+    agent_definition_id: str | None
+    parent_session_id: str | None
     agent_type: str
     name_source: NameSource
     task_description: str
+    task_prompt_len: int
     spawning_tool_use_id: str | None
     spawn_depth: int
+    started_at: datetime
     n_turns: int
     n_invocations: int
     n_reads: int
@@ -64,9 +84,12 @@ class FactSession:
     n_errors: int
     n_denials: int
     n_repeated_invocations: int
+    n_skills_fired: int
     duration_ms: int
     input_tokens: int
     output_tokens: int
     cache_read_tokens: int
     cache_creation_tokens: int
     unreadable_line_count: int
+    derivation_fingerprint: str
+    derivation_observed_mtime_ns: int

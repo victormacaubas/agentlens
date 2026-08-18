@@ -98,12 +98,12 @@ has fewer qualifying spawns than the threshold.
 #### Scenario: Current window is below threshold
 - **WHEN** an agent has four current-window spawns and the threshold is five
 - **THEN** the report shows raw current values and `4 spawns`, labels the trend
-  as `insufficient data`, and emits no directional indicator
+  as `insufficient_data`, and emits no directional indicator
 
 #### Scenario: Prior window is below threshold
 - **WHEN** the current window meets the threshold but the prior window does not
 - **THEN** the report shows current and available prior values but labels the
-  trend as `insufficient data` and emits no directional indicator
+  trend as `insufficient_data` and emits no directional indicator
 
 ### Requirement: Zero-result windows remain valid
 

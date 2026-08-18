@@ -5,14 +5,25 @@ from the path, read the file once while verifying it did not change,
 resolve the agent's name, and derive the session row from what was read.
 This is the only place in the package where a filesystem ``OSError`` is
 caught and translated, since the read itself happens here and nowhere lower.
+
+Binding a spawn to an agent-definition catalog requires the caller to have
+already scanned that catalog, which this function does not do on its own: it
+always passes an unresolved binding, and a caller that has discovered the
+catalog resolves it and calls :func:`agentlens.ingest.session.build_fact_session`
+directly instead.
 """
 
 from pathlib import Path
 
 from agentlens.errors import MalformedSourceError
-from agentlens.ingest.identity import build_session_identity, derive_transcript_location
+from agentlens.ingest.identity import (
+    build_session_identity,
+    derive_parent_session_id,
+    derive_transcript_location,
+)
 from agentlens.ingest.name_resolution import resolve_agent_type
 from agentlens.ingest.reading import read_transcript
+from agentlens.ingest.records import resolve_agent_id
 from agentlens.ingest.session import build_fact_session
 from agentlens.ingest.sidecar import read_sidecar
 from agentlens.ingest.tool_events import pair_tool_events
@@ -47,14 +58,20 @@ def parse_transcript(path: Path) -> SessionFacts:
         sidecar_agent_type=sidecar.agent_type if sidecar is not None else None,
         raw_session_id=identity.raw_session_id,
     )
+    agent_id = resolve_agent_id(contents.records, fallback=identity.raw_session_id)
+    parent_session_id = derive_parent_session_id(location)
     tool_events = pair_tool_events(contents.records, session_id=identity.session_id)
-    session = build_fact_session(
+    session, skill_signals = build_fact_session(
         identity=identity,
         revision=contents.revision,
+        agent_id=agent_id,
+        agent_definition=None,
+        parent_session_id=parent_session_id,
         records=contents.records,
         tool_events=tool_events,
         sidecar=sidecar,
         name_resolution=name_resolution,
         unreadable_line_count=contents.unreadable_line_count,
+        skill_inventory=(),
     )
-    return SessionFacts(session=session, tool_events=tool_events)
+    return SessionFacts(session=session, tool_events=tool_events, skill_signals=skill_signals)

@@ -21,11 +21,16 @@ _TRANSCRIPT_SUFFIX = ".jsonl"
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class TranscriptLocation:
-    """The identity components read off a subagent transcript's file path."""
+    """The identity components read off a subagent transcript's file path.
+
+    ``raw_parent_session_id`` is the spawning main session's own raw id: the
+    name of the directory that holds ``subagents``, one level above it.
+    """
 
     source_project: str
     raw_session_id: str
     session_kind: SessionKind
+    raw_parent_session_id: str
 
 
 def derive_transcript_location(path: Path) -> TranscriptLocation:
@@ -57,6 +62,7 @@ def derive_transcript_location(path: Path) -> TranscriptLocation:
         source_project=project_dir.name,
         raw_session_id=raw_session_id,
         session_kind=SessionKind.SUBAGENT,
+        raw_parent_session_id=subagents_dir.parent.name,
     )
 
 
@@ -74,4 +80,16 @@ def build_session_identity(location: TranscriptLocation) -> SessionIdentity:
         source_project=location.source_project,
         session_kind=location.session_kind,
         raw_session_id=location.raw_session_id,
+    )
+
+
+def derive_parent_session_id(location: TranscriptLocation) -> str:
+    """Return the qualified key of the main session that spawned ``location``.
+
+    Qualified the same way as any session identity, but pinned to
+    :attr:`SessionKind.MAIN` and the same project, so a subagent's lineage can
+    never resolve into a different project's session.
+    """
+    return canonical_json_fingerprint(
+        [location.source_project, SessionKind.MAIN.value, location.raw_parent_session_id]
     )

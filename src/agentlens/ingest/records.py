@@ -12,6 +12,22 @@ from agentlens.errors import MalformedSourceError
 
 JsonRecord = dict[str, object]
 
+_AGENT_ID_RECORD_KEY = "agentId"
+
+
+def resolve_agent_id(records: Sequence[JsonRecord], *, fallback: str) -> str:
+    """Return the raw subagent identifier carried by ``records``.
+
+    Uses the first record that carries an ``agentId`` string. Falls back to
+    ``fallback`` — the id read off the transcript's own filename — when no
+    record carries one; the two are expected to agree when both are present.
+    """
+    for record in records:
+        agent_id = record.get(_AGENT_ID_RECORD_KEY)
+        if isinstance(agent_id, str):
+            return agent_id
+    return fallback
+
 
 def parse_timestamp(record: Mapping[str, object]) -> datetime:
     """Parse a record's root-level ``timestamp`` as a timezone-aware instant.

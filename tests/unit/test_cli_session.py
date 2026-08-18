@@ -53,6 +53,50 @@ def test_happy_path_produces_a_populated_store_an_artifact_and_exit_0(
     assert len(artifacts) == 1
 
 
+def test_deterministic_reporting_context_is_populated_after_the_session_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The expanded ``fact_session`` row round-trips through the full CLI path.
+
+    Proves the new columns are populated for a real run, not only through the
+    store's own unit tests, while the command's exit code and output stay the
+    ones already pinned above.
+    """
+    monkeypatch.chdir(tmp_path)
+    transcript_path = build_transcript_path(tmp_path)
+    _write_transcript(transcript_path)
+    store_path = tmp_path / "store" / "agentlens.db"
+
+    exit_code = main(["session", "--file", str(transcript_path), "--store", str(store_path)])
+
+    assert exit_code == EXIT_OK
+    with sqlite3.connect(store_path) as connection:
+        row = connection.execute(
+            "SELECT agent_id, agent_definition_id, parent_session_id, started_at, "
+            "task_prompt_len, n_skills_fired, derivation_fingerprint, "
+            "derivation_observed_mtime_ns FROM fact_session"
+        ).fetchone()
+    assert row is not None
+    (
+        agent_id,
+        agent_definition_id,
+        parent_session_id,
+        started_at,
+        task_prompt_len,
+        n_skills_fired,
+        derivation_fingerprint,
+        derivation_observed_mtime_ns,
+    ) = row
+    assert agent_id
+    assert agent_definition_id is None
+    assert parent_session_id
+    assert started_at
+    assert task_prompt_len > 0
+    assert n_skills_fired == 0
+    assert derivation_fingerprint
+    assert derivation_observed_mtime_ns > 0
+
+
 def test_nonexistent_transcript_path_exits_3_and_writes_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

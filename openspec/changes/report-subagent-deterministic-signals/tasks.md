@@ -1,35 +1,35 @@
 ## 1. Enrich one subagent session end to end
 
-- [ ] 1.1 Extend the canonical test factories with keyword-only builders for the new session context and derivation values; keep existing defaults compatible with current tests.
-- [ ] 1.2 Add failing schema and round-trip tests for `agent_id`, nullable `agent_definition_id`, `parent_session_id`, `started_at`, `task_prompt_len`, `n_skills_fired`, derivation fingerprint, and derivation observation time.
-- [ ] 1.3 Add the typed model fields and derive raw agent identity, qualified parent identity, earliest usable timestamp, and task-prompt length for one transcript.
-- [ ] 1.4 Extend the ordered store declarations, generated SQL, row extractors, and named-row reconstruction for the new fields without changing existing column semantics.
-- [ ] 1.5 Add a derivation identity that keeps transcript revision separate while hashing every shaping input and recording the newest shaping-input observation time.
-- [ ] 1.6 Update staleness handling so a newer changed derivation refreshes context, an identical derivation is skipped, and an older derivation leaves the complete stored snapshot untouched.
-- [ ] 1.7 Prove `agentlens session --file` still round-trips the expanded row and preserves its existing output and exit behavior.
-- [ ] 1.8 Run `make check`.
+- [x] 1.1 Extend the canonical test factories with keyword-only builders for the new session context and derivation values; keep existing defaults compatible with current tests.
+- [x] 1.2 Add failing schema and round-trip tests for `agent_id`, nullable `agent_definition_id`, `parent_session_id`, `started_at`, `task_prompt_len`, `n_skills_fired`, derivation fingerprint, and derivation observation time.
+- [x] 1.3 Add the typed model fields and derive raw agent identity, qualified parent identity, earliest usable timestamp, and task-prompt length for one transcript.
+- [x] 1.4 Extend the ordered store declarations, generated SQL, row extractors, and named-row reconstruction for the new fields without changing existing column semantics.
+- [x] 1.5 Add a derivation identity that keeps transcript revision separate while hashing every shaping input and recording the newest shaping-input observation time.
+- [x] 1.6 Update staleness handling so a newer changed derivation refreshes context, an identical derivation is skipped, and an older derivation leaves the complete stored snapshot untouched.
+- [x] 1.7 Prove `agentlens session --file` still round-trips the expanded row and preserves its existing output and exit behavior.
+- [x] 1.8 Run `make check`.
 
 ## 2. Catalog agent definitions and bind only provable history
 
-- [ ] 2.1 Add synthetic definition fixtures covering user scope, project scope, scalar and list frontmatter forms, unknown keys, malformed known fields, and changed content.
-- [ ] 2.2 Implement the bounded frontmatter reader for name, model, effort, tools, and skills with sound stat-read-stat revisions and source-specific errors.
-- [ ] 2.3 Add typed definition identity, scope, revision, and configuration values plus a content-addressed identifier.
-- [ ] 2.4 Discover user and project definitions and resolve project-over-user precedence for each source project.
-- [ ] 2.5 Add `dim_agent` DDL, ordered rows, upsert/read operations, and schema-pin tests without adding an ORM or migration layer.
+- [x] 2.1 Add synthetic definition fixtures covering user scope, project scope, scalar and list frontmatter forms, unknown keys, malformed known fields, and changed content.
+- [x] 2.2 Implement the bounded frontmatter reader for name, model, effort, tools, and skills with sound stat-read-stat revisions and source-specific errors.
+- [x] 2.3 Add typed definition identity, scope, revision, and configuration values plus a content-addressed identifier.
+- [x] 2.4 Discover user and project definitions and resolve project-over-user precedence for each source project.
+- [x] 2.5 Add `dim_agent` DDL, ordered rows, upsert/read operations, and schema-pin tests without adding an ORM or migration layer.
 - [ ] 2.6 Bind a spawn only when the effective observed definition is no newer than `started_at`; otherwise persist an unknown definition identity.
-- [ ] 2.7 Add tests proving a definition edit creates a new content identity, re-evaluates old spawns to unknown, and remains reproducible after a store rebuild.
-- [ ] 2.8 Run `make check`.
+- [x] 2.7 Add tests proving a definition edit creates a new content identity, re-evaluates old spawns to unknown, and remains reproducible after a store rebuild.
+- [x] 2.8 Run `make check`.
 
 ## 3. Derive session-skill signals vertically
 
-- [ ] 3.1 Add synthetic fixtures for declared skills, user/project/plugin availability, `Skill` tool invocations, each supported injected-skill marker, repeated fires, and `SKILL.md` reads without firing.
-- [ ] 3.2 Add a three-state model for declared and available (`true`, `false`, `unknown`) and a boolean fired state at `(session_id, skill_name)` grain.
-- [ ] 3.3 Discover sound skill inventories from user, project, and installed plugin skill directories, retaining revisions needed for conservative historical claims.
-- [ ] 3.4 Implement isolated firing-evidence parsing; pin supported marker shapes and ensure ordinary `SKILL.md` reads never count as firing.
+- [x] 3.1 Add synthetic fixtures for declared skills, user/project/plugin availability, `Skill` tool invocations, each supported injected-skill marker, repeated fires, and `SKILL.md` reads without firing.
+- [x] 3.2 Add a three-state model for declared and available (`true`, `false`, `unknown`) and a boolean fired state at `(session_id, skill_name)` grain.
+- [x] 3.3 Discover sound skill inventories from user, project, and installed plugin skill directories, retaining revisions needed for conservative historical claims.
+- [x] 3.4 Implement isolated firing-evidence parsing; pin supported marker shapes and ensure ordinary `SKILL.md` reads never count as firing.
 - [ ] 3.5 Derive the bridge from the union of applicable declarations, provable availability, and firing evidence, and derive `n_skills_fired` from distinct fired rows.
-- [ ] 3.6 Add `bridge_session_skill` DDL, ordered rows, atomic per-session replacement, named reads, and schema-pin tests.
+- [x] 3.6 Add `bridge_session_skill` DDL, ordered rows, atomic per-session replacement, named reads, and schema-pin tests.
 - [ ] 3.7 Add end-to-end tests for declared-only, available-only, fired-only, unknown historical state, repeated firing, and reingest with changed evidence.
-- [ ] 3.8 Run `make check`.
+- [x] 3.8 Run `make check`.
 
 ## 4. Complete deterministic name and parent resolution
 

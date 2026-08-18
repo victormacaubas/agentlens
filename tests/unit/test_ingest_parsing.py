@@ -1,13 +1,15 @@
 """Parsing a transcript into tool-event rows and one session row."""
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from agentlens.errors import MalformedSourceError
 from agentlens.ingest.transcript import parse_transcript
-from agentlens.models.identity import NameSource
+from agentlens.models.identity import NameSource, SessionKind
+from agentlens.utils.hashing import canonical_json_fingerprint
 from tests.factories import (
     build_assistant_record,
     build_fragmented_turn,
@@ -298,3 +300,97 @@ def test_result_size_for_array_of_text_blocks(tmp_path: Path) -> None:
     facts = parse_transcript(path)
 
     assert facts.tool_events[0].result_size == len("hello") + len("world!")
+
+
+def test_agent_id_is_read_from_the_agentid_record_field(tmp_path: Path) -> None:
+    path = build_transcript_path(tmp_path, raw_session_id="raw-id-on-filename")
+    records = [
+        {**record, "agentId": "agent-id-from-record"} for record in build_tool_invocation_pair()
+    ]
+    _write(path, build_transcript_text(records))
+
+    facts = parse_transcript(path)
+
+    assert facts.session.agent_id == "agent-id-from-record"
+
+
+def test_agent_id_falls_back_to_the_filename_derived_raw_session_id_when_absent(
+    tmp_path: Path,
+) -> None:
+    path = build_transcript_path(tmp_path, raw_session_id="fallback-agent")
+    records = [
+        {key: value for key, value in record.items() if key != "agentId"}
+        for record in build_tool_invocation_pair()
+    ]
+    _write(path, build_transcript_text(records))
+
+    facts = parse_transcript(path)
+
+    assert facts.session.agent_id == "fallback-agent"
+
+
+def test_parent_session_id_is_qualified_from_the_directory_above_subagents(
+    tmp_path: Path,
+) -> None:
+    path = build_transcript_path(
+        tmp_path, project="project-one", parent_session_id="raw-parent-xyz"
+    )
+    _write(path, build_transcript_text(build_tool_invocation_pair()))
+
+    facts = parse_transcript(path)
+
+    expected = canonical_json_fingerprint(["project-one", SessionKind.MAIN.value, "raw-parent-xyz"])
+    assert facts.session.parent_session_id == expected
+
+
+def test_task_prompt_len_is_the_character_length_of_the_sidecar_description(
+    tmp_path: Path,
+) -> None:
+    path = build_transcript_path(tmp_path)
+    _write(path, build_transcript_text(build_tool_invocation_pair()))
+    sidecar_path = path.with_suffix(".meta.json")
+    sidecar_path.write_text(json.dumps(build_sidecar(description="Ship the fix")))
+
+    facts = parse_transcript(path)
+
+    assert facts.session.task_prompt_len == len("Ship the fix")
+
+
+def test_task_prompt_len_is_zero_when_no_sidecar_supplies_a_description(tmp_path: Path) -> None:
+    path = build_transcript_path(tmp_path)
+    _write(path, build_transcript_text(build_tool_invocation_pair()))
+
+    facts = parse_transcript(path)
+
+    assert facts.session.task_prompt_len == 0
+
+
+def test_started_at_is_the_earliest_record_timestamp(tmp_path: Path) -> None:
+    path = build_transcript_path(tmp_path)
+    assistant = build_assistant_record(
+        uuid="uuid-a1",
+        parent_uuid="uuid-user-0",
+        message_id="msg_1",
+        content=[build_tool_use_block(tool_use_id="toolu_1")],
+        stop_reason="tool_use",
+        timestamp="2026-01-01T00:00:05.000Z",
+    )
+    result = build_user_record(
+        uuid="uuid-r1",
+        parent_uuid="uuid-a1",
+        content=[build_tool_result_block(tool_use_id="toolu_1", content="done")],
+        timestamp="2026-01-01T00:00:00.000Z",
+    )
+    _write(path, build_transcript_text([assistant, result]))
+
+    facts = parse_transcript(path)
+
+    assert facts.session.started_at == datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+
+
+def test_transcript_with_no_timestamped_record_is_rejected(tmp_path: Path) -> None:
+    path = build_transcript_path(tmp_path)
+    _write(path, build_transcript_text([{"type": "summary", "uuid": "uuid-summary"}]))
+
+    with pytest.raises(MalformedSourceError):
+        parse_transcript(path)

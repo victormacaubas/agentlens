@@ -65,6 +65,14 @@ _FACT_SESSION_COLUMNS = (
     PinnedColumn("cache_read_tokens", "INTEGER", notnull=1, primary_key_position=0),
     PinnedColumn("cache_creation_tokens", "INTEGER", notnull=1, primary_key_position=0),
     PinnedColumn("unreadable_line_count", "INTEGER", notnull=1, primary_key_position=0),
+    PinnedColumn("agent_id", "TEXT", notnull=1, primary_key_position=0),
+    PinnedColumn("agent_definition_id", "TEXT", notnull=0, primary_key_position=0),
+    PinnedColumn("parent_session_id", "TEXT", notnull=0, primary_key_position=0),
+    PinnedColumn("started_at", "TEXT", notnull=1, primary_key_position=0),
+    PinnedColumn("task_prompt_len", "INTEGER", notnull=1, primary_key_position=0),
+    PinnedColumn("n_skills_fired", "INTEGER", notnull=1, primary_key_position=0),
+    PinnedColumn("derivation_fingerprint", "TEXT", notnull=1, primary_key_position=0),
+    PinnedColumn("derivation_observed_mtime_ns", "INTEGER", notnull=1, primary_key_position=0),
 )
 
 _FACT_TOOL_EVENT_COLUMNS = (
@@ -77,6 +85,29 @@ _FACT_TOOL_EVENT_COLUMNS = (
     PinnedColumn("is_error", "INTEGER", notnull=1, primary_key_position=0),
     PinnedColumn("denial_kind", "TEXT", notnull=0, primary_key_position=0),
     PinnedColumn("result_size", "INTEGER", notnull=0, primary_key_position=0),
+)
+
+_DIM_AGENT_COLUMNS = (
+    PinnedColumn("agent_definition_id", "TEXT", notnull=0, primary_key_position=1),
+    PinnedColumn("scope", "TEXT", notnull=1, primary_key_position=0),
+    PinnedColumn("source_project", "TEXT", notnull=0, primary_key_position=0),
+    PinnedColumn("name", "TEXT", notnull=1, primary_key_position=0),
+    PinnedColumn("model", "TEXT", notnull=0, primary_key_position=0),
+    PinnedColumn("effort", "TEXT", notnull=0, primary_key_position=0),
+    PinnedColumn("tools", "TEXT", notnull=1, primary_key_position=0),
+    PinnedColumn("skills", "TEXT", notnull=1, primary_key_position=0),
+    PinnedColumn("revision_mtime_ns", "INTEGER", notnull=1, primary_key_position=0),
+    PinnedColumn("revision_size", "INTEGER", notnull=1, primary_key_position=0),
+    PinnedColumn("revision_content_hash", "TEXT", notnull=1, primary_key_position=0),
+)
+
+
+_BRIDGE_SESSION_SKILL_COLUMNS = (
+    PinnedColumn("session_id", "TEXT", notnull=1, primary_key_position=1),
+    PinnedColumn("skill_name", "TEXT", notnull=1, primary_key_position=2),
+    PinnedColumn("declared", "TEXT", notnull=1, primary_key_position=0),
+    PinnedColumn("available", "TEXT", notnull=1, primary_key_position=0),
+    PinnedColumn("fired", "INTEGER", notnull=1, primary_key_position=0),
 )
 
 
@@ -103,3 +134,13 @@ def test_fact_session_schema_has_the_declared_columns_in_order(tmp_path: Path) -
 def test_fact_tool_event_schema_has_the_declared_columns_in_order(tmp_path: Path) -> None:
     emitted = _emitted_columns(tmp_path / "agentlens.db", "fact_tool_event")
     assert emitted == _FACT_TOOL_EVENT_COLUMNS
+
+
+def test_dim_agent_schema_has_the_declared_columns_in_order(tmp_path: Path) -> None:
+    emitted = _emitted_columns(tmp_path / "agentlens.db", "dim_agent")
+    assert emitted == _DIM_AGENT_COLUMNS
+
+
+def test_bridge_session_skill_schema_has_the_declared_columns_in_order(tmp_path: Path) -> None:
+    emitted = _emitted_columns(tmp_path / "agentlens.db", "bridge_session_skill")
+    assert emitted == _BRIDGE_SESSION_SKILL_COLUMNS

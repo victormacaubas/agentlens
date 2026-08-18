@@ -3,6 +3,7 @@ from pathlib import Path
 from types import TracebackType
 
 from agentlens.errors import StoreError
+from agentlens.models.agent_definitions import AgentDefinition
 from agentlens.models.session_facts import SessionFacts
 from agentlens.store import operations
 from agentlens.store.outcomes import UpsertOutcome
@@ -75,6 +76,28 @@ class Store:
             return operations.read_session(connection, session_id)
         except sqlite3.Error as exc:
             raise StoreError(f"could not read session {session_id!r}") from exc
+
+    def upsert_agent_definition(self, definition: AgentDefinition) -> None:
+        """Catalog ``definition`` if its content-addressed identity is not already stored.
+
+        Raises:
+            ~agentlens.errors.StoreError: The write failed.
+        """
+        connection = self._require_connection()
+        try:
+            operations.upsert_agent_definition(connection, definition)
+        except sqlite3.Error as exc:
+            raise StoreError(
+                f"could not write agent definition {definition.agent_definition_id!r}"
+            ) from exc
+
+    def read_agent_definition(self, agent_definition_id: str) -> AgentDefinition | None:
+        """Return the cataloged definition identified by ``agent_definition_id``, or ``None``."""
+        connection = self._require_connection()
+        try:
+            return operations.read_agent_definition(connection, agent_definition_id)
+        except sqlite3.Error as exc:
+            raise StoreError(f"could not read agent definition {agent_definition_id!r}") from exc
 
     def _require_connection(self) -> sqlite3.Connection:
         if self._connection is None:

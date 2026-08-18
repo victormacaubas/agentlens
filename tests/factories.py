@@ -2,10 +2,19 @@ import json
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
+from agentlens.ingest.agent_definitions import content_addressed_definition_id
+from agentlens.ingest.derivation import derive_session_derivation, transcript_derivation_input
+from agentlens.models.agent_definitions import (
+    AgentDefinition,
+    AgentDefinitionConfig,
+    DefinitionScope,
+)
 from agentlens.models.facts import FactSession, FactToolEvent
 from agentlens.models.identity import NameSource, SessionIdentity, SessionKind, SourceRevision
 from agentlens.models.session_facts import SessionFacts
+from agentlens.models.skill_signals import KnownState, SessionSkillSignal
 
 DEFAULT_AGENT_ID = "agent-0000000000000000000000000000000000"
 DEFAULT_PARENT_SESSION_ID = "parent-session-1111111111111111111111"
@@ -65,11 +74,16 @@ def build_fact_session(
     *,
     identity: SessionIdentity | None = None,
     revision: SourceRevision | None = None,
+    agent_id: str | None = None,
+    agent_definition_id: str | None = None,
+    parent_session_id: str | None = None,
     agent_type: str = "implementer",
     name_source: NameSource = NameSource.META_JSON,
     task_description: str = "Implement the ingest pipeline",
+    task_prompt_len: int | None = None,
     spawning_tool_use_id: str | None = "toolu_spawn",
     spawn_depth: int = 1,
+    started_at: datetime = datetime(2026, 1, 1, tzinfo=UTC),
     n_turns: int = 1,
     n_invocations: int = 1,
     n_reads: int = 0,
@@ -80,21 +94,50 @@ def build_fact_session(
     n_errors: int = 0,
     n_denials: int = 0,
     n_repeated_invocations: int = 0,
+    n_skills_fired: int = 0,
     duration_ms: int = 1_000,
     input_tokens: int = 100,
     output_tokens: int = 50,
     cache_read_tokens: int = 0,
     cache_creation_tokens: int = 0,
     unreadable_line_count: int = 0,
+    derivation_fingerprint: str | None = None,
+    derivation_observed_mtime_ns: int | None = None,
 ) -> FactSession:
+    """Build a ``FactSession`` with every field defaulted to a distinct value.
+
+    ``derivation_fingerprint`` and ``derivation_observed_mtime_ns`` default to
+    the values the real derivation would produce for ``revision`` alone, so a
+    caller that only varies ``revision`` (as the store's staleness tests do)
+    gets a fingerprint that changes exactly when the real one would.
+    """
+    resolved_identity = identity if identity is not None else build_session_identity()
+    resolved_revision = revision if revision is not None else build_source_revision()
+    if derivation_fingerprint is None or derivation_observed_mtime_ns is None:
+        computed_fingerprint, computed_mtime_ns = derive_session_derivation(
+            [transcript_derivation_input(resolved_revision)]
+        )
+        derivation_fingerprint = (
+            derivation_fingerprint if derivation_fingerprint is not None else computed_fingerprint
+        )
+        derivation_observed_mtime_ns = (
+            derivation_observed_mtime_ns
+            if derivation_observed_mtime_ns is not None
+            else computed_mtime_ns
+        )
     return FactSession(
-        identity=identity if identity is not None else build_session_identity(),
-        revision=revision if revision is not None else build_source_revision(),
+        identity=resolved_identity,
+        revision=resolved_revision,
+        agent_id=agent_id if agent_id is not None else resolved_identity.raw_session_id,
+        agent_definition_id=agent_definition_id,
+        parent_session_id=parent_session_id,
         agent_type=agent_type,
         name_source=name_source,
         task_description=task_description,
+        task_prompt_len=task_prompt_len if task_prompt_len is not None else len(task_description),
         spawning_tool_use_id=spawning_tool_use_id,
         spawn_depth=spawn_depth,
+        started_at=started_at,
         n_turns=n_turns,
         n_invocations=n_invocations,
         n_reads=n_reads,
@@ -105,12 +148,15 @@ def build_fact_session(
         n_errors=n_errors,
         n_denials=n_denials,
         n_repeated_invocations=n_repeated_invocations,
+        n_skills_fired=n_skills_fired,
         duration_ms=duration_ms,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cache_read_tokens=cache_read_tokens,
         cache_creation_tokens=cache_creation_tokens,
         unreadable_line_count=unreadable_line_count,
+        derivation_fingerprint=derivation_fingerprint,
+        derivation_observed_mtime_ns=derivation_observed_mtime_ns,
     )
 
 
@@ -118,10 +164,29 @@ def build_session_facts(
     *,
     session: FactSession | None = None,
     tool_events: tuple[FactToolEvent, ...] = (),
+    skill_signals: tuple[SessionSkillSignal, ...] = (),
 ) -> SessionFacts:
     return SessionFacts(
         session=session if session is not None else build_fact_session(),
         tool_events=tool_events,
+        skill_signals=skill_signals,
+    )
+
+
+def build_session_skill_signal(
+    *,
+    session_id: str = "session-abc123",
+    skill_name: str = "python-engineering-standards",
+    declared: KnownState = KnownState.UNKNOWN,
+    available: KnownState = KnownState.UNKNOWN,
+    fired: bool = False,
+) -> SessionSkillSignal:
+    return SessionSkillSignal(
+        session_id=session_id,
+        skill_name=skill_name,
+        declared=declared,
+        available=available,
+        fired=fired,
     )
 
 
@@ -191,7 +256,15 @@ def build_assistant_record(
     agent_id: str = DEFAULT_AGENT_ID,
     parent_session_id: str = DEFAULT_PARENT_SESSION_ID,
     timestamp: str = DEFAULT_TIMESTAMP,
+    attribution_skill: str | None = None,
 ) -> dict[str, object]:
+    """An assistant transcript record.
+
+    ``attribution_skill`` models the observed ``attributionSkill`` key, which
+    sits at the record's root alongside ``message``, not nested inside it.
+    Omitted entirely when not supplied, matching the observed shape where it
+    is absent rather than null on a turn with no active skill.
+    """
     record: dict[str, object] = build_root_fields(
         record_type="assistant",
         uuid=uuid,
@@ -207,6 +280,8 @@ def build_assistant_record(
         "stop_reason": stop_reason,
         "usage": dict(usage) if usage is not None else {"input_tokens": 10, "output_tokens": 5},
     }
+    if attribution_skill is not None:
+        record["attributionSkill"] = attribution_skill
     return record
 
 
@@ -440,3 +515,136 @@ def build_transcript_text(records: Sequence[Mapping[str, object]]) -> str:
     """Serialize records as newline-delimited JSON, one record per line."""
     lines = [json.dumps(record) for record in records]
     return "\n".join(lines) + "\n" if lines else ""
+
+
+def build_agent_definition_config(
+    *,
+    name: str = "implementer",
+    model: str | None = "claude-sonnet-5[1m]",
+    effort: str | None = "high",
+    tools: tuple[str, ...] = ("Read", "Write", "Edit", "Bash", "Grep", "Glob"),
+    skills: tuple[str, ...] = ("craft:python-engineering-standards",),
+) -> AgentDefinitionConfig:
+    return AgentDefinitionConfig(name=name, model=model, effort=effort, tools=tools, skills=skills)
+
+
+def build_agent_definition(
+    *,
+    scope: DefinitionScope = DefinitionScope.USER,
+    source_project: str | None = None,
+    config: AgentDefinitionConfig | None = None,
+    revision: SourceRevision | None = None,
+    agent_definition_id: str | None = None,
+) -> AgentDefinition:
+    """Build an ``AgentDefinition`` whose identity matches the real content-addressing rule.
+
+    ``agent_definition_id`` defaults to what
+    :func:`agentlens.ingest.agent_definitions.content_addressed_definition_id`
+    would compute from ``scope``, ``source_project``, and ``revision``'s
+    content hash, so a caller that only varies those inputs gets an identity
+    that changes exactly when the real one would.
+    """
+    resolved_config = config if config is not None else build_agent_definition_config()
+    resolved_revision = revision if revision is not None else build_source_revision()
+    resolved_id = (
+        agent_definition_id
+        if agent_definition_id is not None
+        else content_addressed_definition_id(
+            scope=scope, source_project=source_project, content_hash=resolved_revision.content_hash
+        )
+    )
+    return AgentDefinition(
+        agent_definition_id=resolved_id,
+        scope=scope,
+        source_project=source_project,
+        config=resolved_config,
+        revision=resolved_revision,
+    )
+
+
+def build_agent_definition_text(
+    *,
+    name: str = "implementer",
+    model: str | None = "claude-sonnet-5[1m]",
+    effort: str | None = "high",
+    tools: str | Sequence[str] | None = "Read, Write, Edit, Bash, Grep, Glob",
+    skills: Sequence[str] | None = ("craft:python-engineering-standards",),
+    unknown_fields: Mapping[str, str] | None = None,
+    body: str = "You are an agent.",
+) -> str:
+    """Render one agent-definition Markdown file's frontmatter and body.
+
+    ``tools`` accepts a pre-joined scalar string (the shape every real
+    definition on this machine uses), a sequence rendered as a block list, or
+    a literal string passed through verbatim so a caller can construct the
+    unsupported ``tools: ["Read", "Grep"]`` shape. ``None`` omits the key
+    entirely. ``skills`` is always rendered as a block list when given,
+    matching every real skills-bearing definition; ``None`` omits the key
+    entirely.
+    """
+    lines = ["---", f"name: {name}"]
+    if model is not None:
+        lines.append(f"model: {model}")
+    if effort is not None:
+        lines.append(f"effort: {effort}")
+    if tools is not None:
+        if isinstance(tools, str):
+            lines.append(f"tools: {tools}")
+        else:
+            lines.append("tools:")
+            lines.extend(f"  - {tool}" for tool in tools)
+    for key, value in (unknown_fields or {}).items():
+        lines.append(f"{key}: {value}")
+    if skills is not None:
+        lines.append("skills:")
+        lines.extend(f"  - {skill}" for skill in skills)
+    lines.append("---")
+    lines.append("")
+    lines.append(body)
+    lines.append("")
+    return "\n".join(lines)
+
+
+def build_skill_md_text(*, name: str = "example-skill", body: str = "A skill.") -> str:
+    """Render a minimal ``SKILL.md``, frontmatter ``name:`` and all.
+
+    Matches every real ``SKILL.md`` on this machine, which opens with a
+    frontmatter block naming the skill.
+    """
+    return f"---\nname: {name}\n---\n\n{body}\n"
+
+
+def build_skill_md_path(base: Path, *, skill_name: str) -> Path:
+    """Return where a user- or project-scoped ``SKILL.md`` would sit under ``base``.
+
+    Models ``.claude/skills/<skill>/SKILL.md``. The same shape roots both
+    scopes; the caller decides whether ``base`` plays the role of a home
+    directory or a project's ``cwd``.
+    """
+    return base / ".claude" / "skills" / skill_name / "SKILL.md"
+
+
+def build_plugin_cache_skill_path(
+    base: Path,
+    *,
+    skill_name: str,
+    marketplace: str = "marketplace-one",
+    plugin: str = "plugin-one",
+    plugin_hash: str = "0123456789ab",
+    version: str = "1.0.0",
+    shape: Literal[
+        "marketplace_hash", "plugin_hash_skill", "plugin_version_skills"
+    ] = "marketplace_hash",
+) -> Path:
+    """Return where a plugin-cached ``SKILL.md`` would sit, in one of three observed depth shapes.
+
+    All three end in the skill's own leaf directory holding ``SKILL.md``:
+    ``<marketplace>/<skill>/<hash>``, ``<marketplace>/<plugin>/<hash>/<skill>``,
+    and ``<marketplace>/<plugin>/<version>/skills/<skill>``.
+    """
+    root = base / ".claude" / "plugins" / "cache" / marketplace
+    if shape == "marketplace_hash":
+        return root / skill_name / plugin_hash / "SKILL.md"
+    if shape == "plugin_hash_skill":
+        return root / plugin / plugin_hash / skill_name / "SKILL.md"
+    return root / plugin / version / "skills" / skill_name / "SKILL.md"

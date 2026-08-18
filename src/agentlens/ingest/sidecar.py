@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from agentlens.errors import MalformedSourceError
+from agentlens.models.identity import SourceRevision
+from agentlens.utils.hashing import hash_text
 
 _SIDECAR_SUFFIX = ".meta.json"
 
@@ -16,6 +18,10 @@ class Sidecar:
     ``parent_agent_id`` and ``model`` are ``None`` when the sidecar omits
     them, which it does whenever they do not apply rather than writing a
     literal null.
+
+    ``revision`` is the sidecar file's own observed state, distinct from the
+    transcript's, so a sidecar edit can be detected even when the transcript
+    itself did not change.
     """
 
     agent_type: str
@@ -24,6 +30,7 @@ class Sidecar:
     spawn_depth: int
     parent_agent_id: str | None
     model: str | None
+    revision: SourceRevision
 
 
 def read_sidecar(transcript_path: Path) -> Sidecar | None:
@@ -37,9 +44,13 @@ def read_sidecar(transcript_path: Path) -> Sidecar | None:
     """
     sidecar_path = transcript_path.with_suffix(_SIDECAR_SUFFIX)
     try:
+        stat = sidecar_path.stat()
         text = sidecar_path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
+    revision = SourceRevision(
+        mtime_ns=stat.st_mtime_ns, size=stat.st_size, content_hash=hash_text(text)
+    )
 
     try:
         raw = json.loads(text)
@@ -72,4 +83,5 @@ def read_sidecar(transcript_path: Path) -> Sidecar | None:
         spawn_depth=spawn_depth,
         parent_agent_id=parent_agent_id if isinstance(parent_agent_id, str) else None,
         model=model if isinstance(model, str) else None,
+        revision=revision,
     )
