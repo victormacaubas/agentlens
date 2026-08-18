@@ -227,6 +227,7 @@ reports/
 .structure-review/
 .agents/
 sample-data/
+.cursor/
 
 # MacOS
 .DS_Store

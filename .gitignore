@@ -227,6 +227,8 @@ reports/
 .structure-review/
 .agents/
 sample-data/
+.cursor/
+graphify-out/cost.json
 
 # MacOS
 .DS_Store
