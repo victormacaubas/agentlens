@@ -1,9 +1,10 @@
 import json
 import logging
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -15,6 +16,7 @@ from agentlens.errors import (
     SourceError,
     StoreError,
 )
+from agentlens.models.windows import NAMED_WINDOW_THIS_WEEK, WindowSelector
 from agentlens.utils.clock import SystemClock
 
 logger = logging.getLogger(__name__)
@@ -28,6 +30,7 @@ EXIT_CODES: dict[type[AgentlensError], int] = {
     JudgeError: 5,
 }
 SESSION_SUBCOMMAND = "session"
+REPORT_SUBCOMMAND = "report"
 _STORE_DB_FILENAME = "agentlens.db"
 
 
@@ -92,6 +95,163 @@ def parse_session_args(argv: Sequence[str]) -> SessionArgs:
         store_path=context.params["store_path"],
         dry_run=context.params["dry_run"],
     )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ReportArgs:
+    """The parsed arguments for the ``report`` subcommand.
+
+    Not yet wired into :func:`main`: composing this with window resolution,
+    ingest, and rendering belongs to a later change slice.
+    """
+
+    selector: WindowSelector
+    agent: str | None
+    output_format: str | None
+    store_path: Path | None
+    dry_run: bool
+
+
+class _MutuallyExclusiveOption(click.Option):
+    """A ``click.Option`` that cannot be supplied alongside a named sibling set.
+
+    Declares the exclusion on the option itself, via ``mutually_exclusive``,
+    so the report command's window-selector group is a declared group rather
+    than an ad hoc check written into the command body.
+    """
+
+    def __init__(
+        self,
+        param_decls: Sequence[str] | None = None,
+        *,
+        mutually_exclusive: frozenset[str] = frozenset(),
+        **attrs: Any,
+    ) -> None:
+        self._mutually_exclusive = mutually_exclusive
+        super().__init__(param_decls, **attrs)
+
+    def handle_parse_result(
+        self, ctx: click.Context, opts: Mapping[str, object], args: list[str]
+    ) -> tuple[object, list[str]]:
+        value, remaining = super().handle_parse_result(ctx, opts, args)
+        if ctx.get_parameter_source(self.name or "") == click.ParameterSource.COMMANDLINE:
+            supplied = {
+                name
+                for name in self._mutually_exclusive
+                if ctx.get_parameter_source(name) == click.ParameterSource.COMMANDLINE
+            }
+            if supplied:
+                names = ", ".join(sorted({self.name or "", *supplied}))
+                raise click.UsageError(f"only one window selector may be supplied at once: {names}")
+        return value, remaining
+
+
+# Parses `report` flags only; never invoked directly, so it carries no callback.
+_REPORT_COMMAND = click.Command(
+    name=REPORT_SUBCOMMAND,
+    params=[
+        _MutuallyExclusiveOption(
+            ["--since", "since_duration"],
+            mutually_exclusive=frozenset({"named_window", "range_from", "range_to"}),
+            type=str,
+            default=None,
+            help="Report a relative duration ending now, for example 7d.",
+        ),
+        _MutuallyExclusiveOption(
+            ["--window", "named_window"],
+            mutually_exclusive=frozenset({"since_duration", "range_from", "range_to"}),
+            type=click.Choice([NAMED_WINDOW_THIS_WEEK]),
+            default=None,
+            help="Report a named local-calendar window.",
+        ),
+        _MutuallyExclusiveOption(
+            ["--from", "range_from"],
+            mutually_exclusive=frozenset({"since_duration", "named_window"}),
+            type=str,
+            default=None,
+            help="Explicit range lower bound (ISO-8601), paired with --to.",
+        ),
+        _MutuallyExclusiveOption(
+            ["--to", "range_to"],
+            mutually_exclusive=frozenset({"since_duration", "named_window"}),
+            type=str,
+            default=None,
+            help="Explicit range upper bound (ISO-8601), paired with --from.",
+        ),
+        click.Option(
+            ["--agent", "agent"],
+            type=str,
+            default=None,
+            help="Restrict the report to spawns of one agent type.",
+        ),
+        click.Option(
+            ["--store", "store_path"],
+            type=click.Path(path_type=Path),
+            default=None,
+            help="Override the default store location.",
+        ),
+        click.Option(
+            ["--format", "output_format"],
+            type=click.Choice([FORMAT_JSON]),
+            default=None,
+            help="Emit the JSON document to standard output instead of an artifact file.",
+        ),
+        click.Option(
+            ["--dryrun", "dry_run"],
+            is_flag=True,
+            default=False,
+            help="Compute the report without writing the store or a report artifact.",
+        ),
+    ],
+)
+
+
+def parse_report_args(argv: Sequence[str]) -> ReportArgs:
+    """Parse the ``report`` subcommand's arguments.
+
+    Testable directly against a plain argument list, independent of
+    ``sys.argv`` and of any CLI test runner. Not yet reachable from
+    :func:`main`.
+
+    Raises:
+        click.ClickException: ``argv`` does not start with the ``report``
+            subcommand, the window selectors are missing, conflicting, or an
+            incomplete range, or another flag is malformed.
+    """
+    if not argv or argv[0] != REPORT_SUBCOMMAND:
+        raise click.UsageError(f"expected the {REPORT_SUBCOMMAND!r} subcommand")
+    context = _REPORT_COMMAND.make_context("agentlens report", list(argv[1:]))
+    selector = WindowSelector(
+        since_duration=context.params["since_duration"],
+        named_window=context.params["named_window"],
+        range_from=context.params["range_from"],
+        range_to=context.params["range_to"],
+    )
+    _require_single_window_form(selector)
+    return ReportArgs(
+        selector=selector,
+        agent=context.params["agent"],
+        output_format=context.params["output_format"],
+        store_path=context.params["store_path"],
+        dry_run=context.params["dry_run"],
+    )
+
+
+def _require_single_window_form(selector: WindowSelector) -> None:
+    has_range = selector.range_from is not None or selector.range_to is not None
+    form_count = sum(
+        (
+            selector.since_duration is not None,
+            selector.named_window is not None,
+            has_range,
+        )
+    )
+    if form_count != 1:
+        raise click.UsageError(
+            "exactly one window selector is required: --since, --window, or --from with --to"
+        )
+    if has_range and (selector.range_from is None or selector.range_to is None):
+        raise click.UsageError("--from and --to must be supplied together")
 
 
 def default_store_path() -> Path:
