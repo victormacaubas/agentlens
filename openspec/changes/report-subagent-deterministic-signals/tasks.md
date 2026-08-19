@@ -33,70 +33,52 @@
 
 ## 4. Complete deterministic name and parent resolution
 
-- [ ] 4.1 Add transcript fixtures for one attribution value, conflicting attribution values, a parent `Task` subagent type, and an unavailable parent transcript.
-- [ ] 4.2 Parse distinct assistant attribution values and parent `Task` evidence without emitting a main-session row.
-- [ ] 4.3 Implement the ordered sidecar, attribution, parent-task, and raw-agent fallback chain with an explicit ambiguous outcome.
-- [ ] 4.4 Include every name-resolution input in the derivation fingerprint and prove a changed parent or sidecar refreshes only the affected derived facts.
-- [ ] 4.5 Add tests for every fallback link, conflicting sources, missing parent input, and the guarantee that no main-session row is persisted.
-- [ ] 4.6 Run `make check`.
+- [ ] 4.1 Parse distinct assistant attribution values and parent `Task` evidence without emitting a main-session row. Cover: one attribution value, conflicting attribution values, a parent `Task` subagent type, an unavailable parent transcript.
+- [ ] 4.2 Implement the ordered sidecar, attribution, parent-task, and raw-agent fallback chain with an explicit ambiguous outcome. Cover: every fallback link, conflicting sources, missing parent input.
+- [ ] 4.3 Include every name-resolution input in the derivation fingerprint, so a changed parent or sidecar refreshes only the affected derived facts.
+- [ ] 4.4 `make quick T=tests/unit/test_ingest_parsing.py tests/unit/test_ingest_derivation.py`
 
 ## 5. Discover and batch-ingest all subagent sources
 
-- [ ] 5.1 Add synthetic multi-project trees containing subagent transcripts, sidecars, definitions, skills, main-session JSONL files, duplicate raw IDs, and a changed-during-read source.
-- [ ] 5.2 Implement deterministic discovery of subagent source bundles under project trees while excluding project-level main-session transcripts.
-- [ ] 5.3 Parse all bundles and context before opening the persistent write transaction; abort on any hard source failure while retaining counted unreadable-line behavior.
-- [ ] 5.4 Add a store batch operation that applies definitions, sessions, tool events, and skill rows in one transaction and preserves the existing per-session staleness outcomes.
-- [ ] 5.5 Add tests proving mid-batch parse and database failures write nothing, unchanged sources do not duplicate, qualified IDs do not collide across projects, and four same-type spawns remain four rows.
-- [ ] 5.6 Snapshot the source tree before and after successful, failed, and dry-run discovery tests and prove no path under `.claude/` changes.
-- [ ] 5.7 Run `make check`.
+- [ ] 5.1 Implement deterministic discovery of subagent source bundles under project trees, excluding project-level main-session transcripts. Cover: multi-project trees carrying transcripts, sidecars, definitions and skills; duplicate raw IDs that must not collide once qualified; a changed-during-read source; main-session JSONL present but never ingested.
+- [ ] 5.2 Parse all bundles and context before opening the persistent write transaction; abort on any hard source failure while retaining counted unreadable-line behavior.
+- [ ] 5.3 Add a store batch operation applying definitions, sessions, tool events, and skill rows in one transaction, preserving the existing per-session staleness outcomes. Cover: mid-batch parse failure and mid-batch database failure each write nothing, unchanged sources do not duplicate, four same-type spawns remain four rows.
+- [ ] 5.4 Assert no path under `.claude/` changes across successful, failed, and dry-run discovery.
+- [ ] 5.5 `make quick`
 
 ## 6. Resolve report windows
 
-- [ ] 6.1 Add typed window-selector and resolved-window models, including current and prior UTC bounds, original selector, local timezone metadata, and trend threshold.
-- [ ] 6.2 Add tests for `7d`, explicit `--from/--to`, `this-week`, half-open boundaries, local timezone conversion, daylight-saving transitions, and a fixed injected clock.
-- [ ] 6.3 Implement relative-duration parsing and reject zero, negative, malformed, or unsupported duration values as configuration errors.
-- [ ] 6.4 Implement named local-calendar resolution and explicit-range resolution, then derive the previous equal-elapsed-duration window.
-- [ ] 6.5 Add a testable report-argument parser that requires exactly one selector form, pairs `--from` with `--to`, and supports `--agent`, `--store`, `--format json`, and `--dryrun`.
-- [ ] 6.6 Prove invalid selector combinations exit 2 and write neither the store nor report files.
-- [ ] 6.7 Run `make check`.
+- [ ] 6.1 Add typed window-selector and resolved-window models: current and prior UTC bounds, original selector, local timezone metadata, trend threshold.
+- [ ] 6.2 Implement relative-duration, named-calendar, and explicit-range resolution, deriving the previous equal-elapsed-duration window, and reject zero, negative, malformed, or unsupported durations as configuration errors. Cover, against an injected fixed clock: `7d`, explicit `--from/--to`, `this-week`, half-open boundaries, local timezone conversion, a daylight-saving transition.
+- [ ] 6.3 Add a testable report-argument parser requiring exactly one selector form, pairing `--from` with `--to`, and supporting `--agent`, `--store`, `--format json`, `--dryrun`. Cover: invalid selector combinations exit 2 and write neither the store nor report files.
+- [ ] 6.4 `make quick`
 
 ## 7. Query current and prior deterministic aggregates
 
 - [ ] 7.1 Add canonical builders for typed spawn rows, metric totals, per-spawn averages, weighted proportions, trend status, and agent rollups.
-- [ ] 7.2 Seed real SQLite fixtures that cover lower/upper boundaries, current-only agents, prior-only agents, same-type spawns from several parents, main rows, unknown context, and zero results.
-- [ ] 7.3 Add a store read that returns every qualifying current-window subagent spawn in deterministic order and applies the optional agent filter.
-- [ ] 7.4 Add analytical SQL for current and prior agent populations, totals, per-spawn averages, and weighted cache-read proportion without joining verdict data.
-- [ ] 7.5 Add signed deltas for averages and weighted proportions when both windows meet the threshold; retain raw values and return `insufficient_data` otherwise.
-- [ ] 7.6 Prove totals never drive directional trends, main-session rows are excluded, N means spawns, and an empty current window returns empty typed collections.
-- [ ] 7.7 Run `make check`.
+- [ ] 7.2 Add a store read returning every qualifying current-window subagent spawn in deterministic order, with the optional agent filter. Cover: lower and upper window boundaries, same-type spawns from several parents, main rows excluded, unknown context, zero results.
+- [ ] 7.3 Add analytical SQL for current and prior agent populations, totals, per-spawn averages, and weighted cache-read proportion without joining verdict data, plus signed deltas when both windows meet the threshold, retaining raw values and returning `insufficient_data` otherwise. Cover: current-only agents, prior-only agents, totals never driving directional trends, an empty current window returning empty typed collections.
+- [ ] 7.4 `make quick T=tests/unit/test_store.py`
 
 ## 8. Deliver the deterministic report path
 
-- [ ] 8.1 Add a versioned report document model containing generation metadata, selector and resolved bounds, filter, threshold, complete spawn rows, and agent rollups.
-- [ ] 8.2 Add JSON rendering tests that assert every qualifying spawn appears, unknown context remains explicit, low-volume trends contain no direction, and modeled fields are absent everywhere.
-- [ ] 8.3 Add a stable scope-derived JSON artifact path and overwrite-in-place behavior without changing the existing session artifact path.
-- [ ] 8.4 Add a thin terminal summary that names the window, agent scope, total spawns, per-agent populations, trend status, and artifact path without presenting any score.
-- [ ] 8.5 Implement the core report workflow: resolve scope, discover and parse, batch-upsert, query both windows, build the document, and choose JSON stdout or artifact plus summary.
-- [ ] 8.6 Wire `agentlens report` through the CLI composition root and log resolved arguments once as JSON with identifying window and agent context.
-- [ ] 8.7 Add an end-to-end test where `report --since 7d` discovers several subagent transcripts and emits real current/prior deterministic numbers without constructing a judge.
-- [ ] 8.8 Add JSON-stream, agent-filter, zero-results, stable-overwrite, source-error, store-error, and successful exit-code tests.
-- [ ] 8.9 Run `make check`.
+- [ ] 8.1 Add a versioned report document model: generation metadata, selector and resolved bounds, filter, threshold, complete spawn rows, agent rollups.
+- [ ] 8.2 Render that model as JSON at a stable scope-derived artifact path that overwrites in place, leaving the existing session artifact path unchanged. Cover: every qualifying spawn appears, unknown context stays explicit, low-volume trends carry no direction, no modeled field appears anywhere.
+- [ ] 8.3 Add a thin terminal summary naming the window, agent scope, total spawns, per-agent populations, trend status, and artifact path, presenting no score.
+- [ ] 8.4 Implement the core report workflow (resolve scope, discover and parse, batch-upsert, query both windows, build the document, choose JSON stdout or artifact plus summary) and wire `agentlens report` through the CLI composition root, logging resolved arguments once as JSON with identifying window and agent context. Cover end to end: `report --since 7d` over several subagent transcripts emits real current and prior numbers without constructing a judge; plus JSON-stream, agent-filter, zero-results, stable-overwrite, source-error, store-error, and success exit codes.
+- [ ] 8.5 `make quick`
 
 ## 9. Make dry run use the production query path
 
-- [ ] 9.1 Add a store operation that clones an existing SQLite cache into a disposable temporary database and initializes an empty clone when no persistent store exists.
-- [ ] 9.2 Route `report --dryrun` through the temporary clone, applying the validated batch and the same analytical reads and renderers as a normal report.
-- [ ] 9.3 Add parity tests proving normal and dry-run JSON documents match apart from generation/path metadata for the same starting store and sources.
-- [ ] 9.4 Prove dry run includes newly discovered spawns while leaving the configured store and report paths byte-for-byte unchanged.
-- [ ] 9.5 Ensure temporary databases close and are removed on success and every failure path.
-- [ ] 9.6 Run `make check`.
+- [ ] 9.1 Add a store operation cloning an existing SQLite cache into a disposable temporary database, initializing an empty clone when no persistent store exists, and closing and removing it on success and every failure path.
+- [ ] 9.2 Route `report --dryrun` through the clone, applying the validated batch and the same analytical reads and renderers as a normal report. Cover: normal and dry-run JSON documents match apart from generation and path metadata for the same starting store and sources; dry run includes newly discovered spawns while leaving the configured store and report paths byte-for-byte unchanged.
+- [ ] 9.3 `make quick`
 
 ## 10. Verify the Phase 2 boundary and finish
 
 - [ ] 10.1 Rebuild a store twice from the same synthetic source tree and prove all added definitions, session context, skill rows, spawn rows, and aggregates are equivalent.
-- [ ] 10.2 Prove changed sidecar, definition, skill inventory, and parent evidence update the derivation fingerprint while an older composite snapshot cannot overwrite newer stored facts.
-- [ ] 10.3 Search the implementation and tests to confirm the report path neither ingests main-session rows nor constructs or calls `JudgeBackend`.
-- [ ] 10.4 Confirm all new SQLite-shaped signatures remain inside `store`, source-tree types remain inside `ingest`, and all import contracts stay kept.
-- [ ] 10.5 Run `openspec validate report-subagent-deterministic-signals --strict --json`.
-- [ ] 10.6 Run the `structure-review` skill against the completed change; resolve every blocking finding and re-review before archive.
-- [ ] 10.7 Run `make check` one final time and confirm a clean gate.
+- [ ] 10.2 Prove a changed sidecar, definition, skill inventory, or parent evidence updates the derivation fingerprint, while an older composite snapshot cannot overwrite newer stored facts.
+- [ ] 10.3 Confirm the report path neither ingests main-session rows nor constructs or calls `JudgeBackend`, and that new SQLite-shaped signatures stay inside `store` and source-tree types stay inside `ingest`.
+- [ ] 10.4 Run `openspec validate report-subagent-deterministic-signals --strict --json`.
+- [ ] 10.5 Run the `structure-review` skill against the completed change; resolve every blocking finding and re-review before archive.
+- [ ] 10.6 Run `make check` and confirm a clean gate.

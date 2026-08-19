@@ -179,6 +179,21 @@ unmatched `tool_use`, a partial failure mid-batch, retry exhaustion, a missing
 config key, and the zero-results path of every read. That last one is the most
 commonly missed and it is what a user hits on their first run.
 
+**A spec scenario is not a test function.** Scenarios in `openspec/specs/**` are
+acceptance criteria; they say what must be true, not how many `def test_` bodies
+prove it. One parametrized test covering six scenarios is better than six tests,
+and the checklist above is a list of cases to *consider*, not a quota to fill.
+Counting scenarios and writing one test each is how a suite grows past the code
+it protects.
+
+**Tests are written with the code, in the same task, by the same worker.** No
+separate fixture task before the implementation and no "add tests proving X" task
+after it. Writing the test first is valuable when it is how you discover the
+interface; when the interface is already settled in `design.md` and the task
+list, a failing-test step is a second derivation of a decision already made, and
+the trailing test task is a third. Name the cases to cover inside the
+implementation task and cover them once.
+
 ## Vocabulary
 
 Use these words precisely, in code, in output, and in prose. Most of them mark a
@@ -222,6 +237,19 @@ Work goes through OpenSpec: `/opsx:propose`, then `/orchestrate`, then
 layer at a time. A slice that touches `ingest`, `store`, and `render` for a single
 capability is right; a slice that builds all of `store` is not. This is what keeps
 the wiring exercised from the first change onward.
+
+**A task is a behavior, not a phase of one.** Write each task as the outcome plus
+the cases it must cover: *"Implement the bounded frontmatter reader for name,
+model, effort, tools, and skills with sound stat-read-stat revisions and
+source-specific errors. Cover: scalar and list frontmatter, unknown keys,
+malformed known fields, changed-during-read."* One task, one pass, code and tests
+together. Splitting that into a fixture task, an implementation task, and a
+verification task makes a worker derive the same behavior three times and is the
+single largest avoidable cost in a change.
+
+**`make quick` per task, `make check` once per change.** The full gate is the
+merge boundary, not a per-section ritual. A `Run make check` line under every
+section turns one gate into ten round trips for no added signal.
 
 ## graphify
 

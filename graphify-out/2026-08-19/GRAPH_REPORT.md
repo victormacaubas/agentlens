@@ -1,23 +1,23 @@
-# Graph Report - agentlens  (2026-08-19)
+# Graph Report - agentlens  (2026-08-18)
 
 ## Corpus Check
-- 109 files · ~111,456 words
+- 101 files · ~106,257 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 1010 nodes · 2307 edges · 56 communities (50 shown, 6 thin omitted)
-- Extraction: 93% EXTRACTED · 7% INFERRED · 0% AMBIGUOUS · INFERRED: 151 edges (avg confidence: 0.58)
+- 891 nodes · 1936 edges · 50 communities (44 shown, 6 thin omitted)
+- Extraction: 94% EXTRACTED · 6% INFERRED · 0% AMBIGUOUS · INFERRED: 114 edges (avg confidence: 0.59)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `71e978fe`
+- Built from commit: `52cf2af3`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
 ## Community Hubs (Navigation)
 - parse_transcript
 - ingest/session.py
-- test_cli_session.py
+- errors.py
 - core/session.py
 - Stage-Shaped Layer Map
 - Archived Session Parser Specification
@@ -25,8 +25,8 @@
 - tool_events.py
 - Parser Integrity Contract
 - test_ingest_agent_definitions.py
-- test_ingest_skill_bridge.py
-- rows.py
+- canonical_json_fingerprint
+- AgentDefinition
 - ADDED Requirements
 - Sound Snapshot Upsert
 - Report Component System
@@ -41,7 +41,7 @@
 - ADDED Requirements
 - transcript.py
 - Decisions
-- SourceChangedError
+- reading.py
 - Requirement: Name resolution records which source won
 - ADDED Requirements
 - ADDED Requirements
@@ -49,31 +49,25 @@
 - ADDED Requirements
 - Decisions
 - report-subagent-deterministic-signals/tasks.md
-- schema.py
+- test_store_schema.py
 - 2026-08-18-derive-store-column-order/proposal.md
 - 2026-08-18-derive-store-column-order/tasks.md
 - report-subagent-deterministic-signals/proposal.md
-- errors.py
+- name_resolution.py
 - MalformedSourceError
-- facts.py
-- StoreError
-- cli.py
-- test_exit_codes.py
-- 0009. Relax annotation ceremony in unit tests
-- SourceRevision
-- _StalenessRefusalError
+- build_fact_session
 
 ## God Nodes (most connected - your core abstractions)
 1. `parse_transcript()` - 49 edges
 2. `build_transcript_path()` - 47 edges
-3. `Store` - 45 edges
-4. `MalformedSourceError` - 37 edges
-5. `build_transcript_text()` - 36 edges
-6. `build_tool_invocation_pair()` - 33 edges
+3. `Store` - 41 edges
+4. `build_transcript_text()` - 37 edges
+5. `build_tool_invocation_pair()` - 35 edges
+6. `MalformedSourceError` - 32 edges
 7. `DefinitionScope` - 29 edges
-8. `build_fact_session()` - 29 edges
-9. `build_session_facts()` - 28 edges
-10. `build_agent_definition()` - 28 edges
+8. `build_fact_session()` - 28 edges
+9. `build_session_facts()` - 27 edges
+10. `_write()` - 25 edges
 
 ## Surprising Connections (you probably didn't know these)
 - `Actionable Fix Proposals` --semantically_similar_to--> `The Fix Is the Product`  [INFERRED] [semantically similar]
@@ -97,23 +91,23 @@
 - **Current Single Transcript Contract** — openspec_specs_session_command_spec_session_command_specification, openspec_specs_session_parser_spec_session_parser_specification, openspec_specs_session_report_spec_session_report_specification, openspec_specs_store_schema_spec_store_schema_specification [INFERRED 0.85]
 - **Editorial Report System** — product_data_has_narrative, product_self_contained_html_report, design_red_margin_note, design_report_component_system, design_report_mockup_dark_report_mockup, design_report_mockup_light_light_report_mockup [INFERRED 0.85]
 
-## Communities (56 total, 6 thin omitted)
+## Communities (50 total, 6 thin omitted)
 
 ### Community 0 - "parse_transcript"
-Cohesion: 0.07
-Nodes (97): parse_transcript(), Path, Parse the subagent transcript at ``path`` into one session and its rows. An…, build_assistant_record(), build_denied_invocation(), build_fragmented_turn(), build_root_fields(), build_sidecar() (+89 more)
+Cohesion: 0.08
+Nodes (88): parse_transcript(), Path, Parse the subagent transcript at ``path`` into one session and its rows. An…, build_assistant_record(), build_denied_invocation(), build_fragmented_turn(), build_root_fields(), build_sidecar() (+80 more)
 
 ### Community 1 - "ingest/session.py"
-Cohesion: 0.13
-Nodes (30): agent_definition_derivation_input(), DerivationInput, derive_session_derivation(), Building the derivation fingerprint and newest observed shaping-input time. A…, Return the derivation fingerprint and newest observed mtime across ``inputs``.…, One file or fact that shaped a derived row. ``fingerprint_value`` must be JSON-…, Return the transcript's own revision as a derivation input., Return the sidecar's revision and parsed fields as a derivation input. (+22 more)
+Cohesion: 0.12
+Nodes (27): agent_definition_derivation_input(), DerivationInput, derive_session_derivation(), Building the derivation fingerprint and newest observed shaping-input time. A…, One file or fact that shaped a derived row. ``fingerprint_value`` must be JSON-…, Return the transcript's own revision as a derivation input., Return the sidecar's revision and parsed fields as a derivation input., Return the spawn's bound agent definition, or its absence, as a derivation… (+19 more)
 
-### Community 2 - "test_cli_session.py"
-Cohesion: 0.30
-Nodes (19): CaptureFixture, main(), Parse arguments, resolve the composition root, and run the ``session`` command.…, _fact_session_count(), MonkeyPatch, Path, The ``agentlens session`` command: end to end, exit codes, and stream…, The expanded ``fact_session`` row round-trips through the full CLI path. Proves… (+11 more)
+### Community 2 - "errors.py"
+Cohesion: 0.07
+Nodes (49): CaptureFixture, default_store_path(), _exit_code_for(), main(), parse_session_args(), Path, Parse arguments, resolve the composition root, and run the ``session`` command.…, The parsed arguments for the ``session`` subcommand. (+41 more)
 
 ### Community 3 - "core/session.py"
 Cohesion: 0.06
-Nodes (54): Protocol, analyze_session(), _persist_or_log(), Path, Orchestrates one session analysis run across the sibling packages. ``ingest``,…, Ingest, persist, and render one subagent transcript. Parses…, _write_artifact_or_log(), JudgeResponse (+46 more)
+Nodes (52): Protocol, analyze_session(), _persist_or_log(), Path, Orchestrates one session analysis run across the sibling packages. ``ingest``,…, Ingest, persist, and render one subagent transcript. Parses…, _write_artifact_or_log(), JudgeResponse (+44 more)
 
 ### Community 4 - "Stage-Shaped Layer Map"
 Cohesion: 0.05
@@ -124,28 +118,28 @@ Cohesion: 0.07
 Nodes (37): Dry Run With No Writes, Explicit Transcript Path Analysis, Failure Family Exit Codes, Idempotent Session Rerun, Project-Qualified Session Identity, Read-Only Claude Source Tree, Archived Session Command Specification, Ordered Agent Name Resolution (+29 more)
 
 ### Community 6 - "Store"
-Cohesion: 0.09
-Nodes (60): build_session_summary(), Path, Build the readable summary of one analyzed spawn. Names the agent type and…, Path, A SQLite-backed store at a caller-supplied path. Opening the connection,…, Store, build_fact_session(), build_fact_tool_event() (+52 more)
+Cohesion: 0.08
+Nodes (67): build_session_summary(), Path, Build the readable summary of one analyzed spawn. Names the agent type and…, Path, A SQLite-backed store at a caller-supplied path. Opening the connection,…, Store, build_agent_definition(), build_agent_definition_config() (+59 more)
 
 ### Community 7 - "tool_events.py"
-Cohesion: 0.06
-Nodes (45): assistant_message_groups(), content_blocks(), parse_timestamp(), datetime, JsonRecord, Small helpers for reading fields out of a transcript's already-parsed records.…, Return the raw subagent identifier carried by ``records``. Uses the first…, Parse a record's root-level ``timestamp`` as a timezone-aware instant. Raises:… (+37 more)
+Cohesion: 0.13
+Nodes (21): assistant_message_groups(), content_blocks(), parse_timestamp(), datetime, JsonRecord, Small helpers for reading fields out of a transcript's already-parsed records.…, Return the raw subagent identifier carried by ``records``. Uses the first…, Parse a record's root-level ``timestamp`` as a timezone-aware instant. Raises:… (+13 more)
 
 ### Community 8 - "Parser Integrity Contract"
 Cohesion: 0.25
 Nodes (8): Session Command Contract, Session Command Specification, Parser Integrity Contract, Session Parser Specification, Report Output Contract, Session Report Specification, Store Integrity Contract, Store Schema Specification
 
 ### Community 9 - "test_ingest_agent_definitions.py"
-Cohesion: 0.10
-Nodes (55): content_addressed_definition_id(), discover_agent_definitions(), datetime, Path, Scan ``directory`` non-recursively for ``*.md`` agent definitions. Returns an…, Return the effective definition per agent name for one project. A project-…, Return the definition a spawn may bind to, or ``None`` when history is…, Return the stable identity for a definition of ``scope`` with ``content_hash``.… (+47 more)
+Cohesion: 0.12
+Nodes (43): The file changed while being read, so the snapshot cannot be trusted., SourceChangedError, content_addressed_definition_id(), discover_agent_definitions(), datetime, Path, Scan ``directory`` non-recursively for ``*.md`` agent definitions. Returns an…, Return the effective definition per agent name for one project. A project-… (+35 more)
 
-### Community 10 - "test_ingest_skill_bridge.py"
-Cohesion: 0.07
-Nodes (70): derive_skill_signals(), datetime, JsonRecord, Deriving the session-skill bridge from declarations, availability, and firing.…, Return one row per skill named by a declaration, the inventory, or a fire.…, _resolve_declared(), discover_skill_inventory(), normalize_skill_name() (+62 more)
+### Community 10 - "canonical_json_fingerprint"
+Cohesion: 0.16
+Nodes (20): canonical_json_fingerprint(), file_identity(), hash_text(), normalize_path(), Path, Return the SHA-256 hex digest of ``text``, encoded as UTF-8., Hash ``value`` as canonical JSON: sorted keys, no insignificant whitespace. Two…, Return the normalized absolute form of ``path``, without touching disk. (+12 more)
 
-### Community 11 - "rows.py"
-Cohesion: 0.10
-Nodes (33): Row, SqliteRow, AgentDefinition, AgentDefinitionConfig, Domain types for one cataloged agent definition. Both ``ingest`` (which…, The deterministic configuration one agent definition declares. ``model`` and…, One cataloged, content-addressed agent definition. ``agent_definition_id`` is…, Connection (+25 more)
+### Community 11 - "AgentDefinition"
+Cohesion: 0.05
+Nodes (56): BaseException, Row, SqliteRow, The store could not be read or written. Translates ``sqlite3.Error``., StoreError, AgentDefinition, AgentDefinitionConfig, Domain types for one cataloged agent definition. Both ``ingest`` (which… (+48 more)
 
 ### Community 12 - "ADDED Requirements"
 Cohesion: 0.08
@@ -172,16 +166,16 @@ Cohesion: 0.11
 Nodes (18): ADDED Requirements, Purpose, Requirement: Current files do not rewrite unknown history as fact, Requirement: Declared, available, and fired are independent states, Requirement: Fired-skill count is reproducible, Requirement: Fired state requires execution evidence, Requirement: Missing fires remain deterministic facts, Requirement: Session-skill grain is unique (+10 more)
 
 ### Community 33 - "transcript.py"
-Cohesion: 0.10
-Nodes (29): Reading, cataloging, and binding agent definitions. An agent definition is a…, build_session_identity(), derive_parent_session_id(), derive_transcript_location(), Path, Deriving a subagent session's qualified identity from its transcript path.…, The identity components read off a subagent transcript's file path.…, Derive the owning project, raw session id, and session kind from ``path``.… (+21 more)
+Cohesion: 0.23
+Nodes (11): build_session_identity(), derive_parent_session_id(), derive_transcript_location(), Path, Deriving a subagent session's qualified identity from its transcript path.…, The identity components read off a subagent transcript's file path.…, Derive the owning project, raw session id, and session kind from ``path``.…, Return the qualified identity for ``location``. ``session_id`` is the SHA-256… (+3 more)
 
 ### Community 34 - "Decisions"
 Cohesion: 0.11
 Nodes (17): Agent frontmatter uses a bounded parser, Analytical SQL owns windows and rollups, Bulk ingest validates first and commits once, Context, Decisions, Discovery returns subagent source bundles, not paths alone, Dry run uses a disposable clone of the store, Every derivation input participates in snapshot identity (+9 more)
 
-### Community 35 - "SourceChangedError"
-Cohesion: 0.28
-Nodes (8): The file changed while being read, so the snapshot cannot be trusted., SourceChangedError, Path, Streaming a transcript file once: soundness and raw records together. Soundness…, The result of one streaming pass over a transcript file., Stream ``path`` line by line, hashing its content as it is read. Lines that are…, read_transcript(), TranscriptContents
+### Community 35 - "reading.py"
+Cohesion: 0.33
+Nodes (6): Path, Streaming a transcript file once: soundness and raw records together. Soundness…, The result of one streaming pass over a transcript file., Stream ``path`` line by line, hashing its content as it is read. Lines that are…, read_transcript(), TranscriptContents
 
 ### Community 36 - "Requirement: Name resolution records which source won"
 Cohesion: 0.11
@@ -211,9 +205,9 @@ Nodes (11): Column order is declared once, as an ordered tuple of column definit
 Cohesion: 0.18
 Nodes (10): 10. Verify the Phase 2 boundary and finish, 1. Enrich one subagent session end to end, 2. Catalog agent definitions and bind only provable history, 3. Derive session-skill signals vertically, 4. Complete deterministic name and parent resolution, 5. Discover and batch-ingest all subagent sources, 6. Resolve report windows, 7. Query current and prior deterministic aggregates (+2 more)
 
-### Community 43 - "schema.py"
-Cohesion: 0.16
-Nodes (18): NamedTuple, _Column, _column_ddl(), _create_table_sql(), ensure_schema(), Connection, DDL for the fact, dimension, and bridge tables the store persists.…, Create every fact, dimension, and bridge table if it does not already exist. (+10 more)
+### Community 43 - "test_store_schema.py"
+Cohesion: 0.36
+Nodes (9): NamedTuple, _emitted_columns(), PinnedColumn, Path, The emitted schema, pinned column by column as SQLite reports it. These…, One column as ``PRAGMA table_info`` reports it. ``primary_key_position`` is…, test_dim_agent_schema_has_the_declared_columns_in_order(), test_fact_session_schema_has_the_declared_columns_in_order() (+1 more)
 
 ### Community 44 - "2026-08-18-derive-store-column-order/proposal.md"
 Cohesion: 0.29
@@ -227,61 +221,37 @@ Nodes (6): 1. Pin the current schema before touching it, 2. Declare each table's
 Cohesion: 0.29
 Nodes (6): Capabilities, Impact, Modified Capabilities, New Capabilities, What Changes, Why
 
-### Community 47 - "errors.py"
-Cohesion: 0.17
-Nodes (15): AgentlensError, ConfigError, JudgeError, JudgeResponseError, JudgeUnavailableError, Exception, A session source under ``.claude/`` could not be read soundly., Base class for every error agentlens raises deliberately. (+7 more)
+### Community 47 - "name_resolution.py"
+Cohesion: 0.40
+Nodes (5): NameResolution, Resolving an agent type through the ordered name-resolution chain. Only the…, The agent type resolved for a session, and which link supplied it., Resolve the agent type, sidecar first and the raw-id hash second., resolve_agent_type()
 
 ### Community 48 - "MalformedSourceError"
 Cohesion: 0.15
-Nodes (28): FrontmatterValue, MalformedSourceError, A transcript or its ``.meta.json`` sidecar could not be parsed., _extract_config(), Frontmatter, _is_unsupported_shape(), list_field(), parse_frontmatter() (+20 more)
+Nodes (29): FrontmatterValue, MalformedSourceError, A transcript or its ``.meta.json`` sidecar could not be parsed., _extract_config(), Reading, cataloging, and binding agent definitions. An agent definition is a…, Frontmatter, _is_unsupported_shape(), list_field() (+21 more)
 
-### Community 49 - "facts.py"
-Cohesion: 0.22
-Nodes (10): FactSession, Fact row types: what the store persists, one row per tool invocation and per…, One agent run: one spawn, never one agent type. ``identity`` and ``revision``…, NameSource, StrEnum, Which link in the name-resolution chain supplied ``agent_type``. Ordered…, Which kind of transcript a session came from. Part of the qualified key,…, SessionKind (+2 more)
-
-### Community 50 - "StoreError"
-Cohesion: 0.17
-Nodes (9): BaseException, The store could not be read or written. Translates ``sqlite3.Error``., StoreError, Connection, Replace the stored rows for ``facts``'s session, subject to staleness. Raises:…, Return the stored session identified by ``session_id``, or ``None``., Catalog ``definition`` if its content-addressed identity is not already stored.…, Return the cataloged definition identified by ``agent_definition_id``, or… (+1 more)
-
-### Community 51 - "cli.py"
-Cohesion: 0.18
-Nodes (11): default_store_path(), _exit_code_for(), parse_session_args(), Path, The parsed arguments for the ``session`` subcommand., Parse the ``session`` subcommand's arguments. Testable directly against a plain…, Return the store's default location, under the user's cache directory., SessionArgs (+3 more)
-
-### Community 52 - "test_exit_codes.py"
-Cohesion: 0.32
-Nodes (4): _error_subclasses(), _exit_code_for(), The exit-code table stays complete as the taxonomy grows. No linter can check…, test_every_error_class_resolves_to_a_family_exit_code()
-
-### Community 53 - "0009. Relax annotation ceremony in unit tests"
-Cohesion: 0.33
-Nodes (5): 0009. Relax annotation ceremony in unit tests, Consequences, Context, Decision, Status
-
-### Community 54 - "SourceRevision"
-Cohesion: 0.40
-Nodes (6): merge_skill_inventory(), Merge inventory entries by skill name, keeping the oldest revision on a…, The observable state of a source file, used to judge snapshot soundness.…, SourceRevision, _entry(), test_merge_skill_inventory_keeps_the_oldest_revision_on_a_name_collision()
-
-### Community 55 - "_StalenessRefusalError"
-Cohesion: 0.67
-Nodes (3): Exception, Raised internally to unwind the transaction; never escapes this module., _StalenessRefusalError
+### Community 49 - "build_fact_session"
+Cohesion: 0.16
+Nodes (15): build_fact_session(), _count_by_category(), _count_repeated_invocations(), _earliest_timestamp_and_duration(), datetime, JsonRecord, Sum each turn's token figures from its trailing fragment, not every fragment.…, Return the earliest usable timestamp and the record-timestamp span in ms.… (+7 more)
 
 ## Knowledge Gaps
-- **175 isolated node(s):** `agentlens`, `Status`, `Context`, `Decision`, `Consequences` (+170 more)
+- **171 isolated node(s):** `agentlens`, `Context`, `Goals / Non-Goals`, `Column order is declared once, as an ordered tuple of column definitions in `store/schema.py``, `The declaration carries nullability, and reproduces each table's key style faithfully` (+166 more)
   These have ≤1 connection - possible missing edges or undocumented components.
 - **6 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `parse_transcript()` connect `parse_transcript` to `transcript.py`, `ingest/session.py`, `core/session.py`, `SourceChangedError`, `tool_events.py`, `MalformedSourceError`?**
-  _High betweenness centrality (0.037) - this node is a cross-community bridge._
-- **Why does `MalformedSourceError` connect `MalformedSourceError` to `parse_transcript`, `transcript.py`, `ingest/session.py`, `tool_events.py`, `test_ingest_agent_definitions.py`, `test_ingest_skill_bridge.py`, `errors.py`?**
-  _High betweenness centrality (0.027) - this node is a cross-community bridge._
-- **Why does `Store` connect `Store` to `core/session.py`, `test_ingest_agent_definitions.py`, `rows.py`, `schema.py`, `StoreError`?**
+- **Why does `parse_transcript()` connect `parse_transcript` to `transcript.py`, `ingest/session.py`, `core/session.py`, `reading.py`, `tool_events.py`, `name_resolution.py`, `MalformedSourceError`, `build_fact_session`?**
+  _High betweenness centrality (0.042) - this node is a cross-community bridge._
+- **Why does `Store` connect `Store` to `AgentDefinition`, `core/session.py`?**
+  _High betweenness centrality (0.029) - this node is a cross-community bridge._
+- **Why does `MalformedSourceError` connect `MalformedSourceError` to `parse_transcript`, `ingest/session.py`, `errors.py`, `transcript.py`, `tool_events.py`, `test_ingest_agent_definitions.py`, `build_fact_session`?**
   _High betweenness centrality (0.026) - this node is a cross-community bridge._
-- **Are the 32 inferred relationships involving `Store` (e.g. with `StoreError` and `AgentDefinition`) actually correct?**
-  _`Store` has 32 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 14 inferred relationships involving `MalformedSourceError` (e.g. with `_resolve_skill_name()` and `test_a_bracketed_tools_string_is_rejected_with_the_path_and_field_name()`) actually correct?**
-  _`MalformedSourceError` has 14 INFERRED edges - model-reasoned connections that need verification._
-- **What connects `agentlens`, `Status`, `Context` to the rest of the system?**
-  _175 weakly-connected nodes found - possible documentation gaps or missing edges._
+- **Are the 28 inferred relationships involving `Store` (e.g. with `StoreError` and `AgentDefinition`) actually correct?**
+  _`Store` has 28 INFERRED edges - model-reasoned connections that need verification._
+- **What connects `agentlens`, `Context`, `Goals / Non-Goals` to the rest of the system?**
+  _171 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `parse_transcript` be split into smaller, more focused modules?**
-  _Cohesion score 0.0660941000746826 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.0789293067947838 - nodes in this community are weakly interconnected._
+- **Should `ingest/session.py` be split into smaller, more focused modules?**
+  _Cohesion score 0.125 - nodes in this community are weakly interconnected._
