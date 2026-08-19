@@ -14,6 +14,7 @@ from agentlens.models.report_aggregates import (
     WeightedProportion,
 )
 from agentlens.models.session_facts import SessionFacts
+from agentlens.models.windows import DEFAULT_MIN_SESSIONS_FOR_TREND
 from agentlens.store.outcomes import UpsertOutcome
 from agentlens.store.rows import (
     agent_definition_to_row,
@@ -31,8 +32,6 @@ from agentlens.store.schema import (
     FACT_SESSION_COLUMN_NAMES,
     FACT_TOOL_EVENT_COLUMN_NAMES,
 )
-
-_DEFAULT_MIN_SESSIONS_FOR_TREND = 5
 
 _ADDITIVE_METRIC_COLUMNS: tuple[str, ...] = (
     "n_turns",
@@ -432,7 +431,7 @@ def read_agent_rollups(
     prior_end: datetime,
     agent_type: str | None,
     *,
-    min_sessions_for_trend: int = _DEFAULT_MIN_SESSIONS_FOR_TREND,
+    min_sessions_for_trend: int = DEFAULT_MIN_SESSIONS_FOR_TREND,
 ) -> tuple[AgentRollup, ...]:
     """Build one rollup per agent type present in the current window.
 

@@ -48,17 +48,17 @@
 
 ## 6. Resolve report windows
 
-- [ ] 6.1 Add typed window-selector and resolved-window models: current and prior UTC bounds, original selector, local timezone metadata, trend threshold.
-- [ ] 6.2 Implement relative-duration, named-calendar, and explicit-range resolution, deriving the previous equal-elapsed-duration window, and reject zero, negative, malformed, or unsupported durations as configuration errors. Cover, against an injected fixed clock: `7d`, explicit `--from/--to`, `this-week`, half-open boundaries, local timezone conversion, a daylight-saving transition.
-- [ ] 6.3 Add a testable report-argument parser requiring exactly one selector form, pairing `--from` with `--to`, and supporting `--agent`, `--store`, `--format json`, `--dryrun`. Cover: invalid selector combinations exit 2 and write neither the store nor report files.
-- [ ] 6.4 `make quick`
+- [x] 6.1 Add typed window-selector and resolved-window models: current and prior UTC bounds, original selector, local timezone metadata, trend threshold.
+- [x] 6.2 Implement relative-duration, named-calendar, and explicit-range resolution, deriving the previous equal-elapsed-duration window, and reject zero, negative, malformed, or unsupported durations as configuration errors. Cover, against an injected fixed clock: `7d`, explicit `--from/--to`, `this-week`, half-open boundaries, local timezone conversion, a daylight-saving transition.
+- [x] 6.3 Add a testable report-argument parser requiring exactly one selector form, pairing `--from` with `--to`, and supporting `--agent`, `--store`, `--format json`, `--dryrun`. Cover: invalid selector combinations exit 2 and write neither the store nor report files.
+- [x] 6.4 `make quick`
 
 ## 7. Query current and prior deterministic aggregates
 
-- [ ] 7.1 Add canonical builders for typed spawn rows, metric totals, per-spawn averages, weighted proportions, trend status, and agent rollups.
-- [ ] 7.2 Add a store read returning every qualifying current-window subagent spawn in deterministic order, with the optional agent filter. Cover: lower and upper window boundaries, same-type spawns from several parents, main rows excluded, unknown context, zero results.
-- [ ] 7.3 Add analytical SQL for current and prior agent populations, totals, per-spawn averages, and weighted cache-read proportion without joining verdict data, plus signed deltas when both windows meet the threshold, retaining raw values and returning `insufficient_data` otherwise. Cover: current-only agents, prior-only agents, totals never driving directional trends, an empty current window returning empty typed collections.
-- [ ] 7.4 `make quick T=tests/unit/test_store.py`
+- [x] 7.1 Add canonical builders for typed spawn rows, metric totals, per-spawn averages, weighted proportions, trend status, and agent rollups.
+- [x] 7.2 Add a store read returning every qualifying current-window subagent spawn in deterministic order, with the optional agent filter. Cover: lower and upper window boundaries, same-type spawns from several parents, main rows excluded, unknown context, zero results.
+- [x] 7.3 Add analytical SQL for current and prior agent populations, totals, per-spawn averages, and weighted cache-read proportion without joining verdict data, plus signed deltas when both windows meet the threshold, retaining raw values and returning `insufficient_data` otherwise. Cover: current-only agents, prior-only agents, totals never driving directional trends, an empty current window returning empty typed collections.
+- [x] 7.4 `make quick T=tests/unit/test_store.py`
 
 ## 8. Deliver the deterministic report path
 

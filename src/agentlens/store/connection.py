@@ -9,6 +9,7 @@ from agentlens.models.agent_definitions import AgentDefinition
 from agentlens.models.facts import FactSession
 from agentlens.models.report_aggregates import AgentRollup
 from agentlens.models.session_facts import SessionFacts
+from agentlens.models.windows import DEFAULT_MIN_SESSIONS_FOR_TREND
 from agentlens.store import operations
 from agentlens.store.outcomes import UpsertOutcome
 from agentlens.store.schema import ensure_schema
@@ -145,7 +146,7 @@ class Store:
         prior_end: datetime,
         agent_type: str | None,
         *,
-        min_sessions_for_trend: int = 5,
+        min_sessions_for_trend: int = DEFAULT_MIN_SESSIONS_FOR_TREND,
     ) -> tuple[AgentRollup, ...]:
         """Return one rollup per agent type present in the current window.
 
