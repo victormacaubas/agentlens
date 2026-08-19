@@ -228,7 +228,9 @@ reports/
 .agents/
 sample-data/
 .cursor/
-graphify-out/cost.json
+
+# Generated local code graph and caches; refreshed by the Graphify hooks.
+graphify-out/
 
 # MacOS
 .DS_Store
