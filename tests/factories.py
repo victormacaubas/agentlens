@@ -14,6 +14,13 @@ from agentlens.models.agent_definitions import (
 )
 from agentlens.models.facts import FactSession, FactToolEvent
 from agentlens.models.identity import NameSource, SessionIdentity, SessionKind, SourceRevision
+from agentlens.models.report_aggregates import (
+    AgentRollup,
+    MetricTotals,
+    PerSpawnAverages,
+    TrendStatus,
+    WeightedProportion,
+)
 from agentlens.models.session_facts import SessionFacts
 from agentlens.models.skill_signals import KnownState, SessionSkillSignal
 
@@ -200,6 +207,127 @@ def build_session_skill_signal(
         declared=declared,
         available=available,
         fired=fired,
+    )
+
+
+def build_metric_totals(
+    *,
+    n_turns: int = 1,
+    n_invocations: int = 1,
+    n_reads: int = 0,
+    n_edits: int = 0,
+    n_writes: int = 0,
+    n_bash: int = 0,
+    n_distinct_files: int = 0,
+    n_errors: int = 0,
+    n_denials: int = 0,
+    n_repeated_invocations: int = 0,
+    n_skills_fired: int = 0,
+    duration_ms: int = 1_000,
+    input_tokens: int = 100,
+    output_tokens: int = 50,
+    cache_read_tokens: int = 0,
+    cache_creation_tokens: int = 0,
+    unreadable_line_count: int = 0,
+) -> MetricTotals:
+    return MetricTotals(
+        n_turns=n_turns,
+        n_invocations=n_invocations,
+        n_reads=n_reads,
+        n_edits=n_edits,
+        n_writes=n_writes,
+        n_bash=n_bash,
+        n_distinct_files=n_distinct_files,
+        n_errors=n_errors,
+        n_denials=n_denials,
+        n_repeated_invocations=n_repeated_invocations,
+        n_skills_fired=n_skills_fired,
+        duration_ms=duration_ms,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read_tokens=cache_read_tokens,
+        cache_creation_tokens=cache_creation_tokens,
+        unreadable_line_count=unreadable_line_count,
+    )
+
+
+def build_per_spawn_averages(
+    *,
+    n_turns: float = 1.0,
+    n_invocations: float = 1.0,
+    n_reads: float = 0.0,
+    n_edits: float = 0.0,
+    n_writes: float = 0.0,
+    n_bash: float = 0.0,
+    n_distinct_files: float = 0.0,
+    n_errors: float = 0.0,
+    n_denials: float = 0.0,
+    n_repeated_invocations: float = 0.0,
+    n_skills_fired: float = 0.0,
+    duration_ms: float = 1_000.0,
+    input_tokens: float = 100.0,
+    output_tokens: float = 50.0,
+    cache_read_tokens: float = 0.0,
+    cache_creation_tokens: float = 0.0,
+    unreadable_line_count: float = 0.0,
+) -> PerSpawnAverages:
+    """Build a ``PerSpawnAverages``, the same shape used for a signed delta between two windows."""
+    return PerSpawnAverages(
+        n_turns=n_turns,
+        n_invocations=n_invocations,
+        n_reads=n_reads,
+        n_edits=n_edits,
+        n_writes=n_writes,
+        n_bash=n_bash,
+        n_distinct_files=n_distinct_files,
+        n_errors=n_errors,
+        n_denials=n_denials,
+        n_repeated_invocations=n_repeated_invocations,
+        n_skills_fired=n_skills_fired,
+        duration_ms=duration_ms,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read_tokens=cache_read_tokens,
+        cache_creation_tokens=cache_creation_tokens,
+        unreadable_line_count=unreadable_line_count,
+    )
+
+
+def build_weighted_proportion(
+    *,
+    current: float | None = 0.5,
+    prior: float | None = None,
+    delta: float | None = None,
+) -> WeightedProportion:
+    return WeightedProportion(current=current, prior=prior, delta=delta)
+
+
+def build_agent_rollup(
+    *,
+    agent_type: str = "implementer",
+    n_spawns: int = 1,
+    n_spawns_prior: int = 0,
+    trend_status: TrendStatus = TrendStatus.INSUFFICIENT_DATA,
+    totals: MetricTotals | None = None,
+    averages: PerSpawnAverages | None = None,
+    prior_averages: PerSpawnAverages | None = None,
+    average_deltas: PerSpawnAverages | None = None,
+    cache_read_proportion: WeightedProportion | None = None,
+) -> AgentRollup:
+    return AgentRollup(
+        agent_type=agent_type,
+        n_spawns=n_spawns,
+        n_spawns_prior=n_spawns_prior,
+        trend_status=trend_status,
+        totals=totals if totals is not None else build_metric_totals(),
+        averages=averages if averages is not None else build_per_spawn_averages(),
+        prior_averages=prior_averages,
+        average_deltas=average_deltas,
+        cache_read_proportion=(
+            cache_read_proportion
+            if cache_read_proportion is not None
+            else build_weighted_proportion()
+        ),
     )
 
 

@@ -1,12 +1,15 @@
 """The store: schema creation, the staleness rule, upsert atomicity, and reads."""
 
 import sqlite3
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from agentlens.errors import StoreError
 from agentlens.models.agent_definitions import DefinitionScope
+from agentlens.models.identity import SessionKind
+from agentlens.models.report_aggregates import AgentRollup, TrendStatus
 from agentlens.models.session_facts import SessionFacts
 from agentlens.models.skill_signals import SessionSkillSignal
 from agentlens.store import Store, UpsertOutcome
@@ -43,10 +46,11 @@ def _facts_for(
     content_hash: str = "content-hash-1",
     mtime_ns: int = 1_700_000_000_000_000_000,
     n_events: int = 1,
+    session_kind: SessionKind = SessionKind.SUBAGENT,
     skill_signals: tuple[SessionSkillSignal, ...] = (),
     **session_kwargs: object,
 ) -> SessionFacts:
-    identity = build_session_identity(session_id=session_id)
+    identity = build_session_identity(session_id=session_id, session_kind=session_kind)
     revision = build_source_revision(content_hash=content_hash, mtime_ns=mtime_ns)
     session = build_fact_session(
         identity=identity,
@@ -554,3 +558,400 @@ def test_agent_definition_catalog_is_equivalent_after_a_store_rebuild(tmp_path: 
         second_read = [store.read_agent_definition(d.agent_definition_id) for d in definitions]
 
     assert first_read == second_read == list(definitions)
+
+
+_WINDOW_START = datetime(2026, 1, 8, tzinfo=UTC)
+_WINDOW_END = datetime(2026, 1, 15, tzinfo=UTC)
+
+
+def test_read_spawns_in_window_includes_a_spawn_starting_at_the_lower_bound(
+    tmp_path: Path,
+) -> None:
+    with Store(tmp_path / "agentlens.db") as store:
+        store.upsert_session(_facts_for(session_id="session-lower", started_at=_WINDOW_START))
+        spawns = store.read_spawns_in_window(_WINDOW_START, _WINDOW_END, None)
+    assert [spawn.identity.session_id for spawn in spawns] == ["session-lower"]
+
+
+def test_read_spawns_in_window_excludes_a_spawn_starting_at_the_upper_bound(
+    tmp_path: Path,
+) -> None:
+    with Store(tmp_path / "agentlens.db") as store:
+        store.upsert_session(_facts_for(session_id="session-upper", started_at=_WINDOW_END))
+        spawns = store.read_spawns_in_window(_WINDOW_START, _WINDOW_END, None)
+    assert spawns == ()
+
+
+def test_read_spawns_in_window_returns_four_same_type_spawns_from_different_parents(
+    tmp_path: Path,
+) -> None:
+    """Spawn is the grain: four spawns from four parents are four rows, never deduped."""
+    with Store(tmp_path / "agentlens.db") as store:
+        for index in range(4):
+            store.upsert_session(
+                _facts_for(
+                    session_id=f"session-{index}",
+                    started_at=_WINDOW_START + timedelta(hours=index),
+                    agent_type="implementer",
+                    parent_session_id=f"parent-{index}",
+                )
+            )
+        spawns = store.read_spawns_in_window(_WINDOW_START, _WINDOW_END, None)
+    assert len(spawns) == 4
+    assert {spawn.parent_session_id for spawn in spawns} == {f"parent-{i}" for i in range(4)}
+
+
+def test_read_spawns_in_window_excludes_main_session_rows(tmp_path: Path) -> None:
+    with Store(tmp_path / "agentlens.db") as store:
+        store.upsert_session(
+            _facts_for(
+                session_id="session-main", session_kind=SessionKind.MAIN, started_at=_WINDOW_START
+            )
+        )
+        store.upsert_session(_facts_for(session_id="session-subagent", started_at=_WINDOW_START))
+        spawns = store.read_spawns_in_window(_WINDOW_START, _WINDOW_END, None)
+    assert [spawn.identity.session_id for spawn in spawns] == ["session-subagent"]
+
+
+def test_read_spawns_in_window_round_trips_a_spawn_with_unknown_context(tmp_path: Path) -> None:
+    """A spawn whose definition and parent could not be resolved still reads back."""
+    with Store(tmp_path / "agentlens.db") as store:
+        store.upsert_session(
+            _facts_for(
+                session_id="session-unknown-context",
+                started_at=_WINDOW_START,
+                agent_definition_id=None,
+                parent_session_id=None,
+            )
+        )
+        spawns = store.read_spawns_in_window(_WINDOW_START, _WINDOW_END, None)
+    assert len(spawns) == 1
+    assert spawns[0].agent_definition_id is None
+    assert spawns[0].parent_session_id is None
+
+
+def test_read_spawns_in_window_returns_empty_tuple_for_zero_results(tmp_path: Path) -> None:
+    with Store(tmp_path / "agentlens.db") as store:
+        assert store.read_spawns_in_window(_WINDOW_START, _WINDOW_END, None) == ()
+
+
+def test_read_spawns_in_window_filters_to_the_given_agent_type(tmp_path: Path) -> None:
+    with Store(tmp_path / "agentlens.db") as store:
+        store.upsert_session(
+            _facts_for(
+                session_id="session-implementer",
+                started_at=_WINDOW_START,
+                agent_type="implementer",
+            )
+        )
+        store.upsert_session(
+            _facts_for(
+                session_id="session-pathfinder", started_at=_WINDOW_START, agent_type="pathfinder"
+            )
+        )
+        spawns = store.read_spawns_in_window(_WINDOW_START, _WINDOW_END, "pathfinder")
+    assert [spawn.agent_type for spawn in spawns] == ["pathfinder"]
+
+
+def test_read_spawns_in_window_orders_by_started_at_then_session_id(tmp_path: Path) -> None:
+    with Store(tmp_path / "agentlens.db") as store:
+        store.upsert_session(
+            _facts_for(session_id="session-b", started_at=_WINDOW_START + timedelta(hours=1))
+        )
+        store.upsert_session(_facts_for(session_id="session-z", started_at=_WINDOW_START))
+        store.upsert_session(_facts_for(session_id="session-a", started_at=_WINDOW_START))
+        spawns = store.read_spawns_in_window(_WINDOW_START, _WINDOW_END, None)
+    assert [spawn.identity.session_id for spawn in spawns] == [
+        "session-a",
+        "session-z",
+        "session-b",
+    ]
+
+
+_CURRENT_START = datetime(2026, 2, 1, tzinfo=UTC)
+_CURRENT_END = datetime(2026, 2, 8, tzinfo=UTC)
+_PRIOR_START = datetime(2026, 1, 25, tzinfo=UTC)
+_PRIOR_END = _CURRENT_START
+
+
+def _rollup_for(rollups: tuple[AgentRollup, ...], agent_type: str) -> AgentRollup:
+    for rollup in rollups:
+        if rollup.agent_type == agent_type:
+            return rollup
+    raise AssertionError(f"no rollup for agent type {agent_type!r}")
+
+
+def test_read_agent_rollups_returns_empty_tuple_when_the_current_window_has_no_spawns(
+    tmp_path: Path,
+) -> None:
+    with Store(tmp_path / "agentlens.db") as store:
+        store.upsert_session(_facts_for(session_id="session-prior-only", started_at=_PRIOR_START))
+        rollups = store.read_agent_rollups(
+            _CURRENT_START, _CURRENT_END, _PRIOR_START, _PRIOR_END, None
+        )
+    assert rollups == ()
+
+
+def test_read_agent_rollups_excludes_an_agent_type_present_only_in_the_prior_window(
+    tmp_path: Path,
+) -> None:
+    with Store(tmp_path / "agentlens.db") as store:
+        store.upsert_session(
+            _facts_for(
+                session_id="session-prior-only",
+                started_at=_PRIOR_START,
+                agent_type="prior-only-agent",
+            )
+        )
+        store.upsert_session(
+            _facts_for(
+                session_id="session-current",
+                started_at=_CURRENT_START,
+                agent_type="current-agent",
+            )
+        )
+        rollups = store.read_agent_rollups(
+            _CURRENT_START, _CURRENT_END, _PRIOR_START, _PRIOR_END, None
+        )
+    assert {rollup.agent_type for rollup in rollups} == {"current-agent"}
+
+
+def test_read_agent_rollups_reports_no_prior_comparison_for_a_current_only_agent(
+    tmp_path: Path,
+) -> None:
+    with Store(tmp_path / "agentlens.db") as store:
+        store.upsert_session(
+            _facts_for(
+                session_id="session-current-only", started_at=_CURRENT_START, agent_type="scout"
+            )
+        )
+        rollups = store.read_agent_rollups(
+            _CURRENT_START, _CURRENT_END, _PRIOR_START, _PRIOR_END, None
+        )
+    rollup = _rollup_for(rollups, "scout")
+    assert rollup.n_spawns == 1
+    assert rollup.n_spawns_prior == 0
+    assert rollup.trend_status is TrendStatus.INSUFFICIENT_DATA
+    assert rollup.prior_averages is None
+    assert rollup.average_deltas is None
+    assert rollup.cache_read_proportion.prior is None
+
+
+def test_read_agent_rollups_shows_an_available_prior_average_below_threshold_without_a_delta(
+    tmp_path: Path,
+) -> None:
+    """Prior window below the trend threshold still surfaces its raw average, never a direction."""
+    with Store(tmp_path / "agentlens.db") as store:
+        for index in range(5):
+            store.upsert_session(
+                _facts_for(
+                    session_id=f"session-current-{index}",
+                    started_at=_CURRENT_START + timedelta(hours=index),
+                    agent_type="scout",
+                    n_turns=4,
+                )
+            )
+        for index in range(2):
+            store.upsert_session(
+                _facts_for(
+                    session_id=f"session-prior-{index}",
+                    started_at=_PRIOR_START + timedelta(hours=index),
+                    agent_type="scout",
+                    n_turns=8,
+                )
+            )
+        rollups = store.read_agent_rollups(
+            _CURRENT_START, _CURRENT_END, _PRIOR_START, _PRIOR_END, None, min_sessions_for_trend=5
+        )
+    rollup = _rollup_for(rollups, "scout")
+    assert rollup.n_spawns == 5
+    assert rollup.n_spawns_prior == 2
+    assert rollup.trend_status is TrendStatus.INSUFFICIENT_DATA
+    assert rollup.prior_averages is not None
+    assert rollup.prior_averages.n_turns == pytest.approx(8.0)
+    assert rollup.average_deltas is None
+
+
+def test_read_agent_rollups_signs_the_delta_when_both_windows_meet_the_threshold(
+    tmp_path: Path,
+) -> None:
+    with Store(tmp_path / "agentlens.db") as store:
+        for index in range(5):
+            store.upsert_session(
+                _facts_for(
+                    session_id=f"session-current-{index}",
+                    started_at=_CURRENT_START + timedelta(hours=index),
+                    agent_type="scout",
+                    n_turns=6,
+                )
+            )
+        for index in range(5):
+            store.upsert_session(
+                _facts_for(
+                    session_id=f"session-prior-{index}",
+                    started_at=_PRIOR_START + timedelta(hours=index),
+                    agent_type="scout",
+                    n_turns=4,
+                )
+            )
+        rollups = store.read_agent_rollups(
+            _CURRENT_START, _CURRENT_END, _PRIOR_START, _PRIOR_END, None, min_sessions_for_trend=5
+        )
+    rollup = _rollup_for(rollups, "scout")
+    assert rollup.trend_status is TrendStatus.COMPARABLE
+    assert rollup.averages.n_turns == pytest.approx(6.0)
+    assert rollup.prior_averages is not None
+    assert rollup.prior_averages.n_turns == pytest.approx(4.0)
+    assert rollup.average_deltas is not None
+    assert rollup.average_deltas.n_turns == pytest.approx(2.0)
+
+
+def test_read_agent_rollups_totals_never_drive_the_directional_trend(tmp_path: Path) -> None:
+    """A population that grew, with identical per-spawn behavior, reports a zero average delta."""
+    with Store(tmp_path / "agentlens.db") as store:
+        for index in range(5):
+            store.upsert_session(
+                _facts_for(
+                    session_id=f"session-current-{index}",
+                    started_at=_CURRENT_START + timedelta(hours=index),
+                    agent_type="scout",
+                    n_turns=3,
+                    duration_ms=1_000,
+                )
+            )
+        for index in range(10):
+            store.upsert_session(
+                _facts_for(
+                    session_id=f"session-prior-{index}",
+                    started_at=_PRIOR_START + timedelta(hours=index),
+                    agent_type="scout",
+                    n_turns=3,
+                    duration_ms=1_000,
+                )
+            )
+        rollups = store.read_agent_rollups(
+            _CURRENT_START, _CURRENT_END, _PRIOR_START, _PRIOR_END, None, min_sessions_for_trend=5
+        )
+    rollup = _rollup_for(rollups, "scout")
+    assert rollup.trend_status is TrendStatus.COMPARABLE
+    assert rollup.totals.n_turns == 15
+    assert rollup.prior_averages is not None
+    assert rollup.prior_averages.n_turns == pytest.approx(3.0)
+    assert rollup.average_deltas is not None
+    assert rollup.average_deltas.n_turns == pytest.approx(0.0)
+    assert rollup.average_deltas.duration_ms == pytest.approx(0.0)
+
+
+def test_read_agent_rollups_computes_the_cache_read_proportion_from_summed_totals(
+    tmp_path: Path,
+) -> None:
+    """The proportion is weighted by volume, never the average of each spawn's own percentage."""
+    with Store(tmp_path / "agentlens.db") as store:
+        store.upsert_session(
+            _facts_for(
+                session_id="session-large",
+                started_at=_CURRENT_START,
+                agent_type="scout",
+                input_tokens=100,
+                cache_read_tokens=900,
+                cache_creation_tokens=0,
+            )
+        )
+        store.upsert_session(
+            _facts_for(
+                session_id="session-small",
+                started_at=_CURRENT_START + timedelta(hours=1),
+                agent_type="scout",
+                input_tokens=90,
+                cache_read_tokens=10,
+                cache_creation_tokens=0,
+            )
+        )
+        rollups = store.read_agent_rollups(
+            _CURRENT_START, _CURRENT_END, _PRIOR_START, _PRIOR_END, None
+        )
+    rollup = _rollup_for(rollups, "scout")
+    naive_average_of_percentages = (0.9 + 0.1) / 2
+    weighted_proportion = 910 / 1_100
+    assert rollup.cache_read_proportion.current == pytest.approx(weighted_proportion)
+    assert rollup.cache_read_proportion.current != pytest.approx(naive_average_of_percentages)
+
+
+def test_read_agent_rollups_leaves_the_cache_read_proportion_absent_when_the_denominator_is_zero(
+    tmp_path: Path,
+) -> None:
+    with Store(tmp_path / "agentlens.db") as store:
+        store.upsert_session(
+            _facts_for(
+                session_id="session-no-tokens",
+                started_at=_CURRENT_START,
+                agent_type="scout",
+                input_tokens=0,
+                cache_read_tokens=0,
+                cache_creation_tokens=0,
+            )
+        )
+        rollups = store.read_agent_rollups(
+            _CURRENT_START, _CURRENT_END, _PRIOR_START, _PRIOR_END, None
+        )
+    rollup = _rollup_for(rollups, "scout")
+    assert rollup.cache_read_proportion.current is None
+
+
+def test_read_agent_rollups_are_ordered_by_agent_type(tmp_path: Path) -> None:
+    with Store(tmp_path / "agentlens.db") as store:
+        store.upsert_session(
+            _facts_for(session_id="session-z", started_at=_CURRENT_START, agent_type="zebra")
+        )
+        store.upsert_session(
+            _facts_for(session_id="session-a", started_at=_CURRENT_START, agent_type="alpaca")
+        )
+        rollups = store.read_agent_rollups(
+            _CURRENT_START, _CURRENT_END, _PRIOR_START, _PRIOR_END, None
+        )
+    assert [rollup.agent_type for rollup in rollups] == ["alpaca", "zebra"]
+
+
+def test_read_agent_rollups_filters_to_the_given_agent_type(tmp_path: Path) -> None:
+    with Store(tmp_path / "agentlens.db") as store:
+        store.upsert_session(
+            _facts_for(session_id="session-scout", started_at=_CURRENT_START, agent_type="scout")
+        )
+        store.upsert_session(
+            _facts_for(
+                session_id="session-implementer",
+                started_at=_CURRENT_START,
+                agent_type="implementer",
+            )
+        )
+        rollups = store.read_agent_rollups(
+            _CURRENT_START, _CURRENT_END, _PRIOR_START, _PRIOR_END, "scout"
+        )
+    assert [rollup.agent_type for rollup in rollups] == ["scout"]
+
+
+def test_read_agent_rollups_uses_a_default_trend_threshold_of_five(tmp_path: Path) -> None:
+    """Four spawns in each window is below the unstated default, so the trend stays insufficient."""
+    with Store(tmp_path / "agentlens.db") as store:
+        for index in range(4):
+            store.upsert_session(
+                _facts_for(
+                    session_id=f"session-current-{index}",
+                    started_at=_CURRENT_START + timedelta(hours=index),
+                    agent_type="scout",
+                )
+            )
+            store.upsert_session(
+                _facts_for(
+                    session_id=f"session-prior-{index}",
+                    started_at=_PRIOR_START + timedelta(hours=index),
+                    agent_type="scout",
+                )
+            )
+        rollups = store.read_agent_rollups(
+            _CURRENT_START, _CURRENT_END, _PRIOR_START, _PRIOR_END, None
+        )
+    rollup = _rollup_for(rollups, "scout")
+    assert rollup.n_spawns == 4
+    assert rollup.n_spawns_prior == 4
+    assert rollup.trend_status is TrendStatus.INSUFFICIENT_DATA

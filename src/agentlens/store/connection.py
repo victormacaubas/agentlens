@@ -1,10 +1,13 @@
 import sqlite3
 from collections.abc import Sequence
+from datetime import datetime
 from pathlib import Path
 from types import TracebackType
 
 from agentlens.errors import StoreError
 from agentlens.models.agent_definitions import AgentDefinition
+from agentlens.models.facts import FactSession
+from agentlens.models.report_aggregates import AgentRollup
 from agentlens.models.session_facts import SessionFacts
 from agentlens.store import operations
 from agentlens.store.outcomes import UpsertOutcome
@@ -116,6 +119,59 @@ class Store:
             return operations.read_agent_definition(connection, agent_definition_id)
         except sqlite3.Error as exc:
             raise StoreError(f"could not read agent definition {agent_definition_id!r}") from exc
+
+    def read_spawns_in_window(
+        self, start: datetime, end: datetime, agent_type: str | None
+    ) -> tuple[FactSession, ...]:
+        """Return every subagent spawn whose ``started_at`` falls in ``[start, end)``.
+
+        ``agent_type`` narrows the result to one agent type; ``None`` returns
+        every subagent spawn in the window. Main-session rows never qualify.
+
+        Raises:
+            ~agentlens.errors.StoreError: The read failed.
+        """
+        connection = self._require_connection()
+        try:
+            return operations.read_spawns_in_window(connection, start, end, agent_type)
+        except sqlite3.Error as exc:
+            raise StoreError(f"could not read spawns in window [{start}, {end})") from exc
+
+    def read_agent_rollups(
+        self,
+        current_start: datetime,
+        current_end: datetime,
+        prior_start: datetime,
+        prior_end: datetime,
+        agent_type: str | None,
+        *,
+        min_sessions_for_trend: int = 5,
+    ) -> tuple[AgentRollup, ...]:
+        """Return one rollup per agent type present in the current window.
+
+        Each rollup carries the current window's totals and per-spawn
+        averages, plus the prior window's comparison when both windows meet
+        ``min_sessions_for_trend``. An agent type with zero current-window
+        spawns never gets a rollup, even if it has prior-window spawns.
+
+        Raises:
+            ~agentlens.errors.StoreError: The read failed.
+        """
+        connection = self._require_connection()
+        try:
+            return operations.read_agent_rollups(
+                connection,
+                current_start,
+                current_end,
+                prior_start,
+                prior_end,
+                agent_type,
+                min_sessions_for_trend=min_sessions_for_trend,
+            )
+        except sqlite3.Error as exc:
+            raise StoreError(
+                f"could not read agent rollups for window [{current_start}, {current_end})"
+            ) from exc
 
     def _require_connection(self) -> sqlite3.Connection:
         if self._connection is None:

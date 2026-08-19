@@ -53,7 +53,12 @@ _FACT_SESSION_VALUE_EXTRACTORS: Mapping[str, Callable[[FactSession], object]] = 
     "agent_id": lambda session: session.agent_id,
     "agent_definition_id": lambda session: session.agent_definition_id,
     "parent_session_id": lambda session: session.parent_session_id,
-    "started_at": lambda session: session.started_at.isoformat(),
+    # Forcing microseconds keeps every stored value the same width, which a
+    # report window's lexicographic range comparison depends on: Python's
+    # isoformat() otherwise drops the fractional part whenever a value's
+    # microsecond happens to be zero, which would put "on the boundary"
+    # timestamps out of order relative to ones that carry a fraction.
+    "started_at": lambda session: session.started_at.isoformat(timespec="microseconds"),
     "task_prompt_len": lambda session: session.task_prompt_len,
     "n_skills_fired": lambda session: session.n_skills_fired,
     "derivation_fingerprint": lambda session: session.derivation_fingerprint,
