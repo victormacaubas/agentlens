@@ -13,6 +13,40 @@ from agentlens.errors import MalformedSourceError
 JsonRecord = dict[str, object]
 
 _AGENT_ID_RECORD_KEY = "agentId"
+_ATTRIBUTION_AGENT_RECORD_KEY = "attributionAgent"
+_CWD_RECORD_KEY = "cwd"
+_ASSISTANT_RECORD_TYPE = "assistant"
+_TOOL_USE_BLOCK_TYPE = "tool_use"
+_SPAWNING_TOOL_NAMES = frozenset({"Agent", "Task"})
+_SUBAGENT_TYPE_INPUT_KEY = "subagent_type"
+
+
+def resolve_cwd(records: Sequence[JsonRecord]) -> str | None:
+    """Return the real, unencoded project root carried by the transcript's own ``cwd``.
+
+    ``cwd`` sits at a record's root, a sibling of ``message``, and is expected
+    to be the same value on every record in one transcript since it names the
+    project the spawn ran in. Uses the first record that carries a non-empty
+    string; ``None`` when no record does, which means no project scope can be
+    resolved for this spawn at all.
+    """
+    for record in records:
+        value = record.get(_CWD_RECORD_KEY)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def earliest_timestamp(records: Sequence[JsonRecord]) -> datetime:
+    """Return the earliest usable root-level ``timestamp`` carried by ``records``.
+
+    Raises:
+        MalformedSourceError: No record carries a usable ``timestamp``.
+    """
+    timestamps = [parse_timestamp(record) for record in records if "timestamp" in record]
+    if not timestamps:
+        raise MalformedSourceError("transcript has no record with a usable timestamp")
+    return min(timestamps)
 
 
 def resolve_agent_id(records: Sequence[JsonRecord], *, fallback: str) -> str:
@@ -27,6 +61,53 @@ def resolve_agent_id(records: Sequence[JsonRecord], *, fallback: str) -> str:
         if isinstance(agent_id, str):
             return agent_id
     return fallback
+
+
+def resolve_attribution_agent_types(records: Sequence[JsonRecord]) -> frozenset[str]:
+    """Return the distinct ``attributionAgent`` values carried by assistant records.
+
+    ``attributionAgent`` sits at a record's root, a sibling of ``message``,
+    not inside it. Records missing the key contribute nothing, which is the
+    normal case for the rare stub records that lack every attribution field.
+    """
+    values: set[str] = set()
+    for record in records:
+        if record.get("type") != _ASSISTANT_RECORD_TYPE:
+            continue
+        value = record.get(_ATTRIBUTION_AGENT_RECORD_KEY)
+        if isinstance(value, str) and value:
+            values.add(value)
+    return frozenset(values)
+
+
+def find_spawning_invocation_subagent_type(
+    records: Sequence[JsonRecord], *, tool_use_id: str
+) -> str | None:
+    """Return the ``subagent_type`` of the spawning tool_use block matching ``tool_use_id``.
+
+    Matches strictly on ``type == "tool_use"`` and ``id == tool_use_id`` inside
+    an assistant record's ``message.content``, recognizing either tool name
+    Claude Code has written for a subagent spawn: ``Agent``, the name written
+    today, and ``Task``, the historical name a spec or an older archive can
+    still carry. A substring search over the raw file is deliberately not
+    used: unrelated record types echo a tool-use id inside other payloads, so
+    a substring match would produce false positives.
+    """
+    for record in records:
+        if record.get("type") != _ASSISTANT_RECORD_TYPE:
+            continue
+        for block in content_blocks(record.get("message")):
+            if block.get("type") != _TOOL_USE_BLOCK_TYPE or block.get("id") != tool_use_id:
+                continue
+            if block.get("name") not in _SPAWNING_TOOL_NAMES:
+                continue
+            tool_input = block.get("input")
+            if not isinstance(tool_input, Mapping):
+                continue
+            subagent_type = tool_input.get(_SUBAGENT_TYPE_INPUT_KEY)
+            if isinstance(subagent_type, str) and subagent_type:
+                return subagent_type
+    return None
 
 
 def parse_timestamp(record: Mapping[str, object]) -> datetime:

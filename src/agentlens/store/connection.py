@@ -1,4 +1,5 @@
 import sqlite3
+from collections.abc import Sequence
 from pathlib import Path
 from types import TracebackType
 
@@ -76,6 +77,23 @@ class Store:
             return operations.read_session(connection, session_id)
         except sqlite3.Error as exc:
             raise StoreError(f"could not read session {session_id!r}") from exc
+
+    def upsert_batch(
+        self, *, definitions: Sequence[AgentDefinition], facts: Sequence[SessionFacts]
+    ) -> tuple[UpsertOutcome, ...]:
+        """Apply every definition and session as one all-or-nothing transaction.
+
+        Raises:
+            ~agentlens.errors.StoreError: The batch could not be written. No
+                row from any definition or session in the batch is left
+                partially written; the store is exactly as it was before this
+                call.
+        """
+        connection = self._require_connection()
+        try:
+            return operations.upsert_batch(connection, definitions=definitions, facts=facts)
+        except sqlite3.Error as exc:
+            raise StoreError(f"could not write batch of {len(facts)} session(s)") from exc
 
     def upsert_agent_definition(self, definition: AgentDefinition) -> None:
         """Catalog ``definition`` if its content-addressed identity is not already stored.

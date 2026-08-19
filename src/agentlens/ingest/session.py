@@ -21,6 +21,7 @@ from agentlens.ingest.derivation import (
     DerivationInput,
     agent_definition_derivation_input,
     derive_session_derivation,
+    name_resolution_derivation_input,
     sidecar_derivation_input,
     skill_inventory_derivation_input,
     transcript_derivation_input,
@@ -60,6 +61,8 @@ def build_fact_session(
     tool_events: Sequence[FactToolEvent],
     sidecar: Sidecar | None,
     name_resolution: NameResolution,
+    attribution_agent_types: frozenset[str],
+    parent_evidence_revision: SourceRevision | None,
     unreadable_line_count: int,
     skill_inventory: Sequence[SkillInventoryEntry],
 ) -> tuple[FactSession, tuple[SessionSkillSignal, ...]]:
@@ -92,6 +95,10 @@ def build_fact_session(
             sidecar=sidecar,
             agent_definition=agent_definition,
             skill_inventory=skill_inventory,
+            bridge_skill_names=frozenset(signal.skill_name for signal in skill_signals),
+            name_resolution=name_resolution,
+            attribution_agent_types=attribution_agent_types,
+            parent_evidence_revision=parent_evidence_revision,
         )
     )
 
@@ -139,12 +146,23 @@ def _derivation_inputs(
     sidecar: Sidecar | None,
     agent_definition: AgentDefinition | None,
     skill_inventory: Sequence[SkillInventoryEntry],
+    bridge_skill_names: frozenset[str],
+    name_resolution: NameResolution,
+    attribution_agent_types: frozenset[str],
+    parent_evidence_revision: SourceRevision | None,
 ) -> list[DerivationInput]:
     inputs = [transcript_derivation_input(revision)]
     if sidecar is not None:
         inputs.append(sidecar_derivation_input(sidecar))
     inputs.append(agent_definition_derivation_input(agent_definition))
-    inputs.append(skill_inventory_derivation_input(skill_inventory))
+    inputs.append(skill_inventory_derivation_input(skill_inventory, skill_names=bridge_skill_names))
+    inputs.append(
+        name_resolution_derivation_input(
+            name_resolution,
+            attribution_agent_types=attribution_agent_types,
+            parent_revision=parent_evidence_revision,
+        )
+    )
     return inputs
 
 

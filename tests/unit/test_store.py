@@ -403,6 +403,81 @@ def test_an_internally_inconsistent_snapshot_writes_nothing(tmp_path: Path) -> N
         assert _count_rows_for_session(db_path, "fact_tool_event", "session-a") == 3
 
 
+def test_batch_upserts_definitions_and_sessions_together(tmp_path: Path) -> None:
+    db_path = tmp_path / "agentlens.db"
+    definition = build_agent_definition(config=build_agent_definition_config(name="implementer"))
+    facts = (_facts_for(session_id="session-a"), _facts_for(session_id="session-b"))
+    with Store(db_path) as store:
+        outcomes = store.upsert_batch(definitions=(definition,), facts=facts)
+    assert outcomes == (UpsertOutcome.REPLACED, UpsertOutcome.REPLACED)
+    assert _count_rows(db_path, "dim_agent") == 1
+    assert _count_rows(db_path, "fact_session") == 2
+
+
+def test_four_same_type_spawns_in_one_batch_remain_four_distinct_rows(tmp_path: Path) -> None:
+    """The batch grain is the spawn: four ``implementer`` spawns are four rows, never one."""
+    db_path = tmp_path / "agentlens.db"
+    facts = tuple(
+        _facts_for(session_id=f"session-{index}", agent_type="implementer") for index in range(4)
+    )
+    with Store(db_path) as store:
+        outcomes = store.upsert_batch(definitions=(), facts=facts)
+    assert outcomes == (UpsertOutcome.REPLACED,) * 4
+    assert _count_rows(db_path, "fact_session") == 4
+
+
+def test_reingesting_the_same_batch_does_not_duplicate_rows(tmp_path: Path) -> None:
+    db_path = tmp_path / "agentlens.db"
+    facts = (_facts_for(session_id="session-a"), _facts_for(session_id="session-b"))
+    with Store(db_path) as store:
+        store.upsert_batch(definitions=(), facts=facts)
+        outcomes = store.upsert_batch(definitions=(), facts=facts)
+    assert outcomes == (UpsertOutcome.SKIPPED_IDENTICAL, UpsertOutcome.SKIPPED_IDENTICAL)
+    assert _count_rows(db_path, "fact_session") == 2
+
+
+def test_a_mid_batch_database_failure_writes_nothing_from_that_batch(tmp_path: Path) -> None:
+    db_path = tmp_path / "agentlens.db"
+    good = _facts_for(session_id="session-a")
+    identity = build_session_identity(session_id="session-b")
+    revision = build_source_revision(content_hash="hash-corrupt")
+    corrupt_session = build_fact_session(identity=identity, revision=revision)
+    duplicated_events = (
+        build_fact_tool_event(session_id="session-b", ordinal=0),
+        build_fact_tool_event(session_id="session-b", ordinal=0),
+    )
+    corrupt = build_session_facts(session=corrupt_session, tool_events=duplicated_events)
+
+    with Store(db_path) as store, pytest.raises(StoreError):
+        store.upsert_batch(definitions=(), facts=(good, corrupt))
+
+    assert _count_rows(db_path, "fact_session") == 0
+    assert _count_rows(db_path, "fact_tool_event") == 0
+
+
+def test_a_later_failing_batch_leaves_an_earlier_successful_batchs_rows_untouched(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "agentlens.db"
+    with Store(db_path) as store:
+        store.upsert_batch(definitions=(), facts=(_facts_for(session_id="session-a"),))
+
+        identity = build_session_identity(session_id="session-b")
+        revision = build_source_revision(content_hash="hash-corrupt")
+        corrupt_session = build_fact_session(identity=identity, revision=revision)
+        duplicated_events = (
+            build_fact_tool_event(session_id="session-b", ordinal=0),
+            build_fact_tool_event(session_id="session-b", ordinal=0),
+        )
+        corrupt = build_session_facts(session=corrupt_session, tool_events=duplicated_events)
+        with pytest.raises(StoreError):
+            store.upsert_batch(definitions=(), facts=(corrupt,))
+
+        assert _count_rows(db_path, "fact_session") == 1
+        assert store.read_session("session-a") is not None
+        assert store.read_session("session-b") is None
+
+
 def test_read_agent_definition_returns_none_for_an_unknown_identity(tmp_path: Path) -> None:
     with Store(tmp_path / "agentlens.db") as store:
         assert store.read_agent_definition("does-not-exist") is None

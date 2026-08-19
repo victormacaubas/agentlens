@@ -15,6 +15,7 @@ only "the transcript file's content hash."
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from agentlens.ingest.name_resolution import NameResolution
 from agentlens.ingest.sidecar import Sidecar
 from agentlens.ingest.skill_inventory import SkillInventoryEntry
 from agentlens.models.agent_definitions import AgentDefinition
@@ -23,6 +24,8 @@ from agentlens.utils.hashing import canonical_json_fingerprint
 
 _NO_BOUND_DEFINITION_MTIME_NS = 0
 _NO_SKILL_INVENTORY_MTIME_NS = 0
+_NO_PARENT_EVIDENCE_MTIME_NS = 0
+_NO_PARENT_EVIDENCE_MARKER = ("name_resolution_parent", None)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -84,23 +87,66 @@ def agent_definition_derivation_input(agent_definition: AgentDefinition | None) 
     )
 
 
-def skill_inventory_derivation_input(entries: Sequence[SkillInventoryEntry]) -> DerivationInput:
-    """Return the discovered skill inventory as a derivation input.
+def skill_inventory_derivation_input(
+    entries: Sequence[SkillInventoryEntry], *, skill_names: frozenset[str]
+) -> DerivationInput:
+    """Return the discovered skill inventory as a derivation input, scoped to ``skill_names``.
 
-    Every entry can affect the bridge for any name it happens to share, so
-    the whole scanned inventory contributes to the fingerprint, not only the
-    names a spawn declares or fires.
+    Only entries whose ``skill_name`` is in ``skill_names`` contribute, so a
+    spawn's derivation identity depends on the skills its own bridge rows
+    name — declared or fired — and not on the rest of the machine's
+    installed skills. Editing, adding, or removing an entry outside that set
+    leaves the fingerprint unchanged.
     """
+    filtered = [entry for entry in entries if entry.skill_name in skill_names]
     ordered = sorted(
-        (entry.skill_name, entry.revision.size, entry.revision.content_hash) for entry in entries
+        (entry.skill_name, entry.revision.size, entry.revision.content_hash) for entry in filtered
     )
     observed_mtime_ns = (
-        max(entry.revision.mtime_ns for entry in entries)
-        if entries
+        max(entry.revision.mtime_ns for entry in filtered)
+        if filtered
         else _NO_SKILL_INVENTORY_MTIME_NS
     )
     return DerivationInput(
         fingerprint_value=("skill_inventory", ordered), observed_mtime_ns=observed_mtime_ns
+    )
+
+
+def name_resolution_derivation_input(
+    name_resolution: NameResolution,
+    *,
+    attribution_agent_types: frozenset[str],
+    parent_revision: SourceRevision | None,
+) -> DerivationInput:
+    """Return the resolved name and its evidence as a derivation input.
+
+    ``parent_revision`` is the parent transcript's own revision, present only
+    when the ordered name-resolution chain actually opened it. When no parent
+    was read, a fixed marker distinct from any real revision is contributed
+    instead — the same technique :func:`agent_definition_derivation_input`
+    uses for an unbound definition — so a spawn that later starts (or stops)
+    consulting a parent is detected as changed even though nothing about the
+    spawn's own transcript or sidecar did.
+    """
+    if parent_revision is None:
+        parent_component: tuple[object, ...] = _NO_PARENT_EVIDENCE_MARKER
+        observed_mtime_ns = _NO_PARENT_EVIDENCE_MTIME_NS
+    else:
+        parent_component = (
+            "name_resolution_parent",
+            parent_revision.size,
+            parent_revision.content_hash,
+        )
+        observed_mtime_ns = parent_revision.mtime_ns
+    return DerivationInput(
+        fingerprint_value=(
+            "name_resolution",
+            name_resolution.agent_type,
+            name_resolution.name_source.value,
+            sorted(attribution_agent_types),
+            parent_component,
+        ),
+        observed_mtime_ns=observed_mtime_ns,
     )
 
 

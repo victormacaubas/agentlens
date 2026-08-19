@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Literal
 
 from agentlens.ingest.agent_definitions import content_addressed_definition_id
+from agentlens.ingest.context import SubagentContextCache
 from agentlens.ingest.derivation import derive_session_derivation, transcript_derivation_input
 from agentlens.models.agent_definitions import (
     AgentDefinition,
@@ -19,6 +20,18 @@ from agentlens.models.skill_signals import KnownState, SessionSkillSignal
 DEFAULT_AGENT_ID = "agent-0000000000000000000000000000000000"
 DEFAULT_PARENT_SESSION_ID = "parent-session-1111111111111111111111"
 DEFAULT_TIMESTAMP = "2026-01-01T00:00:00.000Z"
+_NO_SUCH_CLAUDE_ROOT = Path("/no-such-claude-root-for-tests")
+
+
+def build_context_cache(claude_root: Path | None = None) -> SubagentContextCache:
+    """A ``SubagentContextCache`` rooted at ``claude_root``, or nowhere at all.
+
+    Defaults to a root that never exists on disk, which every discovery
+    function treats the same as an empty directory: no agent definitions, no
+    skills. Callers that only care about parsing succeeding, not about
+    definition binding or skill signals, can pass this without arguments.
+    """
+    return SubagentContextCache(claude_root if claude_root is not None else _NO_SUCH_CLAUDE_ROOT)
 
 
 def build_session_identity(
@@ -198,9 +211,15 @@ def build_root_fields(
     agent_id: str = DEFAULT_AGENT_ID,
     parent_session_id: str = DEFAULT_PARENT_SESSION_ID,
     timestamp: str = DEFAULT_TIMESTAMP,
+    cwd: str | None = None,
 ) -> dict[str, object]:
-    """The record-root keys every transcript line carries, regardless of type."""
-    return {
+    """The record-root keys every transcript line carries, regardless of type.
+
+    ``cwd`` models the real project root a spawn's transcript carries at its
+    own root, a sibling of ``message``. Omitted entirely when not supplied,
+    matching the observed shape where a field is absent rather than null.
+    """
+    fields: dict[str, object] = {
         "type": record_type,
         "uuid": uuid,
         "parentUuid": parent_uuid,
@@ -208,6 +227,9 @@ def build_root_fields(
         "agentId": agent_id,
         "timestamp": timestamp,
     }
+    if cwd is not None:
+        fields["cwd"] = cwd
+    return fields
 
 
 def build_tool_use_block(
@@ -222,6 +244,36 @@ def build_tool_use_block(
         "name": name,
         "input": dict(input) if input is not None else {"file_path": "/workspace/example.txt"},
     }
+
+
+def build_agent_tool_use_block(
+    *,
+    tool_use_id: str = "toolu_spawn",
+    name: str = "Agent",
+    subagent_type: str = "pathfinder",
+    description: str = "Explore the codebase",
+    prompt: str = "Find where sessions are parsed",
+    run_in_background: bool | None = None,
+    model: str | None = None,
+) -> dict[str, object]:
+    """A subagent-spawning ``tool_use`` block, as it sits in a parent's own transcript.
+
+    ``name`` accepts either tool name Claude Code has written for this
+    invocation: ``Agent``, the current name, or ``Task``, the historical one
+    an older archive can still carry. ``run_in_background`` and ``model`` are
+    omitted entirely when not supplied, matching the observed shape where an
+    optional input key is absent rather than null.
+    """
+    input_fields: dict[str, object] = {
+        "description": description,
+        "prompt": prompt,
+        "subagent_type": subagent_type,
+    }
+    if run_in_background is not None:
+        input_fields["run_in_background"] = run_in_background
+    if model is not None:
+        input_fields["model"] = model
+    return {"type": "tool_use", "id": tool_use_id, "name": name, "input": input_fields}
 
 
 def build_tool_result_block(
@@ -257,13 +309,16 @@ def build_assistant_record(
     parent_session_id: str = DEFAULT_PARENT_SESSION_ID,
     timestamp: str = DEFAULT_TIMESTAMP,
     attribution_skill: str | None = None,
+    attribution_agent: str | None = None,
+    cwd: str | None = None,
 ) -> dict[str, object]:
     """An assistant transcript record.
 
-    ``attribution_skill`` models the observed ``attributionSkill`` key, which
-    sits at the record's root alongside ``message``, not nested inside it.
-    Omitted entirely when not supplied, matching the observed shape where it
-    is absent rather than null on a turn with no active skill.
+    ``attribution_skill`` and ``attribution_agent`` model the observed
+    ``attributionSkill`` and ``attributionAgent`` keys, which sit at the
+    record's root alongside ``message``, not nested inside it. Both are
+    omitted entirely when not supplied, matching the observed shape where an
+    inapplicable attribution key is absent rather than null.
     """
     record: dict[str, object] = build_root_fields(
         record_type="assistant",
@@ -272,6 +327,7 @@ def build_assistant_record(
         agent_id=agent_id,
         parent_session_id=parent_session_id,
         timestamp=timestamp,
+        cwd=cwd,
     )
     record["message"] = {
         "id": message_id,
@@ -282,6 +338,8 @@ def build_assistant_record(
     }
     if attribution_skill is not None:
         record["attributionSkill"] = attribution_skill
+    if attribution_agent is not None:
+        record["attributionAgent"] = attribution_agent
     return record
 
 
@@ -294,6 +352,7 @@ def build_user_record(
     parent_session_id: str = DEFAULT_PARENT_SESSION_ID,
     timestamp: str = DEFAULT_TIMESTAMP,
     tool_denial_kind: str | None = None,
+    cwd: str | None = None,
 ) -> dict[str, object]:
     record: dict[str, object] = build_root_fields(
         record_type="user",
@@ -302,6 +361,7 @@ def build_user_record(
         agent_id=agent_id,
         parent_session_id=parent_session_id,
         timestamp=timestamp,
+        cwd=cwd,
     )
     record["message"] = {"role": "user", "content": [dict(block) for block in content]}
     if tool_denial_kind is not None:
@@ -509,6 +569,23 @@ def build_transcript_path(
         / "subagents"
         / f"agent-{raw_session_id}.jsonl"
     )
+
+
+def build_main_session_path(
+    base: Path,
+    *,
+    project: str = "project-one",
+    raw_session_id: str = DEFAULT_PARENT_SESSION_ID,
+) -> Path:
+    """Return where a main-session transcript would sit under ``base``.
+
+    Models ``.claude/projects/<project>/<session-uuid>.jsonl``, the file a
+    subagent's ``parent_session_id`` derives from. ``raw_session_id`` here is
+    a main session's own uuid, matching the directory name
+    :func:`build_transcript_path` nests a subagent's ``subagents/`` folder
+    under when the two calls share the same ``project`` and id.
+    """
+    return base / ".claude" / "projects" / project / f"{raw_session_id}.jsonl"
 
 
 def build_transcript_text(records: Sequence[Mapping[str, object]]) -> str:

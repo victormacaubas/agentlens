@@ -1,17 +1,22 @@
-"""The session-skill bridge: the union of declaration, availability, and firing.
+"""The session-skill bridge: declared skills union fired skills, availability resolved per row.
 
-Each state is resolved independently, so every combination the design calls
-out — a declared skill that never fires, an available undeclared skill that
-fires, and a fired skill whose availability the files cannot support — is
-exercised on its own rather than assumed to follow from the others.
+A name earns a row by being declared by the spawn's bound agent definition or
+by being proven to have fired in the transcript. Availability is resolved
+independently on every row that earns membership by either path, so a fire
+never backfills an availability claim the files cannot support, and a
+declared skill's proven availability never depends on whether it also fired.
 """
 
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
+
+import pytest
 
 from agentlens.ingest.name_resolution import NameResolution
 from agentlens.ingest.session import build_fact_session
 from agentlens.ingest.skill_bridge import derive_skill_signals
 from agentlens.ingest.skill_inventory import SkillInventoryEntry
+from agentlens.models.agent_definitions import AgentDefinition
 from agentlens.models.facts import FactSession
 from agentlens.models.identity import NameSource
 from agentlens.models.skill_signals import KnownState, SessionSkillSignal
@@ -47,101 +52,87 @@ def _skill_fire_record(
     )
 
 
-def test_declared_skill_absent_from_inventory_with_no_fire() -> None:
-    definition = build_agent_definition(config=build_agent_definition_config(skills=("tdd",)))
+def _signal(
+    skill_name: str, *, declared: KnownState, available: KnownState, fired: bool
+) -> SessionSkillSignal:
+    return SessionSkillSignal(
+        session_id=_SESSION_ID,
+        skill_name=skill_name,
+        declared=declared,
+        available=available,
+        fired=fired,
+    )
 
+
+def _old_revision() -> SkillInventoryEntry:
+    return SkillInventoryEntry(
+        skill_name="tdd",
+        revision=build_source_revision(mtime_ns=_epoch_ns(_STARTED_AT - timedelta(days=1))),
+    )
+
+
+def _new_revision() -> SkillInventoryEntry:
+    return SkillInventoryEntry(
+        skill_name="tdd",
+        revision=build_source_revision(mtime_ns=_epoch_ns(_STARTED_AT + timedelta(days=1))),
+    )
+
+
+@pytest.mark.parametrize(
+    ("agent_definition", "skill_inventory", "records", "expected"),
+    [
+        pytest.param(
+            build_agent_definition(config=build_agent_definition_config(skills=("tdd",))),
+            (),
+            (),
+            _signal("tdd", declared=KnownState.TRUE, available=KnownState.UNKNOWN, fired=False),
+            id="declared_with_unproven_availability",
+        ),
+        pytest.param(
+            build_agent_definition(config=build_agent_definition_config(skills=("tdd",))),
+            (_old_revision(),),
+            (),
+            _signal("tdd", declared=KnownState.TRUE, available=KnownState.TRUE, fired=False),
+            id="declared_and_available",
+        ),
+        pytest.param(
+            None,
+            (),
+            (_skill_fire_record("tdd"),),
+            _signal("tdd", declared=KnownState.UNKNOWN, available=KnownState.UNKNOWN, fired=True),
+            id="fired_only_unbound_definition_is_unknown",
+        ),
+        pytest.param(
+            build_agent_definition(config=build_agent_definition_config(skills=())),
+            (_old_revision(),),
+            (_skill_fire_record("tdd"),),
+            _signal("tdd", declared=KnownState.FALSE, available=KnownState.TRUE, fired=True),
+            id="fired_and_available_but_undeclared_by_a_bound_definition",
+        ),
+        pytest.param(
+            None,
+            (_new_revision(),),
+            (_skill_fire_record("tdd"),),
+            _signal("tdd", declared=KnownState.UNKNOWN, available=KnownState.UNKNOWN, fired=True),
+            id="fire_does_not_backfill_unprovable_availability",
+        ),
+    ],
+)
+def test_derive_skill_signals_resolves_each_state_independently(
+    agent_definition: AgentDefinition | None,
+    skill_inventory: Sequence[SkillInventoryEntry],
+    records: Sequence[dict[str, object]],
+    expected: SessionSkillSignal,
+) -> None:
     signals = derive_skill_signals(
         session_id=_SESSION_ID,
-        agent_definition=definition,
-        skill_inventory=(),
-        records=[],
+        agent_definition=agent_definition,
+        skill_inventory=skill_inventory,
+        records=list(records),
         started_at=_STARTED_AT,
     )
 
-    assert signals == (
-        _signal("tdd", declared=KnownState.TRUE, available=KnownState.UNKNOWN, fired=False),
-    )
-
-
-def test_available_undeclared_skill_that_does_not_fire() -> None:
-    revision = build_source_revision(mtime_ns=_epoch_ns(_STARTED_AT - timedelta(days=1)))
-
-    signals = derive_skill_signals(
-        session_id=_SESSION_ID,
-        agent_definition=None,
-        skill_inventory=(SkillInventoryEntry(skill_name="tdd", revision=revision),),
-        records=[],
-        started_at=_STARTED_AT,
-    )
-
-    assert signals == (
-        _signal("tdd", declared=KnownState.UNKNOWN, available=KnownState.TRUE, fired=False),
-    )
-
-
-def test_fired_skill_with_no_declaration_or_inventory_entry() -> None:
-    signals = derive_skill_signals(
-        session_id=_SESSION_ID,
-        agent_definition=None,
-        skill_inventory=(),
-        records=[_skill_fire_record("tdd")],
-        started_at=_STARTED_AT,
-    )
-
-    assert signals == (
-        _signal("tdd", declared=KnownState.UNKNOWN, available=KnownState.UNKNOWN, fired=True),
-    )
-
-
-def test_skill_installed_after_the_spawn_is_unknown_not_false() -> None:
-    revision = build_source_revision(mtime_ns=_epoch_ns(_STARTED_AT + timedelta(days=1)))
-
-    signals = derive_skill_signals(
-        session_id=_SESSION_ID,
-        agent_definition=None,
-        skill_inventory=(SkillInventoryEntry(skill_name="tdd", revision=revision),),
-        records=[],
-        started_at=_STARTED_AT,
-    )
-
-    assert signals[0].available == KnownState.UNKNOWN
-
-
-def test_fired_skill_with_unprovable_availability_is_not_backfilled_to_true() -> None:
-    """A fire never upgrades ``available``: the three states stay independent
-    even when transcript evidence and the files disagree about what they can
-    prove.
-    """
-    too_new_revision = build_source_revision(mtime_ns=_epoch_ns(_STARTED_AT + timedelta(days=1)))
-
-    signals = derive_skill_signals(
-        session_id=_SESSION_ID,
-        agent_definition=None,
-        skill_inventory=(SkillInventoryEntry(skill_name="tdd", revision=too_new_revision),),
-        records=[_skill_fire_record("tdd")],
-        started_at=_STARTED_AT,
-    )
-
-    assert signals == (
-        _signal("tdd", declared=KnownState.UNKNOWN, available=KnownState.UNKNOWN, fired=True),
-    )
-
-
-def test_available_undeclared_skill_that_fires() -> None:
-    definition = build_agent_definition(config=build_agent_definition_config(skills=()))
-    revision = build_source_revision(mtime_ns=_epoch_ns(_STARTED_AT - timedelta(days=1)))
-
-    signals = derive_skill_signals(
-        session_id=_SESSION_ID,
-        agent_definition=definition,
-        skill_inventory=(SkillInventoryEntry(skill_name="tdd", revision=revision),),
-        records=[_skill_fire_record("tdd")],
-        started_at=_STARTED_AT,
-    )
-
-    assert signals == (
-        _signal("tdd", declared=KnownState.FALSE, available=KnownState.TRUE, fired=True),
-    )
+    assert signals == (expected,)
 
 
 def test_repeated_firing_of_the_same_skill_yields_one_row() -> None:
@@ -178,15 +169,40 @@ def test_signals_are_ordered_by_skill_name() -> None:
     assert [signal.skill_name for signal in signals] == ["alpha", "zeta"]
 
 
-def _signal(
-    skill_name: str, *, declared: KnownState, available: KnownState, fired: bool
-) -> SessionSkillSignal:
-    return SessionSkillSignal(
+def test_installed_skill_that_is_neither_declared_nor_fired_produces_no_row() -> None:
+    definition = build_agent_definition(config=build_agent_definition_config(skills=("tdd",)))
+    other_entry = SkillInventoryEntry(skill_name="graphify", revision=_old_revision().revision)
+
+    signals = derive_skill_signals(
         session_id=_SESSION_ID,
-        skill_name=skill_name,
-        declared=declared,
-        available=available,
-        fired=fired,
+        agent_definition=definition,
+        skill_inventory=(_old_revision(), other_entry),
+        records=[],
+        started_at=_STARTED_AT,
+    )
+
+    assert [signal.skill_name for signal in signals] == ["tdd"]
+
+
+def test_reingest_with_changed_firing_evidence_adds_a_bridge_row() -> None:
+    without_fire = derive_skill_signals(
+        session_id=_SESSION_ID,
+        agent_definition=None,
+        skill_inventory=(),
+        records=[],
+        started_at=_STARTED_AT,
+    )
+    with_fire = derive_skill_signals(
+        session_id=_SESSION_ID,
+        agent_definition=None,
+        skill_inventory=(),
+        records=[_skill_fire_record("tdd")],
+        started_at=_STARTED_AT,
+    )
+
+    assert without_fire == ()
+    assert with_fire == (
+        _signal("tdd", declared=KnownState.UNKNOWN, available=KnownState.UNKNOWN, fired=True),
     )
 
 
@@ -203,6 +219,8 @@ def _build_fact_session_with_skills(
         tool_events=(),
         sidecar=None,
         name_resolution=NameResolution(agent_type="implementer", name_source=NameSource.META_JSON),
+        attribution_agent_types=frozenset(),
+        parent_evidence_revision=None,
         unreadable_line_count=0,
         skill_inventory=skill_inventory,
     )
@@ -220,14 +238,3 @@ def test_build_fact_session_counts_distinct_fired_skills() -> None:
 
     assert session.n_skills_fired == 2
     assert {signal.skill_name for signal in skill_signals if signal.fired} == {"tdd", "orchestrate"}
-
-
-def test_build_fact_session_derivation_fingerprint_changes_with_the_skill_inventory() -> None:
-    records = [build_assistant_record(timestamp="2026-01-10T00:00:00.000Z")]
-    without_inventory, _ = _build_fact_session_with_skills(records=records, skill_inventory=())
-    with_inventory, _ = _build_fact_session_with_skills(
-        records=records,
-        skill_inventory=(SkillInventoryEntry(skill_name="tdd", revision=build_source_revision()),),
-    )
-
-    assert without_inventory.derivation_fingerprint != with_inventory.derivation_fingerprint

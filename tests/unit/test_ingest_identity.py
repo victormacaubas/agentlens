@@ -6,7 +6,12 @@ import pytest
 
 from agentlens.errors import MalformedSourceError
 from agentlens.ingest.transcript import parse_transcript
-from tests.factories import build_tool_invocation_pair, build_transcript_path, build_transcript_text
+from tests.factories import (
+    build_context_cache,
+    build_tool_invocation_pair,
+    build_transcript_path,
+    build_transcript_text,
+)
 
 
 def _write_transcript(path: Path) -> None:
@@ -18,8 +23,8 @@ def test_same_transcript_parsed_twice_yields_the_same_session_id(tmp_path: Path)
     path = build_transcript_path(tmp_path, raw_session_id="same-id")
     _write_transcript(path)
 
-    first = parse_transcript(path)
-    second = parse_transcript(path)
+    first = parse_transcript(path, context_cache=build_context_cache())
+    second = parse_transcript(path, context_cache=build_context_cache())
 
     assert first.session.identity.session_id == second.session.identity.session_id
 
@@ -32,8 +37,8 @@ def test_same_raw_id_in_two_projects_yields_two_session_ids_and_own_projects(
     _write_transcript(path_a)
     _write_transcript(path_b)
 
-    facts_a = parse_transcript(path_a)
-    facts_b = parse_transcript(path_b)
+    facts_a = parse_transcript(path_a, context_cache=build_context_cache())
+    facts_b = parse_transcript(path_b, context_cache=build_context_cache())
 
     assert facts_a.session.identity.session_id != facts_b.session.identity.session_id
     assert facts_a.session.identity.source_project == "project-a"
@@ -47,7 +52,7 @@ def test_refuses_a_path_with_no_owning_projects_directory(tmp_path: Path) -> Non
     _write_transcript(path)
 
     with pytest.raises(MalformedSourceError):
-        parse_transcript(path)
+        parse_transcript(path, context_cache=build_context_cache())
 
 
 def test_refuses_a_main_session_path_with_no_subagents_segment(tmp_path: Path) -> None:
@@ -55,4 +60,4 @@ def test_refuses_a_main_session_path_with_no_subagents_segment(tmp_path: Path) -
     _write_transcript(path)
 
     with pytest.raises(MalformedSourceError):
-        parse_transcript(path)
+        parse_transcript(path, context_cache=build_context_cache())

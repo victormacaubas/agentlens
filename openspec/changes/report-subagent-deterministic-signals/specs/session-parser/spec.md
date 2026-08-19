@@ -26,7 +26,7 @@ evidence without persisting that main session.
 
 #### Scenario: Parent transcript is available
 - **WHEN** the sidecar does not name the agent type and the parent transcript
-  contains the spawning `Task` invocation
+  contains the spawning subagent invocation
 - **THEN** the parser may use that invocation's subagent type in name resolution
   while persisting only the subagent session
 
@@ -57,7 +57,10 @@ record used for name resolution.
 
 The agent type SHALL be resolved once per session through the ordered chain of
 the metadata sidecar, distinct assistant-record attribution, the parent
-session's spawning `Task` invocation, and the raw-agent-identifier fallback.
+record's spawning subagent invocation, and the raw-agent-identifier fallback.
+That spawning invocation SHALL be recognized under either tool name Claude Code
+has written for it, `Agent` or the historical `Task`, because the logs being read
+can span versions.
 The record SHALL state which link supplied the answer and SHALL mark conflicting
 non-fallback values as ambiguous.
 
@@ -77,7 +80,7 @@ non-fallback values as ambiguous.
 #### Scenario: Parent task supplies the name
 
 - **WHEN** neither the sidecar nor assistant attribution supplies an agent type
-  and the spawning parent `Task` invocation names a subagent type
+  and the spawning parent invocation names a subagent type
 - **THEN** that value is used and the record states that the parent task was the
   source
 

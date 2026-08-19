@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from agentlens.errors import MalformedSourceError
+from agentlens.errors import MalformedSourceError, SourceChangedError
 from agentlens.models.identity import SourceRevision
 from agentlens.utils.hashing import hash_text
 
@@ -37,19 +37,39 @@ def read_sidecar(transcript_path: Path) -> Sidecar | None:
     """Return the sidecar next to ``transcript_path``, or ``None`` if absent.
 
     Raises:
-        MalformedSourceError: The sidecar exists but is not valid JSON, is
-            not a JSON object, or is missing one of its required keys.
-        OSError: The sidecar exists but could not be read for a reason other
-            than its absence.
+        MalformedSourceError: The sidecar could not be statted or read for a
+            reason other than its absence, or exists but is not valid JSON,
+            is not a JSON object, is missing one of its required keys, or has
+            a field of the wrong type.
+        SourceChangedError: The sidecar changed between the stat taken before
+            its read and the one taken immediately after it.
     """
     sidecar_path = transcript_path.with_suffix(_SIDECAR_SUFFIX)
     try:
-        stat = sidecar_path.stat()
+        stat_before = sidecar_path.stat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise MalformedSourceError(f"could not stat {sidecar_path}") from exc
+
+    try:
         text = sidecar_path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
+    except OSError as exc:
+        raise MalformedSourceError(f"could not read {sidecar_path}") from exc
+
+    try:
+        stat_after = sidecar_path.stat()
+    except OSError as exc:
+        raise MalformedSourceError(f"could not stat {sidecar_path}") from exc
+    if (stat_before.st_mtime_ns, stat_before.st_size) != (
+        stat_after.st_mtime_ns,
+        stat_after.st_size,
+    ):
+        raise SourceChangedError(f"{sidecar_path} changed while being read")
     revision = SourceRevision(
-        mtime_ns=stat.st_mtime_ns, size=stat.st_size, content_hash=hash_text(text)
+        mtime_ns=stat_after.st_mtime_ns, size=stat_after.st_size, content_hash=hash_text(text)
     )
 
     try:

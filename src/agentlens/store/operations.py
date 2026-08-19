@@ -1,4 +1,5 @@
 import sqlite3
+from collections.abc import Sequence
 
 from agentlens.models.agent_definitions import AgentDefinition
 from agentlens.models.session_facts import SessionFacts
@@ -109,8 +110,11 @@ WHERE agent_definition_id = ?
 """  # noqa: S608
 
 
+_SESSION_SAVEPOINT_NAME = "session_upsert"
+
+
 class _StalenessRefusalError(Exception):
-    """Raised internally to unwind the transaction; never escapes this module."""
+    """Raised internally to unwind one session's savepoint; never escapes this module."""
 
 
 def upsert_session(connection: sqlite3.Connection, facts: SessionFacts) -> UpsertOutcome:
@@ -122,23 +126,64 @@ def upsert_session(connection: sqlite3.Connection, facts: SessionFacts) -> Upser
     stored, the entire transaction rolls back, including the delete and
     reinsert of the tool-invocation and skill-bridge rows.
     """
+    with connection:
+        connection.execute("BEGIN")
+        return _apply_session(connection, facts)
+
+
+def upsert_batch(
+    connection: sqlite3.Connection,
+    *,
+    definitions: Sequence[AgentDefinition],
+    facts: Sequence[SessionFacts],
+) -> tuple[UpsertOutcome, ...]:
+    """Apply every definition and session as one all-or-nothing transaction.
+
+    Each session's staleness outcome is decided independently, through its
+    own savepoint, so one session being skipped or refused as stale never
+    discards another session's writes in the same batch. A database error
+    anywhere — a stale outcome is not one — rolls back everything in the
+    batch, leaving the store exactly as it was before this call.
+    """
+    with connection:
+        connection.execute("BEGIN")
+        for definition in definitions:
+            connection.execute(_UPSERT_AGENT_DEFINITION_SQL, agent_definition_to_row(definition))
+        return tuple(_apply_session(connection, one) for one in facts)
+
+
+def _apply_session(connection: sqlite3.Connection, facts: SessionFacts) -> UpsertOutcome:
+    """Write one session's rows under its own savepoint, honoring the staleness rule.
+
+    A staleness refusal rolls back only this savepoint; a real database error
+    propagates uncaught, so a caller running several of these under one outer
+    transaction can let that error abort the whole transaction.
+
+    Assumes the caller already opened an explicit transaction. Releasing a
+    savepoint that turns out to be the outermost one commits immediately,
+    the same as a bare ``BEGIN``/``COMMIT`` pair, which would silently defeat
+    the batch's all-or-nothing guarantee — the explicit ``BEGIN`` every caller
+    issues first is what keeps this savepoint nested instead.
+    """
     session_id = facts.session.identity.session_id
+    connection.execute(f"SAVEPOINT {_SESSION_SAVEPOINT_NAME}")
     try:
-        with connection:
-            connection.execute(_DELETE_TOOL_EVENTS_SQL, (session_id,))
-            connection.executemany(
-                _INSERT_TOOL_EVENT_SQL,
-                [fact_tool_event_to_row(event) for event in facts.tool_events],
-            )
-            connection.execute(_DELETE_SKILL_SIGNALS_SQL, (session_id,))
-            connection.executemany(
-                _INSERT_SKILL_SIGNAL_SQL,
-                [session_skill_signal_to_row(signal) for signal in facts.skill_signals],
-            )
-            cursor = connection.execute(_UPSERT_SESSION_SQL, fact_session_to_row(facts.session))
-            if cursor.rowcount == 0:
-                raise _StalenessRefusalError
+        connection.execute(_DELETE_TOOL_EVENTS_SQL, (session_id,))
+        connection.executemany(
+            _INSERT_TOOL_EVENT_SQL,
+            [fact_tool_event_to_row(event) for event in facts.tool_events],
+        )
+        connection.execute(_DELETE_SKILL_SIGNALS_SQL, (session_id,))
+        connection.executemany(
+            _INSERT_SKILL_SIGNAL_SQL,
+            [session_skill_signal_to_row(signal) for signal in facts.skill_signals],
+        )
+        cursor = connection.execute(_UPSERT_SESSION_SQL, fact_session_to_row(facts.session))
+        if cursor.rowcount == 0:
+            raise _StalenessRefusalError
     except _StalenessRefusalError:
+        connection.execute(f"ROLLBACK TO SAVEPOINT {_SESSION_SAVEPOINT_NAME}")
+        connection.execute(f"RELEASE SAVEPOINT {_SESSION_SAVEPOINT_NAME}")
         stored_fingerprint_row = connection.execute(
             _SELECT_STORED_DERIVATION_FINGERPRINT_SQL, (session_id,)
         ).fetchone()
@@ -148,6 +193,7 @@ def upsert_session(connection: sqlite3.Connection, facts: SessionFacts) -> Upser
         if stored_fingerprint == facts.session.derivation_fingerprint:
             return UpsertOutcome.SKIPPED_IDENTICAL
         return UpsertOutcome.REFUSED_STALE
+    connection.execute(f"RELEASE SAVEPOINT {_SESSION_SAVEPOINT_NAME}")
     return UpsertOutcome.REPLACED
 
 

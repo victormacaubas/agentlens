@@ -99,6 +99,11 @@ def default_store_path() -> Path:
     return Path(click.get_app_dir("agentlens")) / _STORE_DB_FILENAME
 
 
+def default_claude_root() -> Path:
+    """Return the default location of the user's ``.claude`` directory."""
+    return Path.home() / ".claude"
+
+
 def _exit_code_for(exc: AgentlensError) -> int:
     for ancestor in type(exc).__mro__:
         code = EXIT_CODES.get(ancestor)
@@ -143,6 +148,7 @@ def main(argv: list[str] | None = None) -> int:
             clock=clock,
             output_format=parsed.output_format,
             dry_run=parsed.dry_run,
+            claude_root=default_claude_root(),
         )
     except AgentlensError as exc:
         logger.error("Session analysis failed: %s", exc)

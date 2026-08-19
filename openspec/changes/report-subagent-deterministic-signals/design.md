@@ -151,9 +151,12 @@ handled by one parser whose supported marker shapes are pinned by synthetic
 fixtures before bridge derivation uses them. Reads of `SKILL.md` remain ordinary
 file reads and never count as a fire.
 
-The bridge contains the union of skills named by applicable definitions,
-provable availability, and firing evidence. The session's `n_skills_fired`
-counts distinct bridge rows with `fired=true`.
+The bridge contains the union of skills named by applicable definitions and
+skills with firing evidence. Availability is a state resolved on each resulting
+row, never a membership criterion: a machine-wide inventory would put one row
+per installed skill on every spawn and make any skill edit anywhere invalidate
+every previously ingested session. The session's `n_skills_fired` counts
+distinct bridge rows with `fired=true`.
 
 Alternative considered: infer firing from a `SKILL.md` read. Agents and users
 can read skill files without executing their workflow, so the resulting signal

@@ -1,12 +1,12 @@
 """Deriving the session-skill bridge from declarations, availability, and firing.
 
-The bridge is the union of three independently resolved states per skill
-name: whether the spawn's bound agent definition declared it, whether the
-discovered inventory can prove it was available, and whether the transcript
-proves it fired. A name earns a row by satisfying any one of the three, and
-each state is computed without reference to the other two, so a fire never
-backfills an availability claim the files cannot support, and an available,
-undeclared skill is not mistaken for a declared one.
+A name earns a row in the bridge by being declared by the spawn's bound
+agent definition, or by being proven to have fired in the transcript.
+Availability is not a membership criterion: it is a third state, resolved
+independently on every row that earns membership by one of the other two,
+so a fire never backfills an availability claim the files cannot support,
+and a skill that happens to be installed but was neither declared nor fired
+never earns a row at all.
 """
 
 from collections.abc import Sequence
@@ -32,14 +32,15 @@ def derive_skill_signals(
     records: Sequence[JsonRecord],
     started_at: datetime,
 ) -> tuple[SessionSkillSignal, ...]:
-    """Return one row per skill named by a declaration, the inventory, or a fire.
+    """Return one row per skill named by a declaration or proven to have fired.
 
     ``agent_definition`` is ``None`` when history could not prove a binding,
     in which case every name's declaration state is ``unknown`` rather than
     ``false``: an unresolved binding says nothing about what was actually
     declared. When a definition is bound, its ``skills`` list is the complete
     truth for that file, so a name it omits resolves to ``false``, not
-    ``unknown``.
+    ``unknown``. ``available`` is resolved against ``skill_inventory`` for
+    every row this way, independently of why the row exists.
 
     Results are ordered by skill name for a deterministic bridge.
     """
@@ -50,7 +51,7 @@ def derive_skill_signals(
         if agent_definition is not None
         else frozenset()
     )
-    names = declared_names | inventory.keys() | fired_names
+    names = declared_names | fired_names
     return tuple(
         SessionSkillSignal(
             session_id=session_id,

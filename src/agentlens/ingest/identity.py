@@ -93,3 +93,22 @@ def derive_parent_session_id(location: TranscriptLocation) -> str:
     return canonical_json_fingerprint(
         [location.source_project, SessionKind.MAIN.value, location.raw_parent_session_id]
     )
+
+
+def derive_parent_evidence_path(
+    path: Path, location: TranscriptLocation, *, parent_agent_id: str | None
+) -> Path:
+    """Return the file that should hold ``location``'s spawning invocation.
+
+    Subagent nesting is flat, so a depth-2 spawn still sits directly under
+    ``<parent-uuid>/subagents/``, but its own spawning invocation was issued
+    by the subagent that spawned it, not by the main session — that
+    invocation lives only in the immediate parent subagent's own transcript, a
+    sibling file in the same ``subagents`` directory (``parent_agent_id`` not
+    ``None``). Every other spawn's invocation lives in the grandparent-derived
+    main-session file, one level above ``path``'s own parent directory.
+    """
+    if parent_agent_id is not None:
+        return path.parent / f"{_AGENT_FILENAME_PREFIX}{parent_agent_id}{_TRANSCRIPT_SUFFIX}"
+    project_dir = path.parent.parent.parent
+    return project_dir / f"{location.raw_parent_session_id}{_TRANSCRIPT_SUFFIX}"

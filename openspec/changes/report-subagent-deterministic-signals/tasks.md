@@ -16,7 +16,7 @@
 - [x] 2.3 Add typed definition identity, scope, revision, and configuration values plus a content-addressed identifier.
 - [x] 2.4 Discover user and project definitions and resolve project-over-user precedence for each source project.
 - [x] 2.5 Add `dim_agent` DDL, ordered rows, upsert/read operations, and schema-pin tests without adding an ORM or migration layer.
-- [ ] 2.6 Bind a spawn only when the effective observed definition is no newer than `started_at`; otherwise persist an unknown definition identity.
+- [x] 2.6 Bind a spawn only when the effective observed definition is no newer than `started_at`; otherwise persist an unknown definition identity.
 - [x] 2.7 Add tests proving a definition edit creates a new content identity, re-evaluates old spawns to unknown, and remains reproducible after a store rebuild.
 - [x] 2.8 Run `make check`.
 
@@ -26,25 +26,25 @@
 - [x] 3.2 Add a three-state model for declared and available (`true`, `false`, `unknown`) and a boolean fired state at `(session_id, skill_name)` grain.
 - [x] 3.3 Discover sound skill inventories from user, project, and installed plugin skill directories, retaining revisions needed for conservative historical claims.
 - [x] 3.4 Implement isolated firing-evidence parsing; pin supported marker shapes and ensure ordinary `SKILL.md` reads never count as firing.
-- [ ] 3.5 Derive the bridge from the union of applicable declarations, provable availability, and firing evidence, and derive `n_skills_fired` from distinct fired rows.
+- [x] 3.5 Derive the bridge from the union of applicable declarations and firing evidence, resolve availability for each resulting row, and derive `n_skills_fired` from distinct fired rows. Scope the skill-inventory derivation input to the skills in that narrowed set, so editing an unrelated skill cannot invalidate a spawn.
 - [x] 3.6 Add `bridge_session_skill` DDL, ordered rows, atomic per-session replacement, named reads, and schema-pin tests.
-- [ ] 3.7 Add end-to-end tests for declared-only, available-only, fired-only, unknown historical state, repeated firing, and reingest with changed evidence.
+- [x] 3.7 Add end-to-end tests for declared-only, declared-but-unproven-availability, fired-only, unknown historical state, repeated firing, and reingest with changed evidence.
 - [x] 3.8 Run `make check`.
 
 ## 4. Complete deterministic name and parent resolution
 
-- [ ] 4.1 Parse distinct assistant attribution values and parent `Task` evidence without emitting a main-session row. Cover: one attribution value, conflicting attribution values, a parent `Task` subagent type, an unavailable parent transcript.
-- [ ] 4.2 Implement the ordered sidecar, attribution, parent-task, and raw-agent fallback chain with an explicit ambiguous outcome. Cover: every fallback link, conflicting sources, missing parent input.
-- [ ] 4.3 Include every name-resolution input in the derivation fingerprint, so a changed parent or sidecar refreshes only the affected derived facts.
-- [ ] 4.4 `make quick T=tests/unit/test_ingest_parsing.py tests/unit/test_ingest_derivation.py`
+- [x] 4.1 Parse distinct assistant attribution values and parent `Task` evidence without emitting a main-session row. Cover: one attribution value, conflicting attribution values, a parent `Task` subagent type, an unavailable parent transcript.
+- [x] 4.2 Implement the ordered sidecar, attribution, parent-task, and raw-agent fallback chain with an explicit ambiguous outcome. Cover: every fallback link, conflicting sources, missing parent input.
+- [x] 4.3 Include every name-resolution input in the derivation fingerprint, so a changed parent or sidecar refreshes only the affected derived facts.
+- [x] 4.4 `make quick T=tests/unit/test_ingest_parsing.py tests/unit/test_ingest_derivation.py`
 
 ## 5. Discover and batch-ingest all subagent sources
 
-- [ ] 5.1 Implement deterministic discovery of subagent source bundles under project trees, excluding project-level main-session transcripts. Cover: multi-project trees carrying transcripts, sidecars, definitions and skills; duplicate raw IDs that must not collide once qualified; a changed-during-read source; main-session JSONL present but never ingested.
-- [ ] 5.2 Parse all bundles and context before opening the persistent write transaction; abort on any hard source failure while retaining counted unreadable-line behavior.
-- [ ] 5.3 Add a store batch operation applying definitions, sessions, tool events, and skill rows in one transaction, preserving the existing per-session staleness outcomes. Cover: mid-batch parse failure and mid-batch database failure each write nothing, unchanged sources do not duplicate, four same-type spawns remain four rows.
-- [ ] 5.4 Assert no path under `.claude/` changes across successful, failed, and dry-run discovery.
-- [ ] 5.5 `make quick`
+- [x] 5.1 Implement deterministic discovery of subagent source bundles under project trees, excluding project-level main-session transcripts. Cover: multi-project trees carrying transcripts, sidecars, definitions and skills; duplicate raw IDs that must not collide once qualified; a changed-during-read source; main-session JSONL present but never ingested.
+- [x] 5.2 Parse all bundles and context before opening the persistent write transaction; abort on any hard source failure while retaining counted unreadable-line behavior.
+- [x] 5.3 Add a store batch operation applying definitions, sessions, tool events, and skill rows in one transaction, preserving the existing per-session staleness outcomes. Cover: mid-batch parse failure and mid-batch database failure each write nothing, unchanged sources do not duplicate, four same-type spawns remain four rows.
+- [x] 5.4 Assert no path under `.claude/` changes across successful, failed, and dry-run discovery.
+- [x] 5.5 `make quick`
 
 ## 6. Resolve report windows
 

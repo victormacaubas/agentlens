@@ -16,18 +16,38 @@ skill name.
 - **THEN** one session-skill row represents that skill with the three states
   resolved independently
 
+### Requirement: Bridge membership is declaration or firing
+
+The system SHALL create a session-skill row only for a skill the effective agent
+definition declared or the transcript proves fired. Availability SHALL NOT make
+a skill a member of the bridge, and the skills that shape a session's derivation
+identity SHALL be limited to that same membership.
+
+#### Scenario: Installed skill is neither declared nor fired
+- **WHEN** a skill is present in the observed inventory but the spawn's
+  effective definition did not declare it and no firing evidence appears
+- **THEN** no session-skill row exists for that skill
+
+#### Scenario: Unrelated skill is edited
+- **WHEN** a skill that a spawn neither declared nor fired changes on disk
+- **THEN** that spawn's derivation identity is unchanged
+
 ### Requirement: Declared, available, and fired are independent states
 
 Each session-skill row SHALL expose independent states for whether the effective
 agent definition declared the skill, whether the skill was available to the
 run, and whether the transcript proves it fired. Declared and available SHALL
 support `unknown`; fired SHALL be a boolean because it comes from transcript
-evidence.
+evidence. `false` SHALL remain a storable availability state, but the system
+SHALL NOT derive it from a skill's absence from the present-day inventory,
+because current absence does not prove historical unavailability.
 
-#### Scenario: Declared skill is unavailable and does not fire
-- **WHEN** an effective agent definition declares a skill that is absent from
-  a historically complete available-skill inventory and has no firing evidence
-- **THEN** the row records `declared=true`, `available=false`, and `fired=false`
+#### Scenario: Declared skill has unprovable availability and does not fire
+- **WHEN** an effective agent definition declares a skill whose availability at
+  the spawn start the observed inventory cannot prove, and no firing evidence
+  appears
+- **THEN** the row records `declared=true`, `available=unknown`, and
+  `fired=false`
 
 #### Scenario: Available undeclared skill fires
 - **WHEN** a skill is available and firing evidence appears but the effective
