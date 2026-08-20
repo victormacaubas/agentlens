@@ -6,22 +6,6 @@ produces actionable fix proposals. Read-only against the user's `.claude/`.
 Product intent is in `docs/agentlens-design.md`. Architectural decisions are in
 `docs/adr/`. This file holds the rules those decisions produced.
 
-## Definition of done
-
-```bash
-make check
-```
-
-That is the gate: format, lint, import contracts, types, unit tests. Run it
-before claiming anything is finished. CI runs the same command.
-
-A change is **not done when the gate passes.** The gate proves the code runs and
-the imports point the right way. It proves nothing about whether the code is
-shaped the way this project decided.
-
-Integration tests are opt-in via `make integration`. They invoke the real
-`claude` CLI, so they need auth and cost money.
-
 ## Coding standards this project inherits
 
 - **`python-engineering-standards`** governs every Python file here: layout,
@@ -170,6 +154,8 @@ goes to the logger on stderr. Mixing them breaks
   parser is only ever proven against JSONL we wrote ourselves, so
   `tests/factories.py` encodes a belief that can be wrong for every test at once.
   Treat changes there with the care of a parser change.
+- Integration tests are opt-in via `make integration`. They invoke the real
+`claude` CLI, so they need auth and cost money.
 
 **If a change that preserves behavior breaks a test, the test was wrong.**
 
@@ -260,3 +246,5 @@ Rules:
 - If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
 - Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
 - After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
+
+This applies to YOU and to every subagent you spawn. Include this rule explicitly in every subagent prompt that involves code exploration. Do not skip graphify because files are "already known" or because you are executing a plan — the graph surfaces cross-file dependencies and INFERRED edges that grep and Read cannot find.
