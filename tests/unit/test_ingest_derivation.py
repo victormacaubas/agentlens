@@ -15,8 +15,11 @@ from agentlens.ingest.name_resolution import NameResolution
 from agentlens.ingest.session import build_fact_session
 from agentlens.ingest.skill_inventory import SkillInventoryEntry
 from agentlens.ingest.transcript import parse_transcript
+from agentlens.models.agent_definitions import AgentDefinition
 from agentlens.models.identity import NameSource
 from tests.factories import (
+    build_agent_definition,
+    build_agent_definition_config,
     build_agent_tool_use_block,
     build_assistant_record,
     build_context_cache,
@@ -249,6 +252,59 @@ def test_build_fact_session_fingerprint_changes_when_a_fired_skill_is_edited() -
     after_fired_skill_edit = _session_with_skill_inventory((edited_fired_skill,))
 
     assert baseline != after_fired_skill_edit
+
+
+def _session_with_definition(agent_definition: AgentDefinition | None) -> str:
+    session, _ = build_fact_session(
+        identity=build_session_identity(),
+        revision=build_source_revision(),
+        agent_id="agent-definition-fingerprint",
+        agent_definition=agent_definition,
+        parent_session_id=None,
+        records=[build_assistant_record(timestamp="2026-01-10T00:00:00.000Z")],
+        tool_events=(),
+        sidecar=None,
+        name_resolution=NameResolution(agent_type="implementer", name_source=NameSource.META_JSON),
+        attribution_agent_types=frozenset(),
+        parent_evidence_revision=None,
+        unreadable_line_count=0,
+        skill_inventory=(),
+    )
+    return session.derivation_fingerprint
+
+
+def test_fingerprint_changes_when_the_bound_definitions_content_changes() -> None:
+    """Editing the definition a spawn is bound to must make the row look new.
+
+    The transcript is untouched, so nothing but the derivation fingerprint can
+    carry the change.
+    """
+    baseline = _session_with_definition(
+        build_agent_definition(revision=build_source_revision(content_hash="definition-hash"))
+    )
+    after_edit = _session_with_definition(
+        build_agent_definition(
+            revision=build_source_revision(content_hash="definition-hash-edited")
+        )
+    )
+
+    assert baseline != after_edit
+
+
+def test_fingerprint_distinguishes_an_unbound_spawn_from_a_bound_one() -> None:
+    """A spawn that later becomes bindable must not be mistaken for unchanged.
+
+    The definition declares no skills, so it reaches the fingerprint only
+    through its own identity. With the default fixture's declared skill it
+    would also reach it through the bridge, and this would still pass with the
+    definition input removed entirely.
+    """
+    declares_no_skills = build_agent_definition_config(skills=())
+
+    unbound = _session_with_definition(None)
+    bound = _session_with_definition(build_agent_definition(config=declares_no_skills))
+
+    assert unbound != bound
 
 
 def test_name_resolution_derivation_input_uses_a_fixed_marker_when_no_parent_was_read() -> None:

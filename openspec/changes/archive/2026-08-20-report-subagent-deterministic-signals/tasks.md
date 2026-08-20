@@ -77,8 +77,8 @@
 
 ## 10. Verify the Phase 2 boundary and finish
 
-- [ ] 10.1 Rebuild a store twice from the same synthetic source tree and prove all added definitions, session context, skill rows, spawn rows, and aggregates are equivalent.
-- [ ] 10.2 Prove a changed sidecar, definition, skill inventory, or parent evidence updates the derivation fingerprint, while an older composite snapshot cannot overwrite newer stored facts.
-- [ ] 10.3 Confirm the report path neither ingests main-session rows nor constructs or calls `JudgeBackend`, and that new SQLite-shaped signatures stay inside `store` and source-tree types stay inside `ingest`.
-- [ ] 10.4 Run `openspec validate report-subagent-deterministic-signals --strict --json`.
-- [ ] 10.5 Run `make check` and confirm a clean gate.
+- [x] 10.1 Rebuild a store twice from the same synthetic source tree and prove all added definitions, session context, skill rows, spawn rows, and aggregates are equivalent.
+- [x] 10.2 Prove a changed sidecar, definition, skill inventory, or parent evidence updates the derivation fingerprint, while an older composite snapshot cannot overwrite newer stored facts.
+- [x] 10.3 Confirm the report path neither ingests main-session rows nor constructs or calls `JudgeBackend`, and that new SQLite-shaped signatures stay inside `store` and source-tree types stay inside `ingest`.
+- [x] 10.4 Run `openspec validate report-subagent-deterministic-signals --strict --json`.
+- [x] 10.5 Run `make check` and confirm a clean gate.
