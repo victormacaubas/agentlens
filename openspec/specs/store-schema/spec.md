@@ -1,87 +1,175 @@
-# Store Schema
+# Store Schema Specification
 
 ## Purpose
 
-Defines the SQLite store schema — tables, columns, and grain — created from DDL on first run, with store location resolution and a documented verdict-JSON shape contract for downstream phases.
+The persisted shape of analyzed runs: what one row means in each table, what makes
+a row unique, and the rules that decide whether a re-run may overwrite what is
+already there.
 
 ## Requirements
 
-### Requirement: SQLite store creation from DDL
+### Requirement: The store is a queryable local database
 
-The system SHALL create a SQLite store from DDL on first run, containing all dimensional tables: `fact_tool_event`, `fact_session`, `dim_agent`, `dim_date`, `dim_tool`, `bridge_session_skill`, and `fact_verdict`. Tables not populated by this change SHALL be created empty for schema stability.
+Analyzed data SHALL be persisted to a single local SQLite database file whose
+location is configurable and which the user may query directly.
 
-#### Scenario: Store is created on first run
+#### Scenario: Store is created on first use
 
-- **WHEN** the pipeline runs and no store file exists
-- **THEN** the store file is created and every required table exists in it
+- **WHEN** the store file does not yet exist and a run needs to persist data
+- **THEN** the store and its tables are created, and the run proceeds
 
-#### Scenario: All tables defined even when unpopulated
+#### Scenario: Location is configurable
 
-- **WHEN** the store is created
-- **THEN** `fact_session`, `dim_date`, `dim_tool`, `bridge_session_skill`, and `fact_verdict` exist as empty tables alongside the populated `fact_tool_event` and `dim_agent`
+- **WHEN** the caller supplies a store location
+- **THEN** that location is used instead of the default
 
-### Requirement: fact_tool_event grain
+### Requirement: Tool-invocation grain and key
 
-The `fact_tool_event` table SHALL store one row per `tool_use`/`tool_result` pair, with columns for `session_id`, `seq` (order within session), `tool_name`, `is_error`, `denial_kind`, `ts`, `input_hash`, and `output_bytes`.
+The `fact_tool_event` table SHALL hold one row per tool invocation, uniquely
+identified by its session together with its ordinal position in that session.
 
-#### Scenario: Table exposes the finest grain columns
+#### Scenario: Ordinal is unique within a session
 
-- **WHEN** the store schema is inspected
-- **THEN** `fact_tool_event` includes `session_id`, `seq`, `tool_name`, `is_error`, `denial_kind`, `ts`, `input_hash`, and `output_bytes`
+- **WHEN** two rows belong to the same session
+- **THEN** their ordinal positions differ, and the pair of session and ordinal
+  identifies exactly one row
 
-### Requirement: dim_agent definition dimension
+### Requirement: Session grain and key
 
-The `dim_agent` table SHALL be keyed on `agent_type` and store `name`, `model`, `effort`, `declared_tools`, `declared_skills`, and `definition_hash`, resolving flat (`<name>.md`) and nested (`<name>/<name>.md`) agent definitions at both project and user level.
+The `fact_session` table SHALL hold one row per spawn, uniquely identified by the
+qualified session key.
 
-#### Scenario: dim_agent captures definition identity
+#### Scenario: Four spawns are four rows
 
-- **WHEN** an agent definition is ingested
-- **THEN** `dim_agent` records its `agent_type`, `model`, `declared_tools`, `declared_skills`, and a `definition_hash` that changes when the definition changes
+- **WHEN** four separate runs of the same agent type have been ingested
+- **THEN** four session rows exist, each with its own qualified key and its own
+  per-spawn identifiers, and none has been merged with another
 
-### Requirement: Store location resolution
+Rationale: the unit of analysis is the individual run. Collapsing rows by agent
+type would make every average wrong.
 
-The system SHALL resolve the store location to a configurable path, defaulting to `~/.cache/agentlens/`, and SHALL NOT write inside any `.claude/` directory.
+### Requirement: Re-ingest upserts rather than duplicating
 
-#### Scenario: Default store location
+Ingesting a session that is already stored SHALL replace the existing rows for that
+session rather than adding a second copy.
 
-- **WHEN** no store path is configured
-- **THEN** the store is created under `~/.cache/agentlens/`
+#### Scenario: Same session ingested twice
 
-#### Scenario: Read-only against .claude
+- **WHEN** a session already present in the store is ingested again from a sound,
+  newer snapshot
+- **THEN** the session row and its tool-invocation rows reflect the new snapshot,
+  and no rows from the previous snapshot remain
 
-- **WHEN** the pipeline runs for any input
-- **THEN** no file inside a `.claude/` directory is created or modified
+### Requirement: A stale or unsound snapshot may not overwrite a sound one
 
-### Requirement: Verdict-JSON shape contract
+A stored grain SHALL be replaced only by a snapshot that is both sound and not
+older than the one already stored.
 
-The system SHALL define a documented verdict-JSON shape stub — per-dimension scores, overall, evidence quotes, suggested fixes, and judge run-cost fields — as a fixed contract for downstream phases, without populating it in this change.
+#### Scenario: Older snapshot is refused
 
-#### Scenario: Verdict shape is documented
+- **WHEN** an ingest presents a snapshot whose observed revision is older than the
+  revision already stored for that session
+- **THEN** the stored rows are left untouched, and the run reports that it kept the
+  newer data
 
-- **WHEN** a developer inspects the verdict contract
-- **THEN** the shape defines per-dimension scores, an overall score, evidence, suggested fixes, and judge-cost fields (`judge_cost_usd`, `judge_input_tokens`, `judge_output_tokens`)
+#### Scenario: Unsound snapshot is refused
 
-### Requirement: fact_session deterministic columns
+- **WHEN** an ingest presents a snapshot that was found unsound
+- **THEN** no rows are written or replaced for that session
 
-The `fact_session` table SHALL expose the deterministic session grain populated by aggregation: identity and lineage (`session_id`, `agent_id`, `agent_type`, `name_source`, `session_kind`, `spawn_depth`, `parent_session_id`, `spawn_tool_use_id`, `task_description`), event-derived counts (`n_turns`, `n_tool_calls`, `n_reads`, `n_edits`, `n_writes`, `n_bash`, `n_files_touched`, `n_errors`, `n_permission_denials`, `n_duplicate_tool_calls`), transcript-read usage (`input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_creation_tokens`, `duration_sec`), and context (`task_prompt_len`, `n_skills_fired`, `final_report_flagged_partial`).
+Rationale: a half-read or changed-mid-read file must never be able to degrade data
+that was previously read correctly.
 
-The column formerly named `n_retry_loops` SHALL be named `n_duplicate_tool_calls`, and the complete/partial `claimed_status` column SHALL be replaced by the raw boolean `final_report_flagged_partial`. Because the store is a disposable cache under `~/.cache/agentlens/`, these schema changes SHALL be applied by recreating the DDL, with no data-migration path.
+### Requirement: Everything in the store is reproducible from source
 
-#### Scenario: Renamed and demoted columns present
+The store SHALL be treated as a rebuildable cache, holding nothing that cannot be
+regenerated by re-reading the source transcripts.
 
-- **WHEN** the store schema is inspected
-- **THEN** `fact_session` includes `n_duplicate_tool_calls` and a boolean `final_report_flagged_partial`, and includes neither `n_retry_loops` nor a complete/partial `claimed_status`
+#### Scenario: Store is deleted
 
-#### Scenario: Deterministic columns carry no verdict
+- **WHEN** the store file is deleted and the same transcripts are ingested again
+- **THEN** the resulting rows are equivalent to those the deleted store held
 
-- **WHEN** the `fact_session` columns are inspected
-- **THEN** every column holds a count, identifier, timestamp-derived value, or raw boolean — none encodes a scored judgment
+Rationale: this is what makes schema changes a rebuild rather than a migration, and
+it is why hand-written queries are affordable here.
 
-### Requirement: Conformed dimensions are populated
+### Requirement: Session rows persist deterministic reporting context
 
-The `dim_date` and `dim_tool` tables SHALL be populated from ingested sessions — previously created empty — so that windowed reporting can join against them.
+The `fact_session` table SHALL retain the raw agent identifier, effective
+agent-definition identity when available, qualified parent identity, spawn
+start time, task-prompt length, and distinct fired-skill count for each
+subagent spawn.
 
-#### Scenario: Dimensions no longer empty after ingest
+#### Scenario: Enriched subagent is stored and read
+- **WHEN** an enriched subagent session is upserted and read back
+- **THEN** every deterministic reporting-context value matches the parsed
+  source facts
 
-- **WHEN** sessions have been ingested into the store
-- **THEN** `dim_date` and `dim_tool` contain rows derived from those sessions rather than remaining empty
+### Requirement: Agent-definition versions are queryable
+
+The store SHALL persist one catalog row per versioned agent definition,
+including its scope, source project where applicable, configuration, declared
+tools, and declared skills.
+
+#### Scenario: Definition is edited
+- **WHEN** a new content version of an existing scoped definition is ingested
+- **THEN** the new content identity is queryable and sessions older than its
+  observed modification time do not claim that version
+
+### Requirement: Session-skill bridge has session-skill grain
+
+The `bridge_session_skill` table SHALL hold at most one row per qualified
+session and skill name, with independent declared, available, and fired values.
+Declared and available SHALL preserve an unknown state; fired SHALL remain
+boolean.
+
+#### Scenario: Session is reingested with changed skill evidence
+- **WHEN** a newer sound snapshot changes the resolved skill states for a
+  session
+- **THEN** that session's bridge rows are replaced atomically and no obsolete
+  or duplicate skill rows remain
+
+### Requirement: Report windows are queryable without model output
+
+The store SHALL return subagent spawn rows and deterministic agent rollups for
+a current half-open start-time range and an equal-length prior range without
+joining modeled verdict data.
+
+#### Scenario: Current and prior ranges contain spawns
+- **WHEN** a caller queries resolved current and prior bounds
+- **THEN** the result includes each qualifying current-window spawn and the
+  deterministic values needed to compare agent rollups across both ranges
+
+#### Scenario: Main-session rows exist in a future-compatible store
+- **WHEN** the store contains a row whose session kind is `main`
+- **THEN** the Phase 2 report query excludes it from subagent spawn rows and
+  aggregates
+
+### Requirement: Context changes refresh derived session facts
+
+The store SHALL use the derivation fingerprint and newest shaping-input
+observation time to update deterministic context without conflating it with the
+transcript content revision.
+
+#### Scenario: Sidecar changes after initial ingest
+- **WHEN** a newer sound derivation changes sidecar-backed facts while the
+  transcript content is unchanged
+- **THEN** the session and dependent skill rows reflect the newer derivation
+  without duplicating tool-event rows
+
+#### Scenario: Older derivation arrives
+- **WHEN** an incoming derivation was observed before the derivation already
+  stored for that session
+- **THEN** the stored session, tool-event, and skill rows remain untouched
+
+### Requirement: Added store data remains reproducible
+
+Every added session field, agent-definition row, and session-skill row SHALL be
+regenerable by re-reading subagent transcripts, sidecars, agent definitions,
+and skill inventories.
+
+#### Scenario: Store is rebuilt
+- **WHEN** the store is deleted and the same subagent source tree is ingested
+  again
+- **THEN** the added deterministic rows and values are equivalent to those in
+  the deleted store
