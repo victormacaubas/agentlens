@@ -8,11 +8,12 @@ type, neither on the other. ``render`` consumes the same shape.
 from dataclasses import dataclass
 
 from agentlens.models.facts import FactSession, FactToolEvent
+from agentlens.models.skill_signals import SessionSkillSignal
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SessionFacts:
-    """One session row and its ordered tool-invocation rows.
+    """One session row, its ordered tool-invocation rows, and its skill bridge rows.
 
     An instance is always safe to persist. A snapshot that changed mid-read,
     yielded no usable records, or carried no derivable identity raises a
@@ -20,8 +21,10 @@ class SessionFacts:
     that callers must remember not to write.
 
     The count of lines the parser could not read lives on ``session``, since a
-    sound parse can still report it above zero.
+    sound parse can still report it above zero. ``skill_signals`` holds the
+    session-skill bridge rows at ``(session_id, skill_name)`` grain.
     """
 
     session: FactSession
     tool_events: tuple[FactToolEvent, ...]
+    skill_signals: tuple[SessionSkillSignal, ...]

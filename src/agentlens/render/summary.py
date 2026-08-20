@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from agentlens.models.report_document import ReportDocument
 from agentlens.models.session_facts import SessionFacts
 
 UNSCORED_NOTICE = "scoring: unscored, no judge has run for this spawn"
@@ -52,3 +53,30 @@ def _cache_read_proportion(
     if total == 0:
         return 0.0
     return cache_read_tokens / total
+
+
+def build_report_summary(document: ReportDocument, *, artifact_path: Path) -> str:
+    """Build the readable terminal summary for one report window.
+
+    Names the resolved window, the agent scope, the total spawn count, each
+    covered agent type's current and prior population and trend status, and
+    the artifact path. Carries no score and no task-description text: a
+    report window covers many spawns, not one task, and Phase 2 never runs a
+    judge.
+    """
+    window = document.window
+    lines = [
+        (
+            f"window: {window.current_start.isoformat()} to "
+            f"{window.current_end.isoformat()} (local_timezone={window.local_timezone})"
+        ),
+        f"agent_scope: {document.agent_filter if document.agent_filter is not None else 'all'}",
+        f"total_spawns: {len(document.spawns)}",
+    ]
+    lines.extend(
+        f"{rollup.agent_type}: n_spawns={rollup.n_spawns} "
+        f"n_spawns_prior={rollup.n_spawns_prior} trend={rollup.trend_status}"
+        for rollup in document.agent_rollups
+    )
+    lines.append(f"artifact: {artifact_path}")
+    return "\n".join(lines)

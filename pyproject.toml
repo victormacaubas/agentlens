@@ -145,6 +145,20 @@ source_modules = [
 forbidden_modules = ["jinja2"]
 
 [[tool.importlinter.contracts]]
+name = "The deterministic report path never reaches the judge"
+type = "forbidden"
+# Phase 2's report is deterministic by contract: it must not construct or call a
+# judge backend. `core` as a whole may legitimately depend on `judge` once the
+# scoring path exists, so the guard names the report path's own modules rather
+# than the package. Indirect imports are deliberately not allowed here: reaching
+# the judge through a helper would breach the contract just as directly.
+source_modules = [
+    "agentlens.core.report",
+    "agentlens.core.ingest_run",
+]
+forbidden_modules = ["agentlens.judge"]
+
+[[tool.importlinter.contracts]]
 name = "Only cli parses arguments"
 type = "forbidden"
 source_modules = [

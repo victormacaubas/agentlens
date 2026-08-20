@@ -1,8 +1,10 @@
-"""DDL for the two fact tables the store persists.
+"""DDL for the fact, dimension, and bridge tables the store persists.
 
 ``fact_session`` holds one row per spawn, keyed on the qualified session key.
 ``fact_tool_event`` holds one row per tool invocation, keyed on the session
-together with its ordinal position within that session.
+together with its ordinal position within that session. ``dim_agent`` holds
+one row per versioned, content-addressed agent definition. ``bridge_session_skill``
+holds one row per qualified session and skill name, keyed on that pair.
 
 Each table states its column order exactly once, in the declaration tuples
 below. The DDL here and the column lists in ``operations`` are generated from
@@ -17,8 +19,8 @@ from dataclasses import dataclass
 class _Column:
     """One column of a fact table as the DDL declares it.
 
-    ``nullable`` cannot be inferred from ``declared_type``: four of the
-    thirty-seven columns admit NULL and the rest carry an explicit
+    ``nullable`` cannot be inferred from ``declared_type``: six of the
+    forty-five columns admit NULL and the rest carry an explicit
     ``NOT NULL``.
 
     ``inline_primary_key`` reproduces ``fact_session``'s bare
@@ -63,6 +65,14 @@ _FACT_SESSION_COLUMNS = (
     _Column("cache_read_tokens", "INTEGER"),
     _Column("cache_creation_tokens", "INTEGER"),
     _Column("unreadable_line_count", "INTEGER"),
+    _Column("agent_id", "TEXT"),
+    _Column("agent_definition_id", "TEXT", nullable=True),
+    _Column("parent_session_id", "TEXT", nullable=True),
+    _Column("started_at", "TEXT"),
+    _Column("task_prompt_len", "INTEGER"),
+    _Column("n_skills_fired", "INTEGER"),
+    _Column("derivation_fingerprint", "TEXT"),
+    _Column("derivation_observed_mtime_ns", "INTEGER"),
 )
 
 _FACT_TOOL_EVENT_COLUMNS = (
@@ -77,8 +87,32 @@ _FACT_TOOL_EVENT_COLUMNS = (
     _Column("result_size", "INTEGER", nullable=True),
 )
 
+_DIM_AGENT_COLUMNS = (
+    _Column("agent_definition_id", "TEXT", nullable=True, inline_primary_key=True),
+    _Column("scope", "TEXT"),
+    _Column("source_project", "TEXT", nullable=True),
+    _Column("name", "TEXT"),
+    _Column("model", "TEXT", nullable=True),
+    _Column("effort", "TEXT", nullable=True),
+    _Column("tools", "TEXT"),
+    _Column("skills", "TEXT"),
+    _Column("revision_mtime_ns", "INTEGER"),
+    _Column("revision_size", "INTEGER"),
+    _Column("revision_content_hash", "TEXT"),
+)
+
+_BRIDGE_SESSION_SKILL_COLUMNS = (
+    _Column("session_id", "TEXT"),
+    _Column("skill_name", "TEXT"),
+    _Column("declared", "TEXT"),
+    _Column("available", "TEXT"),
+    _Column("fired", "INTEGER"),
+)
+
 FACT_SESSION_COLUMN_NAMES = tuple(column.name for column in _FACT_SESSION_COLUMNS)
 FACT_TOOL_EVENT_COLUMN_NAMES = tuple(column.name for column in _FACT_TOOL_EVENT_COLUMNS)
+DIM_AGENT_COLUMN_NAMES = tuple(column.name for column in _DIM_AGENT_COLUMNS)
+BRIDGE_SESSION_SKILL_COLUMN_NAMES = tuple(column.name for column in _BRIDGE_SESSION_SKILL_COLUMNS)
 
 
 def _column_ddl(column: _Column) -> str:
@@ -111,9 +145,19 @@ CREATE_FACT_TOOL_EVENT_SQL = _create_table_sql(
     composite_primary_key=("session_id", "ordinal"),
 )
 
+CREATE_DIM_AGENT_SQL = _create_table_sql("dim_agent", _DIM_AGENT_COLUMNS)
+
+CREATE_BRIDGE_SESSION_SKILL_SQL = _create_table_sql(
+    "bridge_session_skill",
+    _BRIDGE_SESSION_SKILL_COLUMNS,
+    composite_primary_key=("session_id", "skill_name"),
+)
+
 
 def ensure_schema(connection: sqlite3.Connection) -> None:
-    """Create both fact tables if they do not already exist."""
+    """Create every fact, dimension, and bridge table if it does not already exist."""
     connection.execute(CREATE_FACT_SESSION_SQL)
     connection.execute(CREATE_FACT_TOOL_EVENT_SQL)
+    connection.execute(CREATE_DIM_AGENT_SQL)
+    connection.execute(CREATE_BRIDGE_SESSION_SKILL_SQL)
     connection.commit()
