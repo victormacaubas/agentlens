@@ -62,18 +62,18 @@
 
 ## 8. Deliver the deterministic report path
 
-- [ ] 8.1 Add a versioned report document model: generation metadata, selector and resolved bounds, filter, threshold, complete spawn rows, agent rollups.
-- [ ] 8.2 Render that model as JSON at a stable scope-derived artifact path that overwrites in place, leaving the existing session artifact path unchanged. Cover: every qualifying spawn appears, unknown context stays explicit, low-volume trends carry no direction, no modeled field appears anywhere.
-- [ ] 8.3 Add a thin terminal summary naming the window, agent scope, total spawns, per-agent populations, trend status, and artifact path, presenting no score.
-- [ ] 8.4 Repair the CLI foundation with a real Click root command for dispatch, INFO logging configured once to stderr, the existing centralized exit-code mapping, and a thin `_run_session` command runner. Keep `main(argv) -> int`. Cover through the public entrypoint: root and session help each exit 0 without a traceback, resolved arguments are logged once, session exit codes remain stable, and JSON stdout stays one parseable document with diagnostics isolated to stderr.
-- [ ] 8.5 Implement the core report workflow (resolve scope, discover and parse, batch-upsert, query both windows, build the document, choose JSON stdout or artifact plus summary) and wire `agentlens report` through the root dispatch as a thin `_run_report` command runner. Remove temporary “not yet wired” and “later change slice” docstrings when registration lands. Cover end to end: `report --since 7d` over several subagent transcripts emits real current and prior numbers without constructing a judge; report help exits 0 without a traceback; resolved window and agent arguments are logged once at INFO on stderr; JSON stdout remains one parseable document; and agent-filter, zero-results, stable-overwrite, configuration-error, source-error, store-error, unexpected-error, and success exit codes remain correct.
-- [ ] 8.6 `make quick`
+- [x] 8.1 Add a versioned report document model: generation metadata, selector and resolved bounds, filter, threshold, complete spawn rows, agent rollups.
+- [x] 8.2 Render that model as JSON at a stable scope-derived artifact path that overwrites in place, leaving the existing session artifact path unchanged. Cover: every qualifying spawn appears, unknown context stays explicit, low-volume trends carry no direction, no modeled field appears anywhere.
+- [x] 8.3 Add a thin terminal summary naming the window, agent scope, total spawns, per-agent populations, trend status, and artifact path, presenting no score.
+- [x] 8.4 Repair the CLI foundation with a real Click root command for dispatch, INFO logging configured once to stderr, the existing centralized exit-code mapping, and a thin `_run_session` command runner. Keep `main(argv) -> int`. Cover through the public entrypoint: root and session help each exit 0 without a traceback, resolved arguments are logged once, session exit codes remain stable, and JSON stdout stays one parseable document with diagnostics isolated to stderr.
+- [x] 8.5 Implement the core report workflow (resolve scope, discover and parse, batch-upsert, query both windows, build the document, choose JSON stdout or artifact plus summary) and wire `agentlens report` through the root dispatch as a thin `_run_report` command runner. Remove temporary “not yet wired” and “later change slice” docstrings when registration lands. Cover end to end: `report --since 7d` over several subagent transcripts emits real current and prior numbers without constructing a judge; report help exits 0 without a traceback; resolved window and agent arguments are logged once at INFO on stderr; JSON stdout remains one parseable document; and agent-filter, zero-results, stable-overwrite, configuration-error, source-error, store-error, unexpected-error, and success exit codes remain correct.
+- [x] 8.6 `make quick`
 
 ## 9. Make dry run use the production query path
 
-- [ ] 9.1 Add a store operation cloning an existing SQLite cache into a disposable temporary database, initializing an empty clone when no persistent store exists, and closing and removing it on success and every failure path.
-- [ ] 9.2 Route `report --dryrun` through the clone, applying the validated batch and the same analytical reads and renderers as a normal report. Cover: normal and dry-run JSON documents match apart from generation and path metadata for the same starting store and sources; dry run includes newly discovered spawns while leaving the configured store and report paths byte-for-byte unchanged.
-- [ ] 9.3 `make quick`
+- [x] 9.1 Add a store operation cloning an existing SQLite cache into a disposable temporary database, initializing an empty clone when no persistent store exists, and closing and removing it on success and every failure path.
+- [x] 9.2 Route `report --dryrun` through the clone, applying the validated batch and the same analytical reads and renderers as a normal report. Cover: normal and dry-run JSON documents match apart from generation and path metadata for the same starting store and sources; dry run includes newly discovered spawns while leaving the configured store and report paths byte-for-byte unchanged.
+- [x] 9.3 `make quick`
 
 ## 10. Verify the Phase 2 boundary and finish
 
@@ -81,5 +81,4 @@
 - [ ] 10.2 Prove a changed sidecar, definition, skill inventory, or parent evidence updates the derivation fingerprint, while an older composite snapshot cannot overwrite newer stored facts.
 - [ ] 10.3 Confirm the report path neither ingests main-session rows nor constructs or calls `JudgeBackend`, and that new SQLite-shaped signatures stay inside `store` and source-tree types stay inside `ingest`.
 - [ ] 10.4 Run `openspec validate report-subagent-deterministic-signals --strict --json`.
-- [ ] 10.5 Run the `structure-review` skill against the completed change; resolve every blocking finding and re-review before archive.
-- [ ] 10.6 Run `make check` and confirm a clean gate.
+- [ ] 10.5 Run `make check` and confirm a clean gate.

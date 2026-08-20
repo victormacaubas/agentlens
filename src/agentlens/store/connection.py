@@ -1,5 +1,8 @@
+import os
 import sqlite3
-from collections.abc import Sequence
+import tempfile
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from types import TracebackType
@@ -9,6 +12,7 @@ from agentlens.models.agent_definitions import AgentDefinition
 from agentlens.models.facts import FactSession
 from agentlens.models.report_aggregates import AgentRollup
 from agentlens.models.session_facts import SessionFacts
+from agentlens.models.skill_signals import SessionSkillSignal
 from agentlens.models.windows import DEFAULT_MIN_SESSIONS_FOR_TREND
 from agentlens.store import operations
 from agentlens.store.outcomes import UpsertOutcome
@@ -138,6 +142,27 @@ class Store:
         except sqlite3.Error as exc:
             raise StoreError(f"could not read spawns in window [{start}, {end})") from exc
 
+    def read_skill_signals_for_sessions(
+        self, session_ids: Sequence[str]
+    ) -> Mapping[str, tuple[SessionSkillSignal, ...]]:
+        """Return skill-bridge rows for every id in ``session_ids``, grouped by session id.
+
+        One parameterized query covers the whole sequence; a session id
+        with no skill-bridge rows is absent from the result rather than
+        mapped to an empty tuple. Returns an empty mapping without
+        querying when ``session_ids`` is empty.
+
+        Raises:
+            ~agentlens.errors.StoreError: The read failed.
+        """
+        connection = self._require_connection()
+        try:
+            return operations.read_skill_signals_for_sessions(connection, session_ids)
+        except sqlite3.Error as exc:
+            raise StoreError(
+                f"could not read skill signals for {len(session_ids)} session(s)"
+            ) from exc
+
     def read_agent_rollups(
         self,
         current_start: datetime,
@@ -178,3 +203,51 @@ class Store:
         if self._connection is None:
             raise StoreError(f"store at {self._path} is not open")
         return self._connection
+
+
+@contextmanager
+def open_disposable_clone(source_path: Path) -> Iterator[Store]:
+    """Open a disposable temporary clone of the store at ``source_path``.
+
+    Clones every row from ``source_path`` with SQLite's own backup API when
+    that file exists, or starts an empty schema when it does not, so a
+    caller can apply speculative writes without touching the configured
+    store or creating one where none exists. ``source_path`` is opened
+    read-only for the clone, so cloning can never modify it. The temporary
+    database is closed and removed when the context exits, whether it
+    exits normally or through an exception.
+
+    Raises:
+        ~agentlens.errors.StoreError: The temporary database could not be
+            created, the source could not be cloned, or the store could not
+            be opened.
+    """
+    try:
+        descriptor, temp_name = tempfile.mkstemp(suffix=".sqlite3", prefix="agentlens-clone-")
+        os.close(descriptor)
+    except OSError as exc:
+        raise StoreError("could not create a temporary store clone") from exc
+
+    temp_path = Path(temp_name)
+    try:
+        if source_path.exists():
+            _clone_into(source_path, temp_path)
+        with Store(temp_path) as store:
+            yield store
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def _clone_into(source_path: Path, destination_path: Path) -> None:
+    try:
+        source_connection = sqlite3.connect(f"file:{source_path}?mode=ro", uri=True)
+        try:
+            destination_connection = sqlite3.connect(destination_path)
+            try:
+                source_connection.backup(destination_connection)
+            finally:
+                destination_connection.close()
+        finally:
+            source_connection.close()
+    except sqlite3.Error as exc:
+        raise StoreError(f"could not clone store at {source_path}") from exc

@@ -1,6 +1,7 @@
 """The store: schema creation, the staleness rule, upsert atomicity, and reads."""
 
 import sqlite3
+import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -12,7 +13,7 @@ from agentlens.models.identity import SessionKind
 from agentlens.models.report_aggregates import AgentRollup, TrendStatus
 from agentlens.models.session_facts import SessionFacts
 from agentlens.models.skill_signals import SessionSkillSignal
-from agentlens.store import Store, UpsertOutcome
+from agentlens.store import Store, UpsertOutcome, open_disposable_clone
 from tests.factories import (
     build_agent_definition,
     build_agent_definition_config,
@@ -668,6 +669,87 @@ def test_read_spawns_in_window_orders_by_started_at_then_session_id(tmp_path: Pa
     ]
 
 
+def test_read_skill_signals_for_sessions_returns_empty_mapping_for_empty_input(
+    tmp_path: Path,
+) -> None:
+    with Store(tmp_path / "agentlens.db") as store:
+        assert store.read_skill_signals_for_sessions([]) == {}
+
+
+def test_read_skill_signals_for_sessions_groups_rows_by_session_id(tmp_path: Path) -> None:
+    with Store(tmp_path / "agentlens.db") as store:
+        store.upsert_session(
+            _facts_for(
+                session_id="session-one",
+                skill_signals=(
+                    build_session_skill_signal(session_id="session-one", skill_name="skill-a"),
+                ),
+            )
+        )
+        store.upsert_session(
+            _facts_for(
+                session_id="session-two",
+                skill_signals=(
+                    build_session_skill_signal(session_id="session-two", skill_name="skill-b"),
+                ),
+            )
+        )
+        grouped = store.read_skill_signals_for_sessions(["session-one", "session-two"])
+    assert set(grouped) == {"session-one", "session-two"}
+    assert [signal.skill_name for signal in grouped["session-one"]] == ["skill-a"]
+    assert [signal.skill_name for signal in grouped["session-two"]] == ["skill-b"]
+
+
+def test_read_skill_signals_for_sessions_orders_skill_names_within_a_session(
+    tmp_path: Path,
+) -> None:
+    with Store(tmp_path / "agentlens.db") as store:
+        store.upsert_session(
+            _facts_for(
+                session_id="session-multi",
+                skill_signals=(
+                    build_session_skill_signal(session_id="session-multi", skill_name="skill-z"),
+                    build_session_skill_signal(session_id="session-multi", skill_name="skill-a"),
+                ),
+            )
+        )
+        grouped = store.read_skill_signals_for_sessions(["session-multi"])
+    assert [signal.skill_name for signal in grouped["session-multi"]] == ["skill-a", "skill-z"]
+
+
+def test_read_skill_signals_for_sessions_omits_a_session_with_no_bridge_rows(
+    tmp_path: Path,
+) -> None:
+    with Store(tmp_path / "agentlens.db") as store:
+        store.upsert_session(_facts_for(session_id="session-no-skills"))
+        grouped = store.read_skill_signals_for_sessions(["session-no-skills"])
+    assert grouped == {}
+
+
+def test_read_skill_signals_for_sessions_never_returns_a_session_not_requested(
+    tmp_path: Path,
+) -> None:
+    with Store(tmp_path / "agentlens.db") as store:
+        store.upsert_session(
+            _facts_for(
+                session_id="session-in",
+                skill_signals=(
+                    build_session_skill_signal(session_id="session-in", skill_name="skill-a"),
+                ),
+            )
+        )
+        store.upsert_session(
+            _facts_for(
+                session_id="session-out",
+                skill_signals=(
+                    build_session_skill_signal(session_id="session-out", skill_name="skill-b"),
+                ),
+            )
+        )
+        grouped = store.read_skill_signals_for_sessions(["session-in"])
+    assert set(grouped) == {"session-in"}
+
+
 _CURRENT_START = datetime(2026, 2, 1, tzinfo=UTC)
 _CURRENT_END = datetime(2026, 2, 8, tzinfo=UTC)
 _PRIOR_START = datetime(2026, 1, 25, tzinfo=UTC)
@@ -955,3 +1037,69 @@ def test_read_agent_rollups_uses_a_default_trend_threshold_of_five(tmp_path: Pat
     assert rollup.n_spawns == 4
     assert rollup.n_spawns_prior == 4
     assert rollup.trend_status is TrendStatus.INSUFFICIENT_DATA
+
+
+def _clone_temp_files() -> list[Path]:
+    return list(Path(tempfile.gettempdir()).glob("agentlens-clone-*.sqlite3"))
+
+
+def test_open_disposable_clone_reproduces_every_row_of_an_existing_store(tmp_path: Path) -> None:
+    source_path = tmp_path / "agentlens.db"
+    with Store(source_path) as store:
+        store.upsert_session(_facts_for(session_id="session-a"))
+
+    with open_disposable_clone(source_path) as clone:
+        cloned = clone.read_session("session-a")
+
+    assert cloned is not None
+    assert cloned.session.identity.session_id == "session-a"
+
+
+def test_open_disposable_clone_starts_empty_when_no_persistent_store_exists(
+    tmp_path: Path,
+) -> None:
+    source_path = tmp_path / "agentlens.db"
+
+    with open_disposable_clone(source_path) as clone:
+        assert clone.read_session("session-a") is None
+        clone.upsert_session(_facts_for(session_id="session-a"))
+        assert clone.read_session("session-a") is not None
+
+    assert not source_path.exists()
+
+
+def test_open_disposable_clone_never_modifies_the_configured_source_file(tmp_path: Path) -> None:
+    source_path = tmp_path / "agentlens.db"
+    with Store(source_path) as store:
+        store.upsert_session(_facts_for(session_id="session-a"))
+    before = source_path.read_bytes()
+
+    with open_disposable_clone(source_path) as clone:
+        clone.upsert_session(_facts_for(session_id="session-b"))
+        assert clone.read_session("session-b") is not None
+
+    assert source_path.read_bytes() == before
+    with Store(source_path) as store:
+        assert store.read_session("session-b") is None
+
+
+def test_open_disposable_clone_removes_the_temporary_database_on_success(tmp_path: Path) -> None:
+    source_path = tmp_path / "agentlens.db"
+    before = _clone_temp_files()
+
+    with open_disposable_clone(source_path) as clone:
+        clone.upsert_session(_facts_for(session_id="session-a"))
+
+    assert _clone_temp_files() == before
+
+
+def test_open_disposable_clone_removes_the_temporary_database_when_the_body_raises(
+    tmp_path: Path,
+) -> None:
+    source_path = tmp_path / "agentlens.db"
+    before = _clone_temp_files()
+
+    with pytest.raises(RuntimeError, match="forced failure"), open_disposable_clone(source_path):
+        raise RuntimeError("forced failure")
+
+    assert _clone_temp_files() == before

@@ -14,6 +14,7 @@ from agentlens.models.report_aggregates import (
     WeightedProportion,
 )
 from agentlens.models.session_facts import SessionFacts
+from agentlens.models.skill_signals import SessionSkillSignal
 from agentlens.models.windows import DEFAULT_MIN_SESSIONS_FOR_TREND
 from agentlens.store.outcomes import UpsertOutcome
 from agentlens.store.rows import (
@@ -291,6 +292,37 @@ def read_agent_definition(
     if row is None:
         return None
     return row_to_agent_definition(row)
+
+
+def read_skill_signals_for_sessions(
+    connection: sqlite3.Connection, session_ids: Sequence[str]
+) -> dict[str, tuple[SessionSkillSignal, ...]]:
+    """Return skill-bridge rows for every id in ``session_ids``, grouped by session id.
+
+    One parameterized query covers the whole sequence, regardless of how
+    many ids are requested, so a report window's spawns never trigger one
+    skill-bridge query per spawn. Returns an empty mapping without issuing
+    any query when ``session_ids`` is empty. A session id with no
+    skill-bridge rows is simply absent from the result rather than present
+    with an empty tuple; a caller reading a report's spawns should treat a
+    missing key the same as one mapped to ``()``.
+    """
+    if not session_ids:
+        return {}
+    placeholders = ", ".join(["?"] * len(session_ids))
+    sql = f"""
+    SELECT
+        {_SKILL_SIGNAL_COLUMN_LIST}
+    FROM bridge_session_skill
+    WHERE session_id IN ({placeholders})
+    ORDER BY session_id, skill_name
+    """  # noqa: S608
+    rows = connection.execute(sql, tuple(session_ids)).fetchall()
+    grouped: dict[str, list[SessionSkillSignal]] = {}
+    for row in rows:
+        signal = row_to_session_skill_signal(row)
+        grouped.setdefault(signal.session_id, []).append(signal)
+    return {session_id: tuple(signals) for session_id, signals in grouped.items()}
 
 
 def _utc_bound(moment: datetime) -> str:

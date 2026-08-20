@@ -23,8 +23,10 @@ from agentlens.models.report_aggregates import (
     TrendStatus,
     WeightedProportion,
 )
+from agentlens.models.report_document import REPORT_SCHEMA_VERSION, ReportDocument, ReportSpawn
 from agentlens.models.session_facts import SessionFacts
 from agentlens.models.skill_signals import KnownState, SessionSkillSignal
+from agentlens.models.windows import DEFAULT_MIN_SESSIONS_FOR_TREND, ResolvedWindow, WindowSelector
 
 DEFAULT_AGENT_ID = "agent-0000000000000000000000000000000000"
 DEFAULT_PARENT_SESSION_ID = "parent-session-1111111111111111111111"
@@ -330,6 +332,72 @@ def build_agent_rollup(
             if cache_read_proportion is not None
             else build_weighted_proportion()
         ),
+    )
+
+
+def build_window_selector(
+    *,
+    since_duration: str | None = "7d",
+    named_window: str | None = None,
+    range_from: str | None = None,
+    range_to: str | None = None,
+) -> WindowSelector:
+    return WindowSelector(
+        since_duration=since_duration,
+        named_window=named_window,
+        range_from=range_from,
+        range_to=range_to,
+    )
+
+
+def build_resolved_window(
+    *,
+    selector: WindowSelector | None = None,
+    current_start: datetime = datetime(2026, 1, 8, tzinfo=UTC),
+    current_end: datetime = datetime(2026, 1, 15, tzinfo=UTC),
+    prior_start: datetime = datetime(2026, 1, 1, tzinfo=UTC),
+    prior_end: datetime = datetime(2026, 1, 8, tzinfo=UTC),
+    local_timezone: str = "UTC",
+    min_sessions_for_trend: int = DEFAULT_MIN_SESSIONS_FOR_TREND,
+) -> ResolvedWindow:
+    return ResolvedWindow(
+        selector=selector if selector is not None else build_window_selector(),
+        current_start=current_start,
+        current_end=current_end,
+        prior_start=prior_start,
+        prior_end=prior_end,
+        local_timezone=local_timezone,
+        min_sessions_for_trend=min_sessions_for_trend,
+    )
+
+
+def build_report_spawn(
+    *,
+    session: FactSession | None = None,
+    skill_signals: tuple[SessionSkillSignal, ...] = (),
+) -> ReportSpawn:
+    return ReportSpawn(
+        session=session if session is not None else build_fact_session(),
+        skill_signals=skill_signals,
+    )
+
+
+def build_report_document(
+    *,
+    schema_version: int = REPORT_SCHEMA_VERSION,
+    generated_at: datetime = datetime(2026, 1, 15, tzinfo=UTC),
+    window: ResolvedWindow | None = None,
+    agent_filter: str | None = None,
+    spawns: tuple[ReportSpawn, ...] = (),
+    agent_rollups: tuple[AgentRollup, ...] = (),
+) -> ReportDocument:
+    return ReportDocument(
+        schema_version=schema_version,
+        generated_at=generated_at,
+        window=window if window is not None else build_resolved_window(),
+        agent_filter=agent_filter,
+        spawns=spawns,
+        agent_rollups=agent_rollups,
     )
 
 
