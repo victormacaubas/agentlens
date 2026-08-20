@@ -217,20 +217,8 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# agentlens output: reports overwrite in place and the store is a rebuildable
-# cache, so neither belongs in version control.
-reports/
-
 # agentic
 .claude/
 .code-audit/
-.structure-review/
 .agents/
 sample-data/
-.cursor/
-
-# Generated local code graph and caches; refreshed by the Graphify hooks.
-graphify-out/
-
-# MacOS
-.DS_Store

@@ -1,226 +1,144 @@
-# Session Parser Specification
+# Session Parser
 
 ## Purpose
 
-Turning one agent transcript and its metadata sidecar into the typed records the
-store holds: a qualified identity that cannot collide across projects, a snapshot
-that is provably whole, one record per tool invocation, and one record per spawn.
+Discovers Claude session logs and agent definitions under the user's `.claude/` tree, parses tool events, resolves subagent parent lineage and agent names, and ingests sessions idempotently into the store.
 
 ## Requirements
 
-### Requirement: Session identity is qualified, not raw
+### Requirement: Discover session logs and agent definitions
 
-A session's key SHALL be derived from the owning project, the session kind, and
-the raw transcript ID together. The three components SHALL be retained alongside
-the derived key.
+The system SHALL discover main sessions (`projects/**/*.jsonl`), subagent runs (`projects/**/<sid>/subagents/agent-*.jsonl`) with their `.meta.json` sidecars, and agent definitions (`.claude/agents/**`) under the user's `.claude/` tree.
 
-#### Scenario: Same transcript yields the same key
+#### Scenario: Subagent run and sidecar are paired
 
-- **WHEN** the same unchanged transcript is parsed twice
-- **THEN** both parses produce an identical derived key
+- **WHEN** discovery encounters `subagents/agent-<id>.jsonl`
+- **THEN** it pairs it with the sibling `agent-<id>.meta.json` when present
 
-#### Scenario: Same raw ID in two projects yields two keys
+#### Scenario: Main sessions are discovered
 
-- **WHEN** two different projects each contain a transcript carrying the same raw
-  transcript ID
-- **THEN** the two parses produce different derived keys, and each record reports
-  its own owning project
+- **WHEN** discovery scans `projects/**/*.jsonl` at the top level of a project folder
+- **THEN** main session files are found and marked for ingest as `session_kind = main`
 
-#### Scenario: Components remain available for display
+### Requirement: Parse tool events into fact_tool_event
 
-- **WHEN** a session record is read back
-- **THEN** the raw transcript ID, the owning project, and the session kind are all
-  available without reversing the derived key
+The system SHALL parse each session's `tool_use`/`tool_result` content blocks into `fact_tool_event` rows, capturing `tool_name`, `is_error`, `denial_kind` (from `toolDenialKind`), timestamp, an input hash, and output size, ordered by `seq`.
 
-Rationale: the derived key is not human-readable, so every display path and error
-message needs the original components.
+#### Scenario: Tool events are recorded in order
 
-### Requirement: A snapshot is rejected unless it is provably whole
+- **WHEN** a subagent transcript contains multiple tool calls
+- **THEN** each produces one `fact_tool_event` row with a monotonic `seq` reflecting its order in the session
 
-The parser SHALL record the source file's revision, meaning its modification time,
-its size, and a hash of its contents, before reading and SHALL verify that
-revision after reading.
+#### Scenario: Errors and denials are captured
 
-#### Scenario: File changed during the read
+- **WHEN** a `tool_result` has `is_error` true or a `toolDenialKind` is present
+- **THEN** the corresponding `fact_tool_event` row records `is_error` and `denial_kind` accordingly
 
-- **WHEN** the source file's revision after the read differs from the revision
-  before it
-- **THEN** the run fails with the source-error exit code, names the soundness rule
-  that was violated, and writes nothing to the store
+#### Scenario: Malformed lines are skipped, not fatal
 
-#### Scenario: Revision travels with the record
+- **WHEN** a JSONL line is malformed or an unknown record type
+- **THEN** the parser skips it and continues without aborting the session ingest
 
-- **WHEN** a session record is persisted
-- **THEN** the revision observed at parse time is stored with it, so a later run
-  can tell whether its own snapshot is newer
+### Requirement: Resolve parent lineage
 
-### Requirement: One record per tool invocation
+The system SHALL resolve subagent parent lineage from the filesystem path and `.meta.json`: `parent_session_id` from the `<sid>` folder containing the `subagents/` directory, and `spawn_tool_use_id` from the sidecar's `toolUseId`.
 
-A tool invocation and its matching result SHALL be represented as a single record,
-ordered within its session.
+#### Scenario: Parent session derived from path
 
-#### Scenario: Invocation with a result
+- **WHEN** a subagent run at `projects/<proj>/<sid>/subagents/agent-<id>.jsonl` is ingested
+- **THEN** its `parent_session_id` is `<sid>`
 
-- **WHEN** the transcript contains a tool invocation followed by its matching result
-- **THEN** one record holds the tool name, an input fingerprint, a normalized file
-  identity where the tool acted on a file, the timestamp, whether the result was
-  an error, any typed permission-denial reason, and the result size
+#### Scenario: Spawn tool use id from sidecar
 
-#### Scenario: Invocation with no result
+- **WHEN** the `.meta.json` contains a `toolUseId`
+- **THEN** the run's `spawn_tool_use_id` is set to that value for joining to the parent `Task` block
 
-- **WHEN** the transcript contains a tool invocation that never received a result,
-  because the run was interrupted or abandoned
-- **THEN** a record is still produced, its result fields are empty, and the parse
-  is not treated as a failure
+### Requirement: Guarded name resolution
 
-Rationale: an abandoned call is a signal about how the run went. Dropping it would
-hide the interruption and undercount the work attempted.
+The system SHALL resolve each session's agent name exactly once using a fallback chain — (1) `.meta.json` `agentType`, (2) `attributionAgent` from assistant records, (3) parent `Task` `subagent_type` via `spawn_tool_use_id`, (4) `agent_id` hash — recording the winning source in `name_source` and never dropping a session.
 
-#### Scenario: Total invocations need no filtering
+#### Scenario: Authoritative meta wins
 
-- **WHEN** the tool-invocation records for a session are counted
-- **THEN** the count of all records equals the number of tool invocations in that
-  session
+- **WHEN** a `.meta.json` `agentType` is present
+- **THEN** it is used as the agent name and `name_source` records the meta source
 
-### Requirement: One session record per spawn
+#### Scenario: Fallback to hash never drops a session
 
-Each parsed transcript SHALL produce exactly one session record representing that
-single agent run, never one per agent type.
+- **WHEN** no meta, attribution, or parent Task name is available
+- **THEN** the `agent_id` hash is used and the session is still ingested
 
-#### Scenario: Volume and health are derived from the invocations
+#### Scenario: Conflicting names flagged ambiguous
 
-- **WHEN** a session record is produced
-- **THEN** it carries the number of turns, the number of tool invocations, counts
-  per tool category, the number of distinct files touched, the number of errors,
-  the number of permission denials, the number of repeated identical invocations,
-  the run duration, and the token counts including cache reads
+- **WHEN** the resolution chain yields conflicting distinct names
+- **THEN** the session is flagged `ambiguous` rather than silently picking one
 
-#### Scenario: Identity and task fields come from the sidecar
+### Requirement: Tag session kind
 
-- **WHEN** a metadata sidecar is present
-- **THEN** the session record carries the agent type, the task description, the
-  spawning tool-use reference, and the nesting depth taken from that sidecar
+The system SHALL tag each ingested session with `session_kind` (`subagent` or `main`). Main sessions SHALL be stored without lineage and SHALL NOT be scored in this change.
 
-Rationale: several of these fields are not aggregations of any tool invocation, so
-the session record is not a pure rollup of the invocation records.
+#### Scenario: Main session stored without lineage
 
-### Requirement: Name resolution records which source won
+- **WHEN** a main session is ingested
+- **THEN** it is recorded with `session_kind = main` and no parent lineage fields
 
-The agent type SHALL be resolved once per session through the ordered chain of
-the metadata sidecar, distinct assistant-record attribution, the parent
-record's spawning subagent invocation, and the raw-agent-identifier fallback.
-That spawning invocation SHALL be recognized under either tool name Claude Code
-has written for it, `Agent` or the historical `Task`, because the logs being read
-can span versions.
-The record SHALL state which link supplied the answer and SHALL mark conflicting
-non-fallback values as ambiguous.
+### Requirement: Idempotent ingest
 
-#### Scenario: Sidecar is authoritative
+The system SHALL upsert sessions by `session_id` so that re-running ingest adds only genuinely new sessions and never duplicates existing rows. The upsert SHALL cover the full session grain — `fact_session`, `fact_tool_event`, and `bridge_session_skill` — so a re-ingested session replaces its rows in every table, not only `fact_tool_event`. The system SHALL persist those rows and their `dim_date` and `dim_tool` backfills in one transaction per session. If any write fails, the system SHALL roll back every write for that session while retaining successful writes for other sessions.
 
-- **WHEN** a metadata sidecar supplies an agent type
-- **THEN** that value is used and the record states that the sidecar was the
-  source
+#### Scenario: Re-run adds no duplicates
 
-#### Scenario: Attribution supplies the name
+- **WHEN** the pipeline ingests the same session twice
+- **THEN** the store contains exactly one set of rows for that session in every table after the second run
 
-- **WHEN** the sidecar has no agent type and assistant records contain one
-  distinct attribution-agent value
-- **THEN** that value is used and the record states that assistant attribution
-  was the source
+#### Scenario: New sessions added on re-run
 
-#### Scenario: Parent task supplies the name
+- **WHEN** the pipeline runs again after new sessions appear
+- **THEN** only the new sessions are ingested and prior rows are unchanged
 
-- **WHEN** neither the sidecar nor assistant attribution supplies an agent type
-  and the spawning parent invocation names a subagent type
-- **THEN** that value is used and the record states that the parent task was the
-  source
+#### Scenario: Full grain replaced on re-ingest
 
-#### Scenario: Sources conflict
+- **WHEN** a session already present is ingested again
+- **THEN** its `fact_session`, `fact_tool_event`, and `bridge_session_skill` rows are all replaced with the freshly parsed set
 
-- **WHEN** available non-fallback name sources provide conflicting agent types
-- **THEN** the record retains a deterministic value, marks the name source as
-  ambiguous, and the session is not dropped
+#### Scenario: Failed re-ingest preserves the prior session version
 
-#### Scenario: No source available
+- **WHEN** any session-grain or dimension write fails while re-ingesting an existing session
+- **THEN** every row derived from the session remains at its previously committed version
 
-- **WHEN** no sidecar, assistant attribution, or parent task can supply an agent
-  type
-- **THEN** a value derived from the transcript's own raw agent identifier is
-  used, the record states that this fallback was the source, and the session is
-  not dropped
+#### Scenario: Failed first ingest leaves no partial session
 
-Rationale: a session with an unknown or disputed agent type is still worth
-analyzing. Dropping it would silently shrink every count that includes it.
+- **WHEN** any session-grain or dimension write fails while ingesting a new session
+- **THEN** the store contains no partially persisted rows derived from that session
 
-### Requirement: Parse health is counted, not hidden
+#### Scenario: One failed target does not roll back other sessions
 
-Records the parser cannot understand SHALL be counted and reported rather than
-silently discarded or allowed to abort an otherwise sound read.
+- **WHEN** one target fails during a bulk ingest containing other valid targets
+- **THEN** the failed target is rolled back and the other targets remain successfully committed
 
-#### Scenario: Some lines are unreadable
+### Requirement: Extract usage, turns, and duration
 
-- **WHEN** a transcript contains lines that cannot be parsed, alongside lines that
-  can
-- **THEN** the unreadable lines are skipped, their count is reported with the
-  session, and the sound portion is still ingested
+The system SHALL extract, from each transcript, per-turn token usage (summed across assistant records' `message.usage`), the assistant turn count, and the session duration (first-to-last timestamp span), returning them on the parsed session for aggregation. Missing or malformed usage SHALL contribute zero and SHALL NOT abort parsing.
 
-#### Scenario: Nothing usable in the file
+#### Scenario: Usage summed and returned
 
-- **WHEN** a transcript yields no usable records at all, or lacks the data needed
-  to establish an identity
-- **THEN** the run fails with the source-error exit code and writes nothing to the
-  store
+- **WHEN** a transcript has assistant records carrying `message.usage`
+- **THEN** the parsed session carries summed `input_tokens`, `output_tokens`, `cache_read_tokens`, and `cache_creation_tokens`, the assistant turn count, and the duration
 
-Rationale: an unsound parse is a failure, not a partial result. Surfacing it as a
-value a caller may forget to check would let a half-read snapshot reach the store.
+#### Scenario: Absent usage does not abort
 
-### Requirement: Session records carry deterministic reporting context
+- **WHEN** an assistant record omits `usage` or a usage field
+- **THEN** that contribution is zero and parsing completes normally
 
-Each parsed subagent session SHALL retain its raw agent identifier, effective
-agent-definition identifier when available, qualified parent-session
-identifier, spawn start time, task-prompt length, and distinct fired-skill
-count.
+### Requirement: Extract skill-fire signals
 
-#### Scenario: Modern subagent has sidecar and definition
-- **WHEN** a subagent transcript has a metadata sidecar and an effective agent
-  definition
-- **THEN** its session record carries the raw agent identifier, effective
-  definition identity, qualified parent identity, earliest usable transcript
-  timestamp, task-description length, and fired-skill count
+The system SHALL extract skill-fire signals from a transcript: the skill name from any `isMeta:true` record carrying `<skill-format>true` and a `<command-name>`, and the skill name from any `Skill` tool_use. These signals feed `bridge_session_skill.fired`.
 
-#### Scenario: Definition cannot be resolved
-- **WHEN** a subagent transcript is sound but has no effective agent definition
-- **THEN** the session record remains valid with no agent-definition identity
+#### Scenario: Injection marker yields a fired skill name
 
-### Requirement: Parent metadata does not require main-session ingestion
+- **WHEN** a transcript contains an `isMeta:true` record with `<skill-format>true` and `<command-name>code-audit</command-name>`
+- **THEN** the parser reports `code-audit` as a fired skill
 
-The parser SHALL derive a subagent's qualified parent identifier from its
-project and path and MAY inspect the parent transcript for name-resolution
-evidence without persisting that main session.
+#### Scenario: Skill tool_use yields a fired skill name
 
-#### Scenario: Parent transcript is available
-- **WHEN** the sidecar does not name the agent type and the parent transcript
-  contains the spawning subagent invocation
-- **THEN** the parser may use that invocation's subagent type in name resolution
-  while persisting only the subagent session
-
-#### Scenario: Parent transcript is unavailable
-- **WHEN** the parent transcript cannot be inspected
-- **THEN** the subagent remains ingestible through the remaining name-resolution
-  links
-
-### Requirement: Derivation identity covers every shaping input
-
-The parser SHALL produce a deterministic derivation fingerprint from the sound
-transcript, sidecar, applicable definition and skill evidence, and any parent
-record used for name resolution.
-
-#### Scenario: Sidecar changes while transcript is unchanged
-- **WHEN** a sidecar field changes but the transcript content does not
-- **THEN** the session's transcript revision remains the same and its derivation
-  fingerprint changes
-
-#### Scenario: Context inputs are unchanged
-- **WHEN** the transcript and every input that shapes derived facts are
-  unchanged
-- **THEN** repeated parsing produces the same derivation fingerprint
+- **WHEN** a transcript contains a `Skill` tool_use naming a skill in its input
+- **THEN** the parser reports that skill as fired

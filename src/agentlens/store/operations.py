@@ -1,499 +1,686 @@
+from __future__ import annotations
+
+import json
 import sqlite3
 from collections.abc import Sequence
-from datetime import UTC, datetime
-from typing import cast
+from datetime import date
 
-from agentlens.models.agent_definitions import AgentDefinition
-from agentlens.models.facts import FactSession
-from agentlens.models.identity import SessionKind
-from agentlens.models.report_aggregates import (
-    AgentRollup,
-    MetricTotals,
-    PerSpawnAverages,
-    TrendStatus,
-    WeightedProportion,
-)
-from agentlens.models.session_facts import SessionFacts
-from agentlens.models.skill_signals import SessionSkillSignal
-from agentlens.models.windows import DEFAULT_MIN_SESSIONS_FOR_TREND
-from agentlens.store.outcomes import UpsertOutcome
-from agentlens.store.rows import (
-    agent_definition_to_row,
-    fact_session_to_row,
-    fact_tool_event_to_row,
-    row_to_agent_definition,
-    row_to_fact_session,
-    row_to_fact_tool_event,
-    row_to_session_skill_signal,
-    session_skill_signal_to_row,
-)
-from agentlens.store.schema import (
-    BRIDGE_SESSION_SKILL_COLUMN_NAMES,
-    DIM_AGENT_COLUMN_NAMES,
-    FACT_SESSION_COLUMN_NAMES,
-    FACT_TOOL_EVENT_COLUMN_NAMES,
+from agentlens.errors import ScoringClaimError, StaleVerdictError
+from agentlens.store.models import (
+    AgentDefRecord,
+    ScoringClaimRecord,
+    SessionRecord,
+    SkillBridgeRecord,
+    ToolEventRecord,
+    VerdictRecord,
 )
 
-_ADDITIVE_METRIC_COLUMNS: tuple[str, ...] = (
-    "n_turns",
-    "n_invocations",
-    "n_reads",
-    "n_edits",
-    "n_writes",
-    "n_bash",
-    "n_distinct_files",
-    "n_errors",
-    "n_denials",
-    "n_repeated_invocations",
-    "n_skills_fired",
-    "duration_ms",
-    "input_tokens",
-    "output_tokens",
-    "cache_read_tokens",
-    "cache_creation_tokens",
-    "unreadable_line_count",
-)
 
-_SESSION_CONFLICT_TARGET = "session_id"
-
-_SESSION_COLUMN_LIST = ", ".join(FACT_SESSION_COLUMN_NAMES)
-_SESSION_PLACEHOLDERS = ", ".join(["?"] * len(FACT_SESSION_COLUMN_NAMES))
-_SESSION_UPDATE_ASSIGNMENTS = ",\n    ".join(
-    f"{name} = excluded.{name}"
-    for name in FACT_SESSION_COLUMN_NAMES
-    if name != _SESSION_CONFLICT_TARGET
-)
-
-_TOOL_EVENT_COLUMN_LIST = ", ".join(FACT_TOOL_EVENT_COLUMN_NAMES)
-_TOOL_EVENT_PLACEHOLDERS = ", ".join(["?"] * len(FACT_TOOL_EVENT_COLUMN_NAMES))
-
-_DELETE_TOOL_EVENTS_SQL = "DELETE FROM fact_tool_event WHERE session_id = ?"
-
-_INSERT_TOOL_EVENT_SQL = f"""
-INSERT INTO fact_tool_event (
-    {_TOOL_EVENT_COLUMN_LIST}
-) VALUES ({_TOOL_EVENT_PLACEHOLDERS})
-"""  # noqa: S608
-
-_UPSERT_SESSION_SQL = f"""
-INSERT INTO fact_session (
-    {_SESSION_COLUMN_LIST}
-) VALUES ({_SESSION_PLACEHOLDERS})
-ON CONFLICT(session_id) DO UPDATE SET
-    {_SESSION_UPDATE_ASSIGNMENTS}
-WHERE excluded.derivation_fingerprint != fact_session.derivation_fingerprint
-  AND excluded.derivation_observed_mtime_ns >= fact_session.derivation_observed_mtime_ns
-"""  # noqa: S608
-
-_SELECT_STORED_DERIVATION_FINGERPRINT_SQL = (
-    "SELECT derivation_fingerprint FROM fact_session WHERE session_id = ?"
-)
-
-_SELECT_SESSION_SQL = f"""
-SELECT
-    {_SESSION_COLUMN_LIST}
-FROM fact_session
-WHERE session_id = ?
-"""  # noqa: S608
-
-_SELECT_TOOL_EVENTS_SQL = f"""
-SELECT
-    {_TOOL_EVENT_COLUMN_LIST}
-FROM fact_tool_event
-WHERE session_id = ?
-ORDER BY ordinal
-"""  # noqa: S608
-
-_SKILL_SIGNAL_COLUMN_LIST = ", ".join(BRIDGE_SESSION_SKILL_COLUMN_NAMES)
-_SKILL_SIGNAL_PLACEHOLDERS = ", ".join(["?"] * len(BRIDGE_SESSION_SKILL_COLUMN_NAMES))
-
-_DELETE_SKILL_SIGNALS_SQL = "DELETE FROM bridge_session_skill WHERE session_id = ?"
-
-_INSERT_SKILL_SIGNAL_SQL = f"""
-INSERT INTO bridge_session_skill (
-    {_SKILL_SIGNAL_COLUMN_LIST}
-) VALUES ({_SKILL_SIGNAL_PLACEHOLDERS})
-"""  # noqa: S608
-
-_SELECT_SKILL_SIGNALS_SQL = f"""
-SELECT
-    {_SKILL_SIGNAL_COLUMN_LIST}
-FROM bridge_session_skill
-WHERE session_id = ?
-ORDER BY skill_name
-"""  # noqa: S608
-
-_DIM_AGENT_CONFLICT_TARGET = "agent_definition_id"
-
-_DIM_AGENT_COLUMN_LIST = ", ".join(DIM_AGENT_COLUMN_NAMES)
-_DIM_AGENT_PLACEHOLDERS = ", ".join(["?"] * len(DIM_AGENT_COLUMN_NAMES))
-
-_UPSERT_AGENT_DEFINITION_SQL = f"""
-INSERT INTO dim_agent (
-    {_DIM_AGENT_COLUMN_LIST}
-) VALUES ({_DIM_AGENT_PLACEHOLDERS})
-ON CONFLICT({_DIM_AGENT_CONFLICT_TARGET}) DO NOTHING
-"""  # noqa: S608
-
-_SELECT_AGENT_DEFINITION_SQL = f"""
-SELECT
-    {_DIM_AGENT_COLUMN_LIST}
-FROM dim_agent
-WHERE agent_definition_id = ?
-"""  # noqa: S608
-
-_SELECT_SPAWNS_IN_WINDOW_SQL = f"""
-SELECT
-    {_SESSION_COLUMN_LIST}
-FROM fact_session
-WHERE session_kind = ?
-  AND started_at >= ?
-  AND started_at < ?
-  AND (? IS NULL OR agent_type = ?)
-ORDER BY started_at, session_id
-"""  # noqa: S608
-
-_AGENT_POPULATION_SUM_COLUMN_LIST = ",\n    ".join(
-    f"SUM({name}) AS {name}" for name in _ADDITIVE_METRIC_COLUMNS
-)
-
-_SELECT_AGENT_POPULATION_SQL = f"""
-SELECT
-    agent_type,
-    COUNT(*) AS n_spawns,
-    {_AGENT_POPULATION_SUM_COLUMN_LIST}
-FROM fact_session
-WHERE session_kind = ?
-  AND started_at >= ?
-  AND started_at < ?
-  AND (? IS NULL OR agent_type = ?)
-GROUP BY agent_type
-ORDER BY agent_type
-"""  # noqa: S608
+def _replace_session_events(
+    conn: sqlite3.Connection,
+    session_id: str,
+    events: Sequence[ToolEventRecord],
+) -> None:
+    conn.execute("DELETE FROM fact_tool_event WHERE session_id = ?", (session_id,))
+    conn.executemany(
+        """
+        INSERT INTO fact_tool_event
+            (session_id, seq, tool_name, is_error, denial_kind, ts, input_hash,
+             file_path_hash, output_bytes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                event.session_id,
+                event.seq,
+                event.tool_name,
+                int(event.is_error),
+                event.denial_kind,
+                event.ts,
+                event.input_hash,
+                event.file_path_hash,
+                event.output_bytes,
+            )
+            for event in events
+        ],
+    )
 
 
-_SESSION_SAVEPOINT_NAME = "session_upsert"
+def upsert_session_events(
+    conn: sqlite3.Connection,
+    session_id: str,
+    events: Sequence[ToolEventRecord],
+) -> None:
+    """Replace all `fact_tool_event` rows for `session_id` in one transaction.
 
-
-class _StalenessRefusalError(Exception):
-    """Raised internally to unwind one session's savepoint; never escapes this module."""
-
-
-def upsert_session(connection: sqlite3.Connection, facts: SessionFacts) -> UpsertOutcome:
-    """Replace a session's stored rows with ``facts``, honoring the staleness rule.
-
-    Deletes the session's existing tool-invocation and skill-bridge rows,
-    inserts the new ones, then upserts the session row, all as one
-    transaction. When the incoming snapshot is not sound to write over what is
-    stored, the entire transaction rolls back, including the delete and
-    reinsert of the tool-invocation and skill-bridge rows.
+    Delete-then-insert per session_id gives idempotency: re-running the
+    same session produces the same row set, and a session's events are never
+    duplicated across runs.
     """
-    with connection:
-        connection.execute("BEGIN")
-        return _apply_session(connection, facts)
+    _validate_child_identities(session_id, events, ())
+    with conn:
+        _replace_session_events(conn, session_id, events)
 
 
-def upsert_batch(
-    connection: sqlite3.Connection,
+def upsert_agent_definition(conn: sqlite3.Connection, agent: AgentDefRecord) -> None:
+    """Persist one immutable agent-definition version."""
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO dim_agent
+                (agent_definition_id, agent_type, scope, source_project, name, model,
+                 effort, declared_tools, declared_skills, definition_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(agent_definition_id) DO UPDATE SET
+                name = excluded.name,
+                model = excluded.model,
+                effort = excluded.effort,
+                declared_tools = excluded.declared_tools,
+                declared_skills = excluded.declared_skills
+            """,
+            (
+                agent.effective_definition_id,
+                agent.agent_type,
+                agent.scope,
+                agent.source_project,
+                agent.name,
+                agent.model,
+                agent.effort,
+                json.dumps(list(agent.declared_tools)),
+                json.dumps(list(agent.declared_skills)),
+                agent.definition_hash,
+            ),
+        )
+
+
+def fetch_declared_skills(
+    conn: sqlite3.Connection,
+    agent_type: str,
     *,
-    definitions: Sequence[AgentDefinition],
-    facts: Sequence[SessionFacts],
-) -> tuple[UpsertOutcome, ...]:
-    """Apply every definition and session as one all-or-nothing transaction.
+    source_project: str | None = None,
+    definition_id: str | None = None,
+) -> list[str]:
+    """Look up `dim_agent.declared_skills` for `agent_type`.
 
-    Each session's staleness outcome is decided independently, through its
-    own savepoint, so one session being skipped or refused as stale never
-    discards another session's writes in the same batch. A database error
-    anywhere — a stale outcome is not one — rolls back everything in the
-    batch, leaving the store exactly as it was before this call.
+    Returns an empty list when the agent type is unknown or its
+    `declared_skills` cannot be decoded — never raises, since a missing
+    agent definition should not block skill-bridge derivation.
     """
-    with connection:
-        connection.execute("BEGIN")
-        for definition in definitions:
-            connection.execute(_UPSERT_AGENT_DEFINITION_SQL, agent_definition_to_row(definition))
-        return tuple(_apply_session(connection, one) for one in facts)
-
-
-def _apply_session(connection: sqlite3.Connection, facts: SessionFacts) -> UpsertOutcome:
-    """Write one session's rows under its own savepoint, honoring the staleness rule.
-
-    A staleness refusal rolls back only this savepoint; a real database error
-    propagates uncaught, so a caller running several of these under one outer
-    transaction can let that error abort the whole transaction.
-
-    Assumes the caller already opened an explicit transaction. Releasing a
-    savepoint that turns out to be the outermost one commits immediately,
-    the same as a bare ``BEGIN``/``COMMIT`` pair, which would silently defeat
-    the batch's all-or-nothing guarantee — the explicit ``BEGIN`` every caller
-    issues first is what keeps this savepoint nested instead.
-    """
-    session_id = facts.session.identity.session_id
-    connection.execute(f"SAVEPOINT {_SESSION_SAVEPOINT_NAME}")
-    try:
-        connection.execute(_DELETE_TOOL_EVENTS_SQL, (session_id,))
-        connection.executemany(
-            _INSERT_TOOL_EVENT_SQL,
-            [fact_tool_event_to_row(event) for event in facts.tool_events],
-        )
-        connection.execute(_DELETE_SKILL_SIGNALS_SQL, (session_id,))
-        connection.executemany(
-            _INSERT_SKILL_SIGNAL_SQL,
-            [session_skill_signal_to_row(signal) for signal in facts.skill_signals],
-        )
-        cursor = connection.execute(_UPSERT_SESSION_SQL, fact_session_to_row(facts.session))
-        if cursor.rowcount == 0:
-            raise _StalenessRefusalError
-    except _StalenessRefusalError:
-        connection.execute(f"ROLLBACK TO SAVEPOINT {_SESSION_SAVEPOINT_NAME}")
-        connection.execute(f"RELEASE SAVEPOINT {_SESSION_SAVEPOINT_NAME}")
-        stored_fingerprint_row = connection.execute(
-            _SELECT_STORED_DERIVATION_FINGERPRINT_SQL, (session_id,)
+    if definition_id is not None:
+        row = conn.execute(
+            "SELECT declared_skills FROM dim_agent WHERE agent_definition_id = ?",
+            (definition_id,),
         ).fetchone()
-        stored_fingerprint = (
-            stored_fingerprint_row[0] if stored_fingerprint_row is not None else None
+    else:
+        effective = fetch_effective_agent_definition(
+            conn,
+            agent_type=agent_type,
+            source_project=source_project or "",
         )
-        if stored_fingerprint == facts.session.derivation_fingerprint:
-            return UpsertOutcome.SKIPPED_IDENTICAL
-        return UpsertOutcome.REFUSED_STALE
-    connection.execute(f"RELEASE SAVEPOINT {_SESSION_SAVEPOINT_NAME}")
-    return UpsertOutcome.REPLACED
+        if effective is None:
+            return []
+        return list(effective.declared_skills)
+    if row is None or row[0] is None:
+        return []
+    try:
+        data = json.loads(row[0])
+    except json.JSONDecodeError:
+        return []
+    return data if isinstance(data, list) else []
 
 
-def read_session(connection: sqlite3.Connection, session_id: str) -> SessionFacts | None:
-    """Return the stored session with its tool-invocation and skill-bridge rows, or ``None``."""
-    session_row = connection.execute(_SELECT_SESSION_SQL, (session_id,)).fetchone()
-    if session_row is None:
-        return None
-    event_rows = connection.execute(_SELECT_TOOL_EVENTS_SQL, (session_id,)).fetchall()
-    skill_rows = connection.execute(_SELECT_SKILL_SIGNALS_SQL, (session_id,)).fetchall()
-    return SessionFacts(
-        session=row_to_fact_session(session_row),
-        tool_events=tuple(row_to_fact_tool_event(row) for row in event_rows),
-        skill_signals=tuple(row_to_session_skill_signal(row) for row in skill_rows),
-    )
-
-
-def upsert_agent_definition(connection: sqlite3.Connection, definition: AgentDefinition) -> None:
-    """Insert ``definition`` into ``dim_agent`` if its identity is not already stored.
-
-    ``agent_definition_id`` is content-addressed, so a conflicting row is
-    always identical to ``definition``; a repeat catalog scan is therefore a
-    no-op rather than a second, staleness-checked write.
-    """
-    with connection:
-        connection.execute(_UPSERT_AGENT_DEFINITION_SQL, agent_definition_to_row(definition))
-
-
-def read_agent_definition(
-    connection: sqlite3.Connection, agent_definition_id: str
-) -> AgentDefinition | None:
-    """Return the cataloged definition identified by ``agent_definition_id``, or ``None``."""
-    row = connection.execute(_SELECT_AGENT_DEFINITION_SQL, (agent_definition_id,)).fetchone()
-    if row is None:
-        return None
-    return row_to_agent_definition(row)
-
-
-def read_skill_signals_for_sessions(
-    connection: sqlite3.Connection, session_ids: Sequence[str]
-) -> dict[str, tuple[SessionSkillSignal, ...]]:
-    """Return skill-bridge rows for every id in ``session_ids``, grouped by session id.
-
-    One parameterized query covers the whole sequence, regardless of how
-    many ids are requested, so a report window's spawns never trigger one
-    skill-bridge query per spawn. Returns an empty mapping without issuing
-    any query when ``session_ids`` is empty. A session id with no
-    skill-bridge rows is simply absent from the result rather than present
-    with an empty tuple; a caller reading a report's spawns should treat a
-    missing key the same as one mapped to ``()``.
-    """
-    if not session_ids:
-        return {}
-    placeholders = ", ".join(["?"] * len(session_ids))
-    sql = f"""
-    SELECT
-        {_SKILL_SIGNAL_COLUMN_LIST}
-    FROM bridge_session_skill
-    WHERE session_id IN ({placeholders})
-    ORDER BY session_id, skill_name
-    """  # noqa: S608
-    rows = connection.execute(sql, tuple(session_ids)).fetchall()
-    grouped: dict[str, list[SessionSkillSignal]] = {}
-    for row in rows:
-        signal = row_to_session_skill_signal(row)
-        grouped.setdefault(signal.session_id, []).append(signal)
-    return {session_id: tuple(signals) for session_id, signals in grouped.items()}
-
-
-def _utc_bound(moment: datetime) -> str:
-    """Render a window bound in the same fixed-width UTC form ``started_at`` is stored in.
-
-    Both sides of the SQL range comparison must share one string width, or a
-    lexicographic ``<``/``>=`` comparison goes wrong exactly at a window
-    boundary; see the note on the ``started_at`` extractor in ``rows.py``.
-    """
-    return moment.astimezone(UTC).isoformat(timespec="microseconds")
-
-
-def read_spawns_in_window(
-    connection: sqlite3.Connection,
-    start: datetime,
-    end: datetime,
-    agent_type: str | None,
-) -> tuple[FactSession, ...]:
-    """Return every subagent spawn whose ``started_at`` falls in ``[start, end)``.
-
-    Ordered by ``(started_at, session_id)`` so the result is reproducible
-    regardless of physical row order; ties on ``started_at`` break on the
-    qualified session key, which is total. Main-session rows never qualify —
-    the query is scoped to ``session_kind = 'subagent'`` structurally, not
-    filtered out after the fact. ``agent_type`` narrows the result to one
-    agent type; ``None`` returns every subagent spawn in the window.
-    """
-    rows = connection.execute(
-        _SELECT_SPAWNS_IN_WINDOW_SQL,
-        (SessionKind.SUBAGENT.value, _utc_bound(start), _utc_bound(end), agent_type, agent_type),
-    ).fetchall()
-    return tuple(row_to_fact_session(row) for row in rows)
-
-
-def _select_agent_population(
-    connection: sqlite3.Connection, *, start: datetime, end: datetime, agent_type: str | None
-) -> list[sqlite3.Row]:
-    return connection.execute(
-        _SELECT_AGENT_POPULATION_SQL,
-        (SessionKind.SUBAGENT.value, _utc_bound(start), _utc_bound(end), agent_type, agent_type),
-    ).fetchall()
-
-
-def _row_to_metric_totals(row: sqlite3.Row) -> MetricTotals:
-    return MetricTotals(**{name: cast(int, row[name]) for name in _ADDITIVE_METRIC_COLUMNS})
-
-
-def _divide_totals(totals: MetricTotals, n_spawns: int) -> PerSpawnAverages:
-    """Divide each additive metric's total by ``n_spawns``.
-
-    Never called with ``n_spawns == 0``: every ``totals`` here came from a
-    ``GROUP BY agent_type`` row, which only exists when at least one spawn
-    contributed to it.
-    """
-    return PerSpawnAverages(
-        **{name: getattr(totals, name) / n_spawns for name in _ADDITIVE_METRIC_COLUMNS}
-    )
-
-
-def _subtract_averages(current: PerSpawnAverages, prior: PerSpawnAverages) -> PerSpawnAverages:
-    return PerSpawnAverages(
-        **{name: getattr(current, name) - getattr(prior, name) for name in _ADDITIVE_METRIC_COLUMNS}
-    )
-
-
-def _cache_read_proportion(row: sqlite3.Row) -> float | None:
-    """Compute the cache-read proportion from one window's summed totals.
-
-    ``cache_read_tokens / (cache_read_tokens + cache_creation_tokens +
-    input_tokens)``, where ``input_tokens`` is the uncached input. Computed
-    from summed totals rather than averaged per-spawn percentages, so one
-    large run is not weighted the same as a tiny one. ``None`` when the
-    denominator is zero — an unmeasurable proportion, never ``0.0``.
-    """
-    cache_read = cast(int, row["cache_read_tokens"])
-    cache_creation = cast(int, row["cache_creation_tokens"])
-    input_tokens = cast(int, row["input_tokens"])
-    denominator = cache_read + cache_creation + input_tokens
-    if denominator == 0:
-        return None
-    return cache_read / denominator
-
-
-def _build_agent_rollup(
-    current_row: sqlite3.Row,
-    prior_row: sqlite3.Row | None,
+def fetch_effective_agent_definition(
+    conn: sqlite3.Connection,
     *,
-    min_sessions_for_trend: int,
-) -> AgentRollup:
-    n_spawns = cast(int, current_row["n_spawns"])
-    n_spawns_prior = cast(int, prior_row["n_spawns"]) if prior_row is not None else 0
-    totals = _row_to_metric_totals(current_row)
-    averages = _divide_totals(totals, n_spawns)
-    prior_averages = (
-        _divide_totals(_row_to_metric_totals(prior_row), n_spawns_prior)
-        if prior_row is not None
-        else None
+    agent_type: str,
+    source_project: str,
+) -> AgentDefRecord | None:
+    """Resolve the latest project definition before the latest user fallback."""
+    for scope, project in (("project", source_project), ("user", None)):
+        row = conn.execute(
+            """
+            SELECT agent_definition_id, agent_type, scope, source_project, name, model,
+                   effort, declared_tools, declared_skills, definition_hash
+            FROM dim_agent
+            WHERE agent_type = ? AND scope = ? AND source_project IS ?
+            ORDER BY rowid DESC
+            LIMIT 1
+            """,
+            (agent_type, scope, project),
+        ).fetchone()
+        if row is not None:
+            return _agent_definition_from_row(row)
+    return None
+
+
+def resolve_session_agent_definition(
+    conn: sqlite3.Connection,
+    *,
+    session_id: str,
+    source_revision: str,
+    agent_type: str,
+    source_project: str,
+) -> AgentDefRecord | None:
+    """Preserve a session's prior binding for the same source revision."""
+    row = conn.execute(
+        """
+        SELECT da.agent_definition_id, da.agent_type, da.scope, da.source_project,
+               da.name, da.model, da.effort, da.declared_tools, da.declared_skills,
+               da.definition_hash
+        FROM fact_session fs
+        JOIN dim_agent da ON da.agent_definition_id = fs.agent_definition_id
+        WHERE fs.session_id = ? AND fs.source_revision = ?
+        """,
+        (session_id, source_revision),
+    ).fetchone()
+    if row is not None:
+        return _agent_definition_from_row(row)
+    return fetch_effective_agent_definition(
+        conn,
+        agent_type=agent_type,
+        source_project=source_project,
     )
-    trend_status = (
-        TrendStatus.COMPARABLE
-        if n_spawns >= min_sessions_for_trend and n_spawns_prior >= min_sessions_for_trend
-        else TrendStatus.INSUFFICIENT_DATA
+
+
+def _agent_definition_from_row(row: sqlite3.Row | tuple[object, ...]) -> AgentDefRecord:
+    declared_tools = _decode_string_list(row[7])
+    declared_skills = _decode_string_list(row[8])
+    return AgentDefRecord(
+        definition_id=str(row[0]),
+        agent_type=str(row[1]),
+        scope=str(row[2]),
+        source_project=str(row[3]) if row[3] is not None else None,
+        name=str(row[4]),
+        model=str(row[5]) if row[5] is not None else None,
+        effort=str(row[6]) if row[6] is not None else None,
+        declared_tools=declared_tools,
+        declared_skills=declared_skills,
+        definition_hash=str(row[9]),
     )
-    average_deltas = (
-        _subtract_averages(averages, prior_averages)
-        if trend_status is TrendStatus.COMPARABLE and prior_averages is not None
-        else None
-    )
-    current_proportion = _cache_read_proportion(current_row)
-    prior_proportion = _cache_read_proportion(prior_row) if prior_row is not None else None
-    proportion_delta = (
-        current_proportion - prior_proportion
-        if trend_status is TrendStatus.COMPARABLE
-        and current_proportion is not None
-        and prior_proportion is not None
-        else None
-    )
-    return AgentRollup(
-        agent_type=cast(str, current_row["agent_type"]),
-        n_spawns=n_spawns,
-        n_spawns_prior=n_spawns_prior,
-        trend_status=trend_status,
-        totals=totals,
-        averages=averages,
-        prior_averages=prior_averages,
-        average_deltas=average_deltas,
-        cache_read_proportion=WeightedProportion(
-            current=current_proportion, prior=prior_proportion, delta=proportion_delta
+
+
+def _decode_string_list(value: object) -> list[str]:
+    if not isinstance(value, str):
+        return []
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(decoded, list):
+        return []
+    return [item for item in decoded if isinstance(item, str)]
+
+
+def _upsert_session(conn: sqlite3.Connection, record: SessionRecord) -> None:
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO fact_session (
+            session_id, raw_session_id, source_project, agent_id, agent_type,
+            agent_definition_id, name_source, session_kind, source_revision,
+            source_mtime_ns, source_size, source_content_hash, judge_input_hash,
+            spawn_depth, parent_session_id, spawn_tool_use_id, task_description,
+            session_date, n_turns, n_tool_calls, n_reads, n_edits, n_writes, n_bash,
+            n_files_touched, n_errors, n_permission_denials, n_duplicate_tool_calls,
+            final_report_flagged_partial, duration_sec, input_tokens, output_tokens,
+            cache_read_tokens, cache_creation_tokens, task_prompt_len, n_skills_fired
+        ) VALUES (
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        )
+        """,
+        (
+            record.session_id,
+            record.raw_session_id,
+            record.source_project,
+            record.agent_id,
+            record.agent_type,
+            record.agent_definition_id,
+            record.name_source,
+            record.session_kind,
+            record.source_revision,
+            record.source_mtime_ns,
+            record.source_size,
+            record.source_content_hash,
+            record.judge_input_hash,
+            record.spawn_depth,
+            record.parent_session_id,
+            record.spawn_tool_use_id,
+            record.task_description,
+            record.session_date,
+            record.n_turns,
+            record.n_tool_calls,
+            record.n_reads,
+            record.n_edits,
+            record.n_writes,
+            record.n_bash,
+            record.n_files_touched,
+            record.n_errors,
+            record.n_permission_denials,
+            record.n_duplicate_tool_calls,
+            int(record.final_report_flagged_partial),
+            record.duration_sec,
+            record.input_tokens,
+            record.output_tokens,
+            record.cache_read_tokens,
+            record.cache_creation_tokens,
+            record.task_prompt_len,
+            record.n_skills_fired,
         ),
     )
 
 
-def read_agent_rollups(
-    connection: sqlite3.Connection,
-    current_start: datetime,
-    current_end: datetime,
-    prior_start: datetime,
-    prior_end: datetime,
-    agent_type: str | None,
-    *,
-    min_sessions_for_trend: int = DEFAULT_MIN_SESSIONS_FOR_TREND,
-) -> tuple[AgentRollup, ...]:
-    """Build one rollup per agent type present in the current window.
+def upsert_session(conn: sqlite3.Connection, record: SessionRecord) -> None:
+    """Replace the `fact_session` row for `record.session_id`.
 
-    Population, totals, per-spawn averages, and the weighted cache-read
-    proportion are all computed from ``fact_session`` alone — verdict data is
-    never joined. An agent type with zero current-window spawns never gets a
-    rollup, even when it has prior-window spawns: a rollup's existence is
-    entirely current-window scoped, and this is checked first as a short
-    circuit so an empty current window costs a second query.
-
-    Rollups are ordered by ``agent_type``. Each rollup's ``trend_status`` is
-    ``TrendStatus.COMPARABLE`` only when both its current and prior spawn
-    counts meet ``min_sessions_for_trend``; otherwise every per-spawn average
-    and the cache-read proportion still report their current (and, when
-    available, prior) values, but never a signed delta.
+    `session_id` is the table's primary key, so `INSERT OR REPLACE` is a
+    single-row idempotent upsert — no delete-then-insert needed.
     """
-    current_rows = _select_agent_population(
-        connection, start=current_start, end=current_end, agent_type=agent_type
+    with conn:
+        _upsert_session(conn, record)
+
+
+def _replace_session_skills(
+    conn: sqlite3.Connection,
+    session_id: str,
+    records: Sequence[SkillBridgeRecord],
+) -> None:
+    conn.execute("DELETE FROM bridge_session_skill WHERE session_id = ?", (session_id,))
+    conn.executemany(
+        """
+        INSERT INTO bridge_session_skill (session_id, skill_name, declared, available, fired)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                record.session_id,
+                record.skill_name,
+                int(record.declared),
+                int(record.available),
+                int(record.fired),
+            )
+            for record in records
+        ],
     )
-    if not current_rows:
-        return ()
-    prior_rows = _select_agent_population(
-        connection, start=prior_start, end=prior_end, agent_type=agent_type
+
+
+def upsert_session_skills(
+    conn: sqlite3.Connection,
+    session_id: str,
+    records: Sequence[SkillBridgeRecord],
+) -> None:
+    """Replace all `bridge_session_skill` rows for `session_id`.
+
+    Delete-then-insert per session_id, mirroring `upsert_session_events`.
+    """
+    _validate_child_identities(session_id, (), records)
+    with conn:
+        _replace_session_skills(conn, session_id, records)
+
+
+def _upsert_dim_date(
+    conn: sqlite3.Connection,
+    date_str: str,
+    *,
+    year: int,
+    month: int,
+    day: int,
+    iso_week: int,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO dim_date (date, year, month, day, iso_week)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(date) DO NOTHING
+        """,
+        (date_str, year, month, day, iso_week),
     )
-    prior_by_agent_type = {cast(str, row["agent_type"]): row for row in prior_rows}
-    return tuple(
-        _build_agent_rollup(
-            current_row,
-            prior_by_agent_type.get(cast(str, current_row["agent_type"])),
-            min_sessions_for_trend=min_sessions_for_trend,
+
+
+def upsert_dim_date(
+    conn: sqlite3.Connection,
+    date_str: str,
+    *,
+    year: int,
+    month: int,
+    day: int,
+    iso_week: int,
+) -> None:
+    """Idempotently insert a `dim_date` row; a no-op if `date_str` already exists."""
+    with conn:
+        _upsert_dim_date(
+            conn,
+            date_str,
+            year=year,
+            month=month,
+            day=day,
+            iso_week=iso_week,
         )
-        for current_row in current_rows
+
+
+def _upsert_dim_tool(
+    conn: sqlite3.Connection,
+    tool_name: str,
+    *,
+    category: str | None = None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO dim_tool (tool_name, category)
+        VALUES (?, ?)
+        ON CONFLICT(tool_name) DO NOTHING
+        """,
+        (tool_name, category),
+    )
+
+
+def upsert_dim_tool(
+    conn: sqlite3.Connection, tool_name: str, *, category: str | None = None
+) -> None:
+    """Idempotently insert a `dim_tool` row; a no-op if `tool_name` already exists."""
+    with conn:
+        _upsert_dim_tool(conn, tool_name, category=category)
+
+
+def set_session_judge_input_hash(
+    conn: sqlite3.Connection,
+    *,
+    session_id: str,
+    source_revision: str,
+    judge_input_hash: str,
+) -> bool:
+    """Set the exact prepared-input hash if the source revision is still current."""
+    with conn:
+        cursor = conn.execute(
+            """
+            UPDATE fact_session
+            SET judge_input_hash = ?
+            WHERE session_id = ? AND source_revision = ?
+            """,
+            (judge_input_hash, session_id, source_revision),
+        )
+    return cursor.rowcount == 1
+
+
+def verdict_exists(conn: sqlite3.Connection, record: VerdictRecord) -> bool:
+    """Return whether the exact input/rubric/concrete-model verdict is cached."""
+    row = conn.execute(
+        """
+        SELECT 1
+        FROM fact_verdict
+        WHERE session_id = ?
+          AND judge_input_hash = ?
+          AND rubric_version = ?
+          AND judge_model = ?
+        """,
+        (
+            record.session_id,
+            record.judge_input_hash,
+            record.rubric_version,
+            record.judge_model,
+        ),
+    ).fetchone()
+    return row is not None
+
+
+def acquire_scoring_claim(
+    conn: sqlite3.Connection,
+    claim: ScoringClaimRecord,
+    *,
+    now: str,
+) -> bool:
+    """Atomically acquire unscored work, replacing only an expired claim."""
+    with conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO scoring_claim (
+                session_id, judge_input_hash, rubric_version, judge_model,
+                owner_id, expires_at
+            )
+            SELECT ?, ?, ?, ?, ?, ?
+            WHERE EXISTS (
+                SELECT 1
+                FROM fact_session
+                WHERE session_id = ? AND judge_input_hash = ?
+            )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM fact_verdict
+                WHERE session_id = ?
+                  AND judge_input_hash = ?
+                  AND rubric_version = ?
+                  AND judge_model = ?
+              )
+            ON CONFLICT(session_id, judge_input_hash, rubric_version, judge_model)
+            DO UPDATE SET
+                owner_id = excluded.owner_id,
+                expires_at = excluded.expires_at
+            WHERE scoring_claim.expires_at <= ?
+               OR scoring_claim.owner_id = excluded.owner_id
+            """,
+            (
+                claim.session_id,
+                claim.judge_input_hash,
+                claim.rubric_version,
+                claim.judge_model,
+                claim.owner_id,
+                claim.expires_at,
+                claim.session_id,
+                claim.judge_input_hash,
+                claim.session_id,
+                claim.judge_input_hash,
+                claim.rubric_version,
+                claim.judge_model,
+                now,
+            ),
+        )
+    return cursor.rowcount == 1
+
+
+def release_scoring_claim(conn: sqlite3.Connection, claim: ScoringClaimRecord) -> bool:
+    """Release a claim only when its current owner requests release."""
+    with conn:
+        cursor = conn.execute(
+            """
+            DELETE FROM scoring_claim
+            WHERE session_id = ?
+              AND judge_input_hash = ?
+              AND rubric_version = ?
+              AND judge_model = ?
+              AND owner_id = ?
+            """,
+            (
+                claim.session_id,
+                claim.judge_input_hash,
+                claim.rubric_version,
+                claim.judge_model,
+                claim.owner_id,
+            ),
+        )
+    return cursor.rowcount == 1
+
+
+def finalize_scoring_claim(
+    conn: sqlite3.Connection,
+    *,
+    claim: ScoringClaimRecord,
+    verdict: VerdictRecord,
+    now: str,
+) -> None:
+    """Persist a verdict and release its active claim in one transaction.
+
+    The concrete verdict model may differ from the claim model when a floating
+    alias was used before the successful call resolved model identity.
+    """
+    if (
+        verdict.session_id != claim.session_id
+        or verdict.judge_input_hash != claim.judge_input_hash
+        or verdict.rubric_version != claim.rubric_version
+    ):
+        raise ScoringClaimError("verdict identity does not match the scoring claim")
+
+    with conn:
+        inserted = conn.execute(
+            """
+            INSERT INTO fact_verdict (
+                session_id, judge_input_hash, rubric_version, judge_model,
+                verdict_json, judge_cost_usd, judge_input_tokens, judge_output_tokens
+            )
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?
+            WHERE EXISTS (
+                SELECT 1
+                FROM fact_session
+                WHERE session_id = ? AND judge_input_hash = ?
+            )
+              AND EXISTS (
+                SELECT 1
+                FROM scoring_claim
+                WHERE session_id = ?
+                  AND judge_input_hash = ?
+                  AND rubric_version = ?
+                  AND judge_model = ?
+                  AND owner_id = ?
+                  AND expires_at > ?
+              )
+            ON CONFLICT(session_id, judge_input_hash, rubric_version, judge_model)
+            DO UPDATE SET
+                verdict_json = excluded.verdict_json,
+                judge_cost_usd = excluded.judge_cost_usd,
+                judge_input_tokens = excluded.judge_input_tokens,
+                judge_output_tokens = excluded.judge_output_tokens
+            """,
+            (
+                verdict.session_id,
+                verdict.judge_input_hash,
+                verdict.rubric_version,
+                verdict.judge_model,
+                verdict.verdict_json,
+                verdict.judge_cost_usd,
+                verdict.judge_input_tokens,
+                verdict.judge_output_tokens,
+                claim.session_id,
+                claim.judge_input_hash,
+                claim.session_id,
+                claim.judge_input_hash,
+                claim.rubric_version,
+                claim.judge_model,
+                claim.owner_id,
+                now,
+            ),
+        )
+        if inserted.rowcount != 1:
+            session_row = conn.execute(
+                "SELECT judge_input_hash FROM fact_session WHERE session_id = ?",
+                (claim.session_id,),
+            ).fetchone()
+            if session_row is None or session_row[0] != claim.judge_input_hash:
+                raise StaleVerdictError(
+                    f"session {claim.session_id} changed while scoring was in flight"
+                )
+            raise ScoringClaimError("scoring claim is no longer active for this owner")
+
+        deleted = conn.execute(
+            """
+            DELETE FROM scoring_claim
+            WHERE session_id = ?
+              AND judge_input_hash = ?
+              AND rubric_version = ?
+              AND judge_model = ?
+              AND owner_id = ?
+            """,
+            (
+                claim.session_id,
+                claim.judge_input_hash,
+                claim.rubric_version,
+                claim.judge_model,
+                claim.owner_id,
+            ),
+        )
+        if deleted.rowcount != 1:
+            raise ScoringClaimError("scoring claim ownership changed during finalization")
+
+
+def _backfill_dim_date(conn: sqlite3.Connection, date_str: str) -> None:
+    try:
+        parsed_date = date.fromisoformat(date_str)
+    except ValueError:
+        return
+    _, iso_week, _ = parsed_date.isocalendar()
+    _upsert_dim_date(
+        conn,
+        date_str,
+        year=parsed_date.year,
+        month=parsed_date.month,
+        day=parsed_date.day,
+        iso_week=iso_week,
+    )
+
+
+def upsert_session_grain(
+    conn: sqlite3.Connection,
+    *,
+    record: SessionRecord,
+    events: Sequence[ToolEventRecord],
+    skills: Sequence[SkillBridgeRecord],
+) -> bool:
+    """Atomically replace every store row derived from one parsed session.
+
+    The session facts, events, skill bridge, and dimension backfills commit
+    together. Any exception rolls the complete write set back, preserving the
+    previously committed session version when one exists.
+    """
+    _validate_child_identities(record.session_id, events, skills)
+    with conn:
+        if not _source_revision_can_replace(conn, record):
+            return False
+        _replace_session_events(conn, record.session_id, events)
+        _upsert_session(conn, record)
+        _replace_session_skills(conn, record.session_id, skills)
+        for tool_name in sorted({event.tool_name for event in events}):
+            _upsert_dim_tool(conn, tool_name)
+        if record.session_date is not None:
+            _backfill_dim_date(conn, record.session_date)
+    return True
+
+
+def _validate_child_identities(
+    session_id: str,
+    events: Sequence[ToolEventRecord],
+    skills: Sequence[SkillBridgeRecord],
+) -> None:
+    mismatched_events = [event.session_id for event in events if event.session_id != session_id]
+    mismatched_skills = [
+        skill.session_id for skill in skills if skill.session_id != session_id
+    ]
+    if mismatched_events or mismatched_skills:
+        raise ValueError(
+            "session-grain child identity mismatch: "
+            f"expected {session_id}, event_ids={sorted(set(mismatched_events))}, "
+            f"skill_ids={sorted(set(mismatched_skills))}"
+        )
+
+
+def _source_revision_can_replace(
+    conn: sqlite3.Connection,
+    record: SessionRecord,
+) -> bool:
+    row = conn.execute(
+        """
+        SELECT source_mtime_ns, source_size, source_content_hash
+        FROM fact_session
+        WHERE session_id = ?
+        """,
+        (record.session_id,),
+    ).fetchone()
+    if row is None:
+        return True
+
+    stored_mtime_ns = int(row[0])
+    stored_size = int(row[1])
+    stored_content_hash = str(row[2])
+    if record.source_mtime_ns < stored_mtime_ns:
+        return False
+    return not (
+        record.source_mtime_ns == stored_mtime_ns
+        and record.source_size == stored_size
+        and record.source_content_hash != stored_content_hash
     )

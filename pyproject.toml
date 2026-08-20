@@ -3,7 +3,7 @@ name = "agentlens"
 version = "0.1.0"
 description = "Analyze, score, and improve Claude Code subagents from their session logs."
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "victormacaubas" }]
 keywords = ["claude", "claude-code", "subagents", "observability", "cli"]
@@ -14,25 +14,23 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Topic :: Software Development :: Quality Assurance",
 ]
-# Closed set: a new runtime dependency is an ADR, not a mid-task call (adr/0002).
 dependencies = [
-    "click>=8.1",   # owned by cli
-    "jinja2>=3.1",  # owned by render; autoescape is the untrusted-output control
+    "click>=8.1",
 ]
+
+[project.scripts]
+agentlens = "agentlens.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/victormacaubas/agentlens"
 Repository = "https://github.com/victormacaubas/agentlens"
-
-[project.scripts]
-agentlens = "agentlens.cli:main"
 
 [dependency-groups]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
     "mypy>=1.11",
-    "import-linter>=2.0",
+    "pillow>=12.3.0",
 ]
 
 [build-system]
@@ -44,130 +42,19 @@ packages = ["src/agentlens"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py312"
+target-version = "py311"
 
 [tool.ruff.lint]
-select = [
-    "E", "W",  # pycodestyle
-    "F",       # pyflakes
-    "I",       # isort
-    "N",       # pep8-naming
-    "UP",      # pyupgrade
-    "B",       # bugbear
-    "C4",      # comprehensions
-    "SIM",     # simplify
-    "TID",     # tidy-imports
-    "S",       # bandit: this tool builds subprocess argv and renders HTML
-    "RUF",
-]
-
-[tool.ruff.lint.per-file-ignores]
-# assert is the mechanism of a test, not a smell in one.
-"tests/**" = ["S101"]
-
-[tool.ruff.lint.flake8-tidy-imports.banned-api]
-"datetime.datetime.utcnow".msg = "Use datetime.now(UTC); utcnow returns a naive datetime."
+select = ["E", "F", "I", "UP", "B", "SIM", "C4"]
 
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.11"
 strict = true
-warn_unreachable = true
 files = ["src", "tests"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra -q --strict-markers -m 'not integration'"
+addopts = "-q -m 'not integration'"
 markers = [
-    "integration: exercises a real external system; needs auth, costs money, excluded by default.",
+    "integration: exercises the real `claude` CLI; excluded from the default run (ADR 0001) and costs money to run.",
 ]
-
-[tool.importlinter]
-root_package = "agentlens"
-include_external_packages = true
-
-[[tool.importlinter.contracts]]
-name = "Layered architecture"
-type = "layers"
-# "|" = independent siblings, ":" = non-independent. Silent footgun: with ":" the
-# four stage packages can import each other and the contract still reports KEPT.
-layers = [
-    "agentlens.cli",
-    "agentlens.core",
-    "agentlens.ingest | agentlens.store | agentlens.judge | agentlens.render",
-    "agentlens.models | agentlens.utils",
-    "agentlens.errors",
-]
-
-[[tool.importlinter.contracts]]
-name = "Only store touches the database driver"
-type = "forbidden"
-source_modules = [
-    "agentlens.cli",
-    "agentlens.core",
-    "agentlens.ingest",
-    "agentlens.judge",
-    "agentlens.render",
-    "agentlens.models",
-    "agentlens.utils",
-]
-forbidden_modules = ["sqlite3"]
-# Direct imports only: cli and core legitimately depend on store as a whole for
-# orchestration, which reaches sqlite3 transitively. What the rule forbids is a
-# sqlite3 type or import statement escaping the store package itself.
-allow_indirect_imports = "true"
-
-[[tool.importlinter.contracts]]
-name = "Only judge spawns processes"
-type = "forbidden"
-source_modules = [
-    "agentlens.cli",
-    "agentlens.core",
-    "agentlens.ingest",
-    "agentlens.store",
-    "agentlens.render",
-    "agentlens.models",
-    "agentlens.utils",
-]
-forbidden_modules = ["subprocess"]
-
-[[tool.importlinter.contracts]]
-name = "Only render templates output"
-type = "forbidden"
-source_modules = [
-    "agentlens.cli",
-    "agentlens.core",
-    "agentlens.ingest",
-    "agentlens.store",
-    "agentlens.judge",
-    "agentlens.models",
-    "agentlens.utils",
-]
-forbidden_modules = ["jinja2"]
-
-[[tool.importlinter.contracts]]
-name = "The deterministic report path never reaches the judge"
-type = "forbidden"
-# Phase 2's report is deterministic by contract: it must not construct or call a
-# judge backend. `core` as a whole may legitimately depend on `judge` once the
-# scoring path exists, so the guard names the report path's own modules rather
-# than the package. Indirect imports are deliberately not allowed here: reaching
-# the judge through a helper would breach the contract just as directly.
-source_modules = [
-    "agentlens.core.report",
-    "agentlens.core.ingest_run",
-]
-forbidden_modules = ["agentlens.judge"]
-
-[[tool.importlinter.contracts]]
-name = "Only cli parses arguments"
-type = "forbidden"
-source_modules = [
-    "agentlens.core",
-    "agentlens.ingest",
-    "agentlens.store",
-    "agentlens.judge",
-    "agentlens.render",
-    "agentlens.models",
-    "agentlens.utils",
-]
-forbidden_modules = ["click", "argparse"]
