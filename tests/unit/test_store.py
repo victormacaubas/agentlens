@@ -1,1105 +1,923 @@
-"""The store: schema creation, the staleness rule, upsert atomicity, and reads."""
+"""Tests for `agentlens.store`: DDL, location resolution, and idempotent writes."""
 
+from __future__ import annotations
+
+import os
 import sqlite3
-import tempfile
-from datetime import UTC, datetime, timedelta
+import stat
 from pathlib import Path
 
 import pytest
 
-from agentlens.errors import StoreError
-from agentlens.models.agent_definitions import DefinitionScope
-from agentlens.models.identity import SessionKind
-from agentlens.models.report_aggregates import AgentRollup, TrendStatus
-from agentlens.models.session_facts import SessionFacts
-from agentlens.models.skill_signals import SessionSkillSignal
-from agentlens.store import Store, UpsertOutcome, open_disposable_clone
-from tests.factories import (
-    build_agent_definition,
-    build_agent_definition_config,
-    build_fact_session,
-    build_fact_tool_event,
-    build_session_facts,
-    build_session_identity,
-    build_session_skill_signal,
-    build_source_revision,
+from agentlens.errors import (
+    ScoringClaimError,
+    StaleVerdictError,
+    StoreLocationError,
+    StoreSchemaError,
+)
+from agentlens.store.models import (
+    AgentDefRecord,
+    ScoringClaimRecord,
+    SessionRecord,
+    SkillBridgeRecord,
+    ToolEventRecord,
+    VerdictRecord,
+)
+from agentlens.store.operations import (
+    acquire_scoring_claim,
+    fetch_declared_skills,
+    fetch_effective_agent_definition,
+    finalize_scoring_claim,
+    release_scoring_claim,
+    upsert_agent_definition,
+    upsert_dim_date,
+    upsert_dim_tool,
+    upsert_session,
+    upsert_session_events,
+    upsert_session_grain,
+    upsert_session_skills,
+)
+from agentlens.store.schema import (
+    REQUIRED_TABLES,
+    SCHEMA_VERSION,
+    STORE_PATH_ENV_VAR,
+    assert_readable_schema_version,
+    create_store,
+    resolve_store_path,
 )
 
 
-def _count_rows(path: Path, table: str) -> int:
-    with sqlite3.connect(path) as connection:
-        row = connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()  # noqa: S608
-        return int(row[0])
+def _table_names(conn: sqlite3.Connection) -> set[str]:
+    rows = conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+    return {row[0] for row in rows}
 
 
-def _count_rows_for_session(path: Path, table: str, session_id: str) -> int:
-    with sqlite3.connect(path) as connection:
-        row = connection.execute(
-            f"SELECT COUNT(*) FROM {table} WHERE session_id = ?",  # noqa: S608
-            (session_id,),
-        ).fetchone()
-        return int(row[0])
+def test_create_store_produces_all_required_tables(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "agentlens.db")
+    try:
+        assert set(REQUIRED_TABLES) <= _table_names(conn)
+    finally:
+        conn.close()
 
 
-def _facts_for(
-    *,
-    session_id: str,
-    content_hash: str = "content-hash-1",
-    mtime_ns: int = 1_700_000_000_000_000_000,
-    n_events: int = 1,
-    session_kind: SessionKind = SessionKind.SUBAGENT,
-    skill_signals: tuple[SessionSkillSignal, ...] = (),
-    **session_kwargs: object,
-) -> SessionFacts:
-    identity = build_session_identity(session_id=session_id, session_kind=session_kind)
-    revision = build_source_revision(content_hash=content_hash, mtime_ns=mtime_ns)
-    session = build_fact_session(
-        identity=identity,
-        revision=revision,
-        n_invocations=n_events,
-        **session_kwargs,  # type: ignore[arg-type]
-    )
-    events = tuple(
-        build_fact_tool_event(session_id=session_id, ordinal=ordinal) for ordinal in range(n_events)
-    )
-    return build_session_facts(session=session, tool_events=events, skill_signals=skill_signals)
-
-
-def test_store_creates_database_file_on_first_use(tmp_path: Path) -> None:
-    db_path = tmp_path / "nested" / "agentlens.db"
-    assert not db_path.exists()
-    with Store(db_path):
-        pass
-    assert db_path.exists()
-
-
-def test_store_creates_both_tables_on_first_use(tmp_path: Path) -> None:
+def test_create_store_is_idempotent(tmp_path: Path) -> None:
     db_path = tmp_path / "agentlens.db"
-    with Store(db_path):
-        pass
-    with sqlite3.connect(db_path) as connection:
-        table_names = {
+    conn1 = create_store(db_path)
+    conn1.close()
+
+    conn2 = create_store(db_path)
+    try:
+        assert set(REQUIRED_TABLES) <= _table_names(conn2)
+    finally:
+        conn2.close()
+
+
+def _stale_store(path: Path) -> None:
+    """Write a store in the pre-qualified-identity shape, unstamped."""
+    conn = sqlite3.connect(path)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE fact_session (
+                session_id TEXT PRIMARY KEY,
+                agent_type TEXT,
+                session_date TEXT
+            );
+            CREATE TABLE dim_agent (
+                agent_type TEXT PRIMARY KEY,
+                definition_hash TEXT
+            );
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    path.chmod(0o600)
+
+
+def test_create_store_stamps_schema_version(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "agentlens.db")
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    finally:
+        conn.close()
+
+
+def test_create_store_rejects_unstamped_store_with_existing_tables(tmp_path: Path) -> None:
+    db_path = tmp_path / "agentlens.db"
+    _stale_store(db_path)
+
+    with pytest.raises(StoreSchemaError) as excinfo:
+        create_store(db_path)
+
+    message = str(excinfo.value)
+    assert "schema version 0" in message
+    assert str(SCHEMA_VERSION) in message
+    assert "delete it and re-run ingest" in message
+    # The stale tables are left untouched rather than partially upgraded.
+    conn = sqlite3.connect(db_path)
+    try:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(fact_session)")}
+        assert "judge_input_hash" not in columns
+    finally:
+        conn.close()
+
+
+def test_create_store_rejects_store_stamped_by_a_newer_schema(tmp_path: Path) -> None:
+    db_path = tmp_path / "agentlens.db"
+    conn = create_store(db_path)
+    try:
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
+        conn.commit()
+    finally:
+        conn.close()
+
+    with pytest.raises(StoreSchemaError, match=f"schema version {SCHEMA_VERSION + 1}"):
+        create_store(db_path)
+
+
+def test_read_only_schema_check_rejects_a_stale_store(tmp_path: Path) -> None:
+    db_path = tmp_path / "agentlens.db"
+    _stale_store(db_path)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        with pytest.raises(StoreSchemaError):
+            assert_readable_schema_version(conn, db_path)
+    finally:
+        conn.close()
+
+
+def test_unpopulated_tables_exist_and_are_empty(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "agentlens.db")
+    try:
+        unpopulated_tables = (
+            "fact_session",
+            "dim_date",
+            "dim_tool",
+            "bridge_session_skill",
+            "fact_verdict",
+        )
+        for table in unpopulated_tables:
+            count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]  # noqa: S608
+            assert count == 0
+    finally:
+        conn.close()
+
+
+def test_fact_tool_event_exposes_required_columns(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "agentlens.db")
+    try:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(fact_tool_event)")}
+        assert columns == {
+            "session_id",
+            "seq",
+            "tool_name",
+            "is_error",
+            "denial_kind",
+            "ts",
+            "input_hash",
+            "file_path_hash",
+            "output_bytes",
+        }
+    finally:
+        conn.close()
+
+
+def test_dim_agent_exposes_required_columns(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "agentlens.db")
+    try:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(dim_agent)")}
+        assert columns == {
+            "agent_definition_id",
+            "agent_type",
+            "scope",
+            "source_project",
+            "name",
+            "model",
+            "effort",
+            "declared_tools",
+            "declared_skills",
+            "definition_hash",
+        }
+    finally:
+        conn.close()
+
+
+def test_resolve_store_path_defaults_to_cache_dir() -> None:
+    path = resolve_store_path(env={})
+    assert path == Path.home() / ".cache" / "agentlens" / "agentlens.db"
+
+
+def test_resolve_store_path_env_var_override() -> None:
+    path = resolve_store_path(env={STORE_PATH_ENV_VAR: "/tmp/custom/agentlens.db"})
+    assert path == Path("/tmp/custom/agentlens.db").resolve(strict=False)
+
+
+def test_resolve_store_path_explicit_override_wins_over_env() -> None:
+    path = resolve_store_path(
+        store_override="/tmp/explicit/agentlens.db",
+        env={STORE_PATH_ENV_VAR: "/tmp/custom/agentlens.db"},
+    )
+    assert path == Path("/tmp/explicit/agentlens.db").resolve(strict=False)
+
+
+def test_resolve_store_path_refuses_dot_claude_via_override() -> None:
+    with pytest.raises(StoreLocationError):
+        resolve_store_path(store_override="/Users/someone/.claude/agentlens.db")
+
+
+def test_resolve_store_path_refuses_dot_claude_via_env() -> None:
+    with pytest.raises(StoreLocationError):
+        resolve_store_path(env={STORE_PATH_ENV_VAR: "/Users/someone/.claude/agentlens.db"})
+
+
+def test_resolve_store_path_refuses_symlink_into_dot_claude(tmp_path: Path) -> None:
+    claude_dir = tmp_path / ".claude"
+    claude_dir.mkdir()
+    alias = tmp_path / "cache"
+    alias.symlink_to(claude_dir, target_is_directory=True)
+
+    with pytest.raises(StoreLocationError, match="inside a .claude directory"):
+        resolve_store_path(store_override=alias / "agentlens.db")
+
+    assert not (claude_dir / "agentlens.db").exists()
+
+
+def test_create_store_is_private_under_permissive_umask(tmp_path: Path) -> None:
+    store_dir = tmp_path / "private-store"
+    store_path = store_dir / "agentlens.db"
+    previous_umask = os.umask(0)
+    try:
+        conn = create_store(store_path)
+        try:
+            conn.execute("PRAGMA journal_mode = WAL")
+            with conn:
+                conn.execute("INSERT INTO dim_tool (tool_name) VALUES ('Read')")
+
+            assert stat.S_IMODE(store_dir.stat().st_mode) == 0o700
+            assert stat.S_IMODE(store_path.stat().st_mode) == 0o600
+            for suffix in ("-wal", "-shm"):
+                sidecar = Path(f"{store_path}{suffix}")
+                assert sidecar.exists()
+                assert stat.S_IMODE(sidecar.stat().st_mode) == 0o600
+        finally:
+            conn.close()
+    finally:
+        os.umask(previous_umask)
+
+
+def test_create_store_rejects_existing_insecure_permissions(tmp_path: Path) -> None:
+    store_path = tmp_path / "agentlens.db"
+    conn = create_store(store_path)
+    conn.close()
+    store_path.chmod(0o644)
+
+    with pytest.raises(StoreLocationError, match="owner-only permissions"):
+        create_store(store_path)
+
+
+def _event(session_id: str, seq: int, tool_name: str = "Read") -> ToolEventRecord:
+    return ToolEventRecord(
+        session_id=session_id,
+        seq=seq,
+        tool_name=tool_name,
+        is_error=False,
+        denial_kind=None,
+        ts="2026-07-06T18:56:19.617Z",
+        input_hash="deadbeef",
+        output_bytes=42,
+    )
+
+
+def test_upsert_session_events_is_idempotent(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "agentlens.db")
+    try:
+        events = [_event("s1", 1), _event("s1", 2, "Bash")]
+
+        upsert_session_events(conn, "s1", events)
+        upsert_session_events(conn, "s1", events)
+
+        rows = conn.execute(
+            "SELECT seq, tool_name FROM fact_tool_event WHERE session_id = ? ORDER BY seq", ("s1",)
+        ).fetchall()
+        assert rows == [(1, "Read"), (2, "Bash")]
+    finally:
+        conn.close()
+
+
+def test_upsert_session_events_new_session_leaves_prior_rows_unchanged(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "agentlens.db")
+    try:
+        upsert_session_events(conn, "s1", [_event("s1", 1)])
+        upsert_session_events(conn, "s2", [_event("s2", 1), _event("s2", 2)])
+
+        s1_rows = conn.execute(
+            "SELECT COUNT(*) FROM fact_tool_event WHERE session_id = ?", ("s1",)
+        ).fetchone()[0]
+        s2_rows = conn.execute(
+            "SELECT COUNT(*) FROM fact_tool_event WHERE session_id = ?", ("s2",)
+        ).fetchone()[0]
+        assert s1_rows == 1
+        assert s2_rows == 2
+    finally:
+        conn.close()
+
+
+def test_upsert_agent_definition_preserves_versions_by_definition_hash(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "agentlens.db")
+    try:
+        agent = AgentDefRecord(
+            agent_type="implementer",
+            name="implementer",
+            model="claude-sonnet-5",
+            effort="high",
+            declared_tools=["Read", "Write"],
+            declared_skills=["python-engineering-standards"],
+            definition_hash="hash1",
+        )
+        upsert_agent_definition(conn, agent)
+        upsert_agent_definition(conn, agent)  # re-run: still one row
+
+        rows = conn.execute("SELECT agent_type, definition_hash FROM dim_agent").fetchall()
+        assert rows == [("implementer", "hash1")]
+
+        updated = AgentDefRecord(
+            agent_type="implementer",
+            name="implementer",
+            model="claude-sonnet-5",
+            effort="high",
+            declared_tools=["Read"],
+            declared_skills=[],
+            definition_hash="hash2",
+        )
+        upsert_agent_definition(conn, updated)
+        rows = conn.execute(
+            "SELECT agent_type, definition_hash FROM dim_agent ORDER BY definition_hash"
+        ).fetchall()
+        assert rows == [("implementer", "hash1"), ("implementer", "hash2")]
+    finally:
+        conn.close()
+
+
+def test_fetch_declared_skills_returns_list_for_known_agent(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "agentlens.db")
+    try:
+        agent = AgentDefRecord(
+            agent_type="implementer",
+            name="implementer",
+            model=None,
+            effort=None,
+            declared_tools=[],
+            declared_skills=["python-engineering-standards"],
+            definition_hash="hash1",
+        )
+        upsert_agent_definition(conn, agent)
+        assert fetch_declared_skills(conn, "implementer") == ["python-engineering-standards"]
+    finally:
+        conn.close()
+
+
+def test_fetch_declared_skills_unknown_agent_returns_empty(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "agentlens.db")
+    try:
+        assert fetch_declared_skills(conn, "no-such-agent") == []
+    finally:
+        conn.close()
+
+
+def test_effective_definition_prefers_matching_project_then_user(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "agentlens.db")
+    try:
+        user = AgentDefRecord(
+            agent_type="implementer",
+            name="implementer",
+            model=None,
+            effort=None,
+            declared_tools=[],
+            declared_skills=["user-skill"],
+            definition_hash="user-hash",
+        )
+        project = AgentDefRecord(
+            agent_type="implementer",
+            name="implementer",
+            model=None,
+            effort=None,
+            declared_tools=[],
+            declared_skills=["project-skill"],
+            definition_hash="project-hash",
+            scope="project",
+            source_project="project-a",
+        )
+        upsert_agent_definition(conn, user)
+        upsert_agent_definition(conn, project)
+
+        project_match = fetch_effective_agent_definition(
+            conn, agent_type="implementer", source_project="project-a"
+        )
+        fallback = fetch_effective_agent_definition(
+            conn, agent_type="implementer", source_project="project-b"
+        )
+
+        assert project_match is not None
+        assert project_match.declared_skills == ["project-skill"]
+        assert fallback is not None
+        assert fallback.declared_skills == ["user-skill"]
+    finally:
+        conn.close()
+
+
+# --------------------------------------------------------------------------
+# fact_session: renamed/demoted columns (store-schema spec)
+# --------------------------------------------------------------------------
+
+
+def test_fact_session_has_renamed_and_demoted_columns(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "agentlens.db")
+    try:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(fact_session)")}
+        assert "n_duplicate_tool_calls" in columns
+        assert "final_report_flagged_partial" in columns
+        assert "n_retry_loops" not in columns
+        assert "claimed_status" not in columns
+        assert {
+            "raw_session_id",
+            "source_project",
+            "source_revision",
+            "source_mtime_ns",
+            "source_size",
+            "source_content_hash",
+            "judge_input_hash",
+            "agent_definition_id",
+        } <= columns
+    finally:
+        conn.close()
+
+
+def test_store_has_scoring_claim_and_window_indexes(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "agentlens.db")
+    try:
+        indexes = {
             row[0]
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
             ).fetchall()
         }
-    assert {"fact_session", "fact_tool_event", "dim_agent", "bridge_session_skill"} <= table_names
+        assert "scoring_claim" in _table_names(conn)
+        assert {
+            "idx_fact_session_window",
+            "idx_fact_session_agent_window",
+            "idx_fact_session_parent",
+            "idx_fact_session_parent_window",
+        } <= indexes
+    finally:
+        conn.close()
 
 
-def test_store_honors_a_caller_supplied_location(tmp_path: Path) -> None:
-    first_path = tmp_path / "first.db"
-    second_path = tmp_path / "second.db"
-    with Store(first_path) as store:
-        store.upsert_session(_facts_for(session_id="session-a"))
-    with Store(second_path) as store:
-        store.upsert_session(_facts_for(session_id="session-b"))
-    assert first_path.exists()
-    assert second_path.exists()
-    with Store(first_path) as store:
-        assert store.read_session("session-a") is not None
-        assert store.read_session("session-b") is None
-    with Store(second_path) as store:
-        assert store.read_session("session-b") is not None
-        assert store.read_session("session-a") is None
-
-
-def test_read_session_returns_none_for_an_unknown_session_id(tmp_path: Path) -> None:
-    with Store(tmp_path / "agentlens.db") as store:
-        assert store.read_session("does-not-exist") is None
-
-
-def test_four_spawns_of_the_same_agent_type_are_four_distinct_rows(tmp_path: Path) -> None:
-    session_ids = [f"session-{index}" for index in range(4)]
-    db_path = tmp_path / "agentlens.db"
-    with Store(db_path) as store:
-        for index, session_id in enumerate(session_ids):
-            outcome = store.upsert_session(
-                _facts_for(session_id=session_id, agent_type="implementer", n_events=index + 1)
-            )
-            assert outcome == UpsertOutcome.REPLACED
-        assert _count_rows(db_path, "fact_session") == 4
-        for index, session_id in enumerate(session_ids):
-            stored = store.read_session(session_id)
-            assert stored is not None
-            assert stored.session.n_invocations == index + 1
-            assert len(stored.tool_events) == index + 1
-
-
-def test_reingesting_the_same_session_leaves_no_duplicate_rows(tmp_path: Path) -> None:
-    db_path = tmp_path / "agentlens.db"
-    with Store(db_path) as store:
-        store.upsert_session(
-            _facts_for(session_id="session-a", content_hash="hash-1", mtime_ns=100, n_events=3)
-        )
-        outcome = store.upsert_session(
-            _facts_for(session_id="session-a", content_hash="hash-2", mtime_ns=200, n_events=3)
-        )
-        assert outcome == UpsertOutcome.REPLACED
-        assert _count_rows(db_path, "fact_session") == 1
-        assert _count_rows_for_session(db_path, "fact_tool_event", "session-a") == 3
-
-
-def test_reingesting_with_fewer_invocations_leaves_no_orphan_rows(tmp_path: Path) -> None:
-    db_path = tmp_path / "agentlens.db"
-    with Store(db_path) as store:
-        store.upsert_session(
-            _facts_for(session_id="session-a", content_hash="hash-1", mtime_ns=100, n_events=5)
-        )
-        outcome = store.upsert_session(
-            _facts_for(session_id="session-a", content_hash="hash-2", mtime_ns=200, n_events=2)
-        )
-        assert outcome == UpsertOutcome.REPLACED
-        assert _count_rows_for_session(db_path, "fact_tool_event", "session-a") == 2
-        stored = store.read_session("session-a")
-        assert stored is not None
-        assert len(stored.tool_events) == 2
-
-
-def test_reingesting_a_session_with_changed_skill_evidence_replaces_bridge_rows_atomically(
-    tmp_path: Path,
-) -> None:
-    db_path = tmp_path / "agentlens.db"
-    with Store(db_path) as store:
-        store.upsert_session(
-            _facts_for(
-                session_id="session-a",
-                content_hash="hash-1",
-                mtime_ns=100,
-                skill_signals=(
-                    build_session_skill_signal(
-                        session_id="session-a", skill_name="tdd", fired=True
-                    ),
+def test_report_window_and_parent_lens_plans_avoid_full_session_scan(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "agentlens.db")
+    try:
+        with conn:
+            conn.executemany(
+                """
+                INSERT INTO fact_session (
+                    session_id, raw_session_id, source_project, session_kind,
+                    session_date, agent_type, parent_session_id
+                ) VALUES (?, ?, ?, 'subagent', ?, ?, ?)
+                """,
+                (
+                    (
+                        f"qualified-{index}",
+                        f"raw-{index}",
+                        f"project-{index % 20}",
+                        f"2026-07-{(index % 28) + 1:02d}",
+                        "implementer" if index % 2 else "researcher",
+                        f"parent-{index % 500}",
+                    )
+                    for index in range(20_000)
                 ),
             )
+
+        window_plan = [
+            str(row[3])
+            for row in conn.execute(
+                """
+                EXPLAIN QUERY PLAN
+                SELECT agent_type, COUNT(*)
+                FROM fact_session
+                WHERE session_kind = 'subagent'
+                  AND session_date >= ?
+                  AND session_date < ?
+                GROUP BY agent_type
+                """,
+                ("2026-07-10", "2026-07-17"),
+            ).fetchall()
+        ]
+        parent_lens_plan = [
+            str(row[3])
+            for row in conn.execute(
+                """
+                EXPLAIN QUERY PLAN
+                SELECT parent_session_id, COUNT(*)
+                FROM fact_session
+                WHERE session_kind = 'subagent'
+                  AND parent_session_id IS NOT NULL
+                  AND session_date >= ?
+                  AND session_date < ?
+                GROUP BY parent_session_id
+                """,
+                ("2026-07-10", "2026-07-17"),
+            ).fetchall()
+        ]
+
+        assert not any(detail == "SCAN fact_session" for detail in window_plan)
+        assert any("INDEX idx_fact_session_window" in detail for detail in window_plan)
+        assert not any(detail == "SCAN fact_session" for detail in parent_lens_plan)
+        assert any("INDEX idx_fact_session_parent_window" in detail for detail in parent_lens_plan)
+    finally:
+        conn.close()
+
+
+def test_scoring_claim_blocks_active_owner_and_recovers_after_expiry(tmp_path: Path) -> None:
+    db_path = tmp_path / "agentlens.db"
+    first_conn = create_store(db_path)
+    second_conn = create_store(db_path)
+    try:
+        upsert_session(first_conn, _session_record(judge_input_hash="input-hash"))
+        first_claim = ScoringClaimRecord(
+            session_id="s1",
+            judge_input_hash="input-hash",
+            rubric_version="v1",
+            judge_model="claude-sonnet-5",
+            owner_id="owner-1",
+            expires_at="2026-07-06T00:10:00+00:00",
         )
-        outcome = store.upsert_session(
-            _facts_for(
-                session_id="session-a",
-                content_hash="hash-2",
-                mtime_ns=200,
-                skill_signals=(
-                    build_session_skill_signal(
-                        session_id="session-a", skill_name="orchestrate", fired=True
-                    ),
+        second_claim = ScoringClaimRecord(
+            session_id="s1",
+            judge_input_hash="input-hash",
+            rubric_version="v1",
+            judge_model="claude-sonnet-5",
+            owner_id="owner-2",
+            expires_at="2026-07-06T00:20:00+00:00",
+        )
+
+        assert acquire_scoring_claim(
+            first_conn,
+            first_claim,
+            now="2026-07-06T00:00:00+00:00",
+        )
+        assert not acquire_scoring_claim(
+            second_conn,
+            second_claim,
+            now="2026-07-06T00:05:00+00:00",
+        )
+        assert acquire_scoring_claim(
+            second_conn,
+            second_claim,
+            now="2026-07-06T00:11:00+00:00",
+        )
+        assert not release_scoring_claim(first_conn, first_claim)
+        assert release_scoring_claim(second_conn, second_claim)
+    finally:
+        first_conn.close()
+        second_conn.close()
+
+
+def test_scoring_claim_finalization_requires_current_owner(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "agentlens.db")
+    try:
+        upsert_session(conn, _session_record(judge_input_hash="input-hash"))
+        claim = ScoringClaimRecord(
+            session_id="s1",
+            judge_input_hash="input-hash",
+            rubric_version="v1",
+            judge_model="sonnet",
+            owner_id="owner-1",
+            expires_at="2026-07-06T00:10:00+00:00",
+        )
+        assert acquire_scoring_claim(
+            conn,
+            claim,
+            now="2026-07-06T00:00:00+00:00",
+        )
+        verdict = VerdictRecord(
+            session_id="s1",
+            judge_input_hash="input-hash",
+            rubric_version="v1",
+            judge_model="claude-sonnet-5",
+            verdict_json="{}",
+            judge_cost_usd=0.01,
+            judge_input_tokens=10,
+            judge_output_tokens=5,
+        )
+        wrong_owner = ScoringClaimRecord(
+            session_id=claim.session_id,
+            judge_input_hash=claim.judge_input_hash,
+            rubric_version=claim.rubric_version,
+            judge_model=claim.judge_model,
+            owner_id="owner-2",
+            expires_at=claim.expires_at,
+        )
+
+        with pytest.raises(ScoringClaimError, match="active for this owner"):
+            finalize_scoring_claim(
+                conn,
+                claim=wrong_owner,
+                verdict=verdict,
+                now="2026-07-06T00:05:00+00:00",
+            )
+
+        finalize_scoring_claim(
+            conn,
+            claim=claim,
+            verdict=verdict,
+            now="2026-07-06T00:05:00+00:00",
+        )
+        assert conn.execute("SELECT COUNT(*) FROM fact_verdict").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM scoring_claim").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_scoring_claim_rejects_stale_in_flight_verdict(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "agentlens.db")
+    try:
+        upsert_session(conn, _session_record(judge_input_hash="input-old"))
+        claim = ScoringClaimRecord(
+            session_id="s1",
+            judge_input_hash="input-old",
+            rubric_version="v1",
+            judge_model="claude-sonnet-5",
+            owner_id="owner-1",
+            expires_at="2026-07-06T00:10:00+00:00",
+        )
+        assert acquire_scoring_claim(
+            conn,
+            claim,
+            now="2026-07-06T00:00:00+00:00",
+        )
+        with conn:
+            conn.execute(
+                "UPDATE fact_session SET judge_input_hash = ? WHERE session_id = ?",
+                ("input-new", "s1"),
+            )
+        verdict = VerdictRecord(
+            session_id="s1",
+            judge_input_hash="input-old",
+            rubric_version="v1",
+            judge_model="claude-sonnet-5",
+            verdict_json="{}",
+            judge_cost_usd=0.01,
+            judge_input_tokens=10,
+            judge_output_tokens=5,
+        )
+
+        with pytest.raises(StaleVerdictError, match="changed while scoring"):
+            finalize_scoring_claim(
+                conn,
+                claim=claim,
+                verdict=verdict,
+                now="2026-07-06T00:05:00+00:00",
+            )
+
+        assert conn.execute("SELECT COUNT(*) FROM fact_verdict").fetchone()[0] == 0
+        assert conn.execute("SELECT owner_id FROM scoring_claim").fetchone() == ("owner-1",)
+    finally:
+        conn.close()
+
+
+def _session_record(session_id: str = "s1", **overrides: object) -> SessionRecord:
+    defaults: dict[str, object] = {
+        "session_id": session_id,
+        "agent_id": "a1",
+        "agent_type": "implementer",
+        "name_source": "meta_agent_type",
+        "session_kind": "subagent",
+        "spawn_depth": 1,
+        "parent_session_id": "parent-sid",
+        "spawn_tool_use_id": "toolu_1",
+        "task_description": "do the thing",
+        "session_date": "2026-07-06",
+        "n_turns": 3,
+        "n_tool_calls": 2,
+        "n_reads": 1,
+        "n_edits": 1,
+        "n_writes": 0,
+        "n_bash": 0,
+        "n_files_touched": 1,
+        "n_errors": 0,
+        "n_permission_denials": 0,
+        "n_duplicate_tool_calls": 0,
+        "final_report_flagged_partial": False,
+        "duration_sec": 12.5,
+        "input_tokens": 100,
+        "output_tokens": 50,
+        "cache_read_tokens": 10,
+        "cache_creation_tokens": 5,
+        "task_prompt_len": 12,
+        "n_skills_fired": 0,
+    }
+    defaults.update(overrides)
+    return SessionRecord(**defaults)  # type: ignore[arg-type]
+
+
+def test_upsert_session_replaces_row_by_session_id(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "agentlens.db")
+    try:
+        upsert_session(conn, _session_record(n_errors=0))
+        upsert_session(conn, _session_record(n_errors=3))  # re-ingest: full replace
+
+        rows = conn.execute(
+            "SELECT n_errors FROM fact_session WHERE session_id = ?", ("s1",)
+        ).fetchall()
+        assert rows == [(3,)]
+    finally:
+        conn.close()
+
+
+def test_upsert_session_stores_final_report_flagged_partial_as_boolean(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "agentlens.db")
+    try:
+        upsert_session(conn, _session_record(final_report_flagged_partial=True))
+        row = conn.execute(
+            "SELECT final_report_flagged_partial FROM fact_session WHERE session_id = ?", ("s1",)
+        ).fetchone()
+        assert row == (1,)
+    finally:
+        conn.close()
+
+
+def test_upsert_session_skills_is_idempotent_and_full_replace(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "agentlens.db")
+    try:
+        first = [
+            SkillBridgeRecord(
+                session_id="s1", skill_name="a", declared=True, available=False, fired=False
+            )
+        ]
+        upsert_session_skills(conn, "s1", first)
+        upsert_session_skills(conn, "s1", first)
+
+        rows = conn.execute(
+            "SELECT skill_name, declared, fired FROM bridge_session_skill WHERE session_id = ?",
+            ("s1",),
+        ).fetchall()
+        assert rows == [("a", 1, 0)]
+
+        second = [
+            SkillBridgeRecord(
+                session_id="s1", skill_name="b", declared=False, available=False, fired=True
+            )
+        ]
+        upsert_session_skills(conn, "s1", second)
+        rows = conn.execute(
+            "SELECT skill_name FROM bridge_session_skill WHERE session_id = ?", ("s1",)
+        ).fetchall()
+        assert rows == [("b",)]  # "a" row is gone: full replace, not merge
+    finally:
+        conn.close()
+
+
+def test_upsert_dim_date_is_idempotent(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "agentlens.db")
+    try:
+        upsert_dim_date(conn, "2026-07-06", year=2026, month=7, day=6, iso_week=28)
+        upsert_dim_date(conn, "2026-07-06", year=2026, month=7, day=6, iso_week=28)
+
+        rows = conn.execute("SELECT date, iso_week FROM dim_date").fetchall()
+        assert rows == [("2026-07-06", 28)]
+    finally:
+        conn.close()
+
+
+def test_upsert_dim_tool_is_idempotent(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "agentlens.db")
+    try:
+        upsert_dim_tool(conn, "Read")
+        upsert_dim_tool(conn, "Read")
+        upsert_dim_tool(conn, "Bash")
+
+        rows = {row[0] for row in conn.execute("SELECT tool_name FROM dim_tool").fetchall()}
+        assert rows == {"Read", "Bash"}
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("mismatched_child", ["event", "skill"])
+def test_session_grain_rejects_mismatched_child_before_mutation(
+    tmp_path: Path,
+    mismatched_child: str,
+) -> None:
+    conn = create_store(tmp_path / "agentlens.db")
+    try:
+        original = _session_record(
+            n_errors=1,
+            source_mtime_ns=10,
+            source_size=10,
+            source_content_hash="old",
+            source_revision="old-revision",
+        )
+        assert upsert_session_grain(
+            conn,
+            record=original,
+            events=[_event("s1", 1)],
+            skills=[
+                SkillBridgeRecord(
+                    session_id="s1",
+                    skill_name="old-skill",
+                    declared=True,
+                    available=True,
+                    fired=False,
+                )
+            ],
+        )
+
+        events = [_event("other" if mismatched_child == "event" else "s1", 1, "Bash")]
+        skills = [
+            SkillBridgeRecord(
+                session_id="other" if mismatched_child == "skill" else "s1",
+                skill_name="new-skill",
+                declared=False,
+                available=False,
+                fired=True,
+            )
+        ]
+        with pytest.raises(ValueError, match="child identity mismatch"):
+            upsert_session_grain(
+                conn,
+                record=_session_record(
+                    n_errors=9,
+                    source_mtime_ns=20,
+                    source_size=20,
+                    source_content_hash="new",
+                    source_revision="new-revision",
                 ),
+                events=events,
+                skills=skills,
             )
+
+        assert conn.execute(
+            "SELECT n_errors FROM fact_session WHERE session_id = 's1'"
+        ).fetchone() == (1,)
+        assert conn.execute(
+            "SELECT tool_name FROM fact_tool_event WHERE session_id = 's1'"
+        ).fetchall() == [("Read",)]
+        assert conn.execute(
+            "SELECT skill_name FROM bridge_session_skill WHERE session_id = 's1'"
+        ).fetchall() == [("old-skill",)]
+    finally:
+        conn.close()
+
+
+def test_stale_source_revision_cannot_replace_newer_grain(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "agentlens.db")
+    try:
+        newer = _session_record(
+            n_errors=2,
+            source_mtime_ns=20,
+            source_size=20,
+            source_content_hash="new",
+            source_revision="new",
         )
-        assert outcome == UpsertOutcome.REPLACED
-        stored = store.read_session("session-a")
-        assert stored is not None
-        assert [signal.skill_name for signal in stored.skill_signals] == ["orchestrate"]
-        assert _count_rows_for_session(db_path, "bridge_session_skill", "session-a") == 1
-
-
-def test_a_stale_snapshots_skill_rows_leave_the_stored_bridge_untouched(tmp_path: Path) -> None:
-    db_path = tmp_path / "agentlens.db"
-    original_signal = build_session_skill_signal(
-        session_id="session-a", skill_name="tdd", fired=True
-    )
-    with Store(db_path) as store:
-        store.upsert_session(
-            _facts_for(
-                session_id="session-a",
-                content_hash="hash-1",
-                mtime_ns=200,
-                skill_signals=(original_signal,),
-            )
+        older = _session_record(
+            n_errors=9,
+            source_mtime_ns=10,
+            source_size=10,
+            source_content_hash="old",
+            source_revision="old",
         )
-        outcome = store.upsert_session(
-            _facts_for(
-                session_id="session-a",
-                content_hash="hash-2",
-                mtime_ns=100,
-                skill_signals=(
-                    build_session_skill_signal(
-                        session_id="session-a", skill_name="orchestrate", fired=True
-                    ),
-                ),
-            )
+        assert upsert_session_grain(conn, record=newer, events=[], skills=[])
+        assert not upsert_session_grain(conn, record=older, events=[], skills=[])
+        assert conn.execute(
+            "SELECT n_errors, source_revision FROM fact_session WHERE session_id = 's1'"
+        ).fetchone() == (2, "new")
+    finally:
+        conn.close()
+
+
+def test_equal_stat_metadata_with_different_hash_is_conflict(tmp_path: Path) -> None:
+    conn = create_store(tmp_path / "agentlens.db")
+    try:
+        first = _session_record(
+            n_errors=1,
+            source_mtime_ns=20,
+            source_size=20,
+            source_content_hash="hash-a",
+            source_revision="a",
         )
-        assert outcome == UpsertOutcome.REFUSED_STALE
-        stored = store.read_session("session-a")
-        assert stored is not None
-        assert stored.skill_signals == (original_signal,)
-
-
-def test_older_snapshot_is_refused_and_stored_rows_are_untouched(tmp_path: Path) -> None:
-    db_path = tmp_path / "agentlens.db"
-    with Store(db_path) as store:
-        store.upsert_session(
-            _facts_for(
-                session_id="session-a",
-                content_hash="hash-1",
-                mtime_ns=200,
-                n_events=3,
-                agent_type="original",
-            )
+        conflict = _session_record(
+            n_errors=9,
+            source_mtime_ns=20,
+            source_size=20,
+            source_content_hash="hash-b",
+            source_revision="b",
         )
-        outcome = store.upsert_session(
-            _facts_for(
-                session_id="session-a",
-                content_hash="hash-2",
-                mtime_ns=100,
-                n_events=1,
-                agent_type="stale",
-            )
+        assert upsert_session_grain(conn, record=first, events=[], skills=[])
+        assert not upsert_session_grain(
+            conn, record=conflict, events=[], skills=[]
         )
-        assert outcome == UpsertOutcome.REFUSED_STALE
-        stored = store.read_session("session-a")
-        assert stored is not None
-        assert stored.session.agent_type == "original"
-        assert len(stored.tool_events) == 3
-
-
-def test_identical_snapshot_is_a_no_op(tmp_path: Path) -> None:
-    db_path = tmp_path / "agentlens.db"
-    with Store(db_path) as store:
-        store.upsert_session(
-            _facts_for(
-                session_id="session-a",
-                content_hash="hash-1",
-                mtime_ns=100,
-                n_events=3,
-                agent_type="original",
-            )
-        )
-        outcome = store.upsert_session(
-            _facts_for(
-                session_id="session-a",
-                content_hash="hash-1",
-                mtime_ns=999,
-                n_events=1,
-                agent_type="ignored",
-            )
-        )
-        assert outcome == UpsertOutcome.SKIPPED_IDENTICAL
-        stored = store.read_session("session-a")
-        assert stored is not None
-        assert stored.session.agent_type == "original"
-        assert len(stored.tool_events) == 3
-
-
-def test_changed_derivation_refreshes_context_while_transcript_revision_is_unchanged(
-    tmp_path: Path,
-) -> None:
-    """A newer derivation (a changed sidecar, say) refreshes derived facts.
-
-    The transcript's own revision never changes here; only the derivation
-    fingerprint and its observed mtime do, proving the store gates on those,
-    not on ``revision_content_hash``.
-    """
-    db_path = tmp_path / "agentlens.db"
-    with Store(db_path) as store:
-        store.upsert_session(
-            _facts_for(
-                session_id="session-a",
-                derivation_fingerprint="fingerprint-1",
-                derivation_observed_mtime_ns=100,
-                agent_type="original",
-            )
-        )
-        outcome = store.upsert_session(
-            _facts_for(
-                session_id="session-a",
-                derivation_fingerprint="fingerprint-2",
-                derivation_observed_mtime_ns=200,
-                agent_type="refreshed",
-            )
-        )
-        assert outcome == UpsertOutcome.REPLACED
-        stored = store.read_session("session-a")
-        assert stored is not None
-        assert stored.session.agent_type == "refreshed"
-        assert stored.session.revision.content_hash == "content-hash-1"
-
-
-def test_identical_derivation_fingerprint_is_skipped_even_with_a_newer_observed_mtime(
-    tmp_path: Path,
-) -> None:
-    db_path = tmp_path / "agentlens.db"
-    with Store(db_path) as store:
-        store.upsert_session(
-            _facts_for(
-                session_id="session-a",
-                derivation_fingerprint="fingerprint-1",
-                derivation_observed_mtime_ns=100,
-                agent_type="original",
-            )
-        )
-        outcome = store.upsert_session(
-            _facts_for(
-                session_id="session-a",
-                derivation_fingerprint="fingerprint-1",
-                derivation_observed_mtime_ns=999,
-                agent_type="ignored",
-            )
-        )
-        assert outcome == UpsertOutcome.SKIPPED_IDENTICAL
-        stored = store.read_session("session-a")
-        assert stored is not None
-        assert stored.session.agent_type == "original"
-
-
-def test_older_derivation_leaves_the_complete_stored_snapshot_untouched(
-    tmp_path: Path,
-) -> None:
-    db_path = tmp_path / "agentlens.db"
-    with Store(db_path) as store:
-        store.upsert_session(
-            _facts_for(
-                session_id="session-a",
-                derivation_fingerprint="fingerprint-new",
-                derivation_observed_mtime_ns=200,
-                agent_type="original",
-                n_events=3,
-            )
-        )
-        outcome = store.upsert_session(
-            _facts_for(
-                session_id="session-a",
-                derivation_fingerprint="fingerprint-old",
-                derivation_observed_mtime_ns=100,
-                agent_type="stale",
-                n_events=1,
-            )
-        )
-        assert outcome == UpsertOutcome.REFUSED_STALE
-        stored = store.read_session("session-a")
-        assert stored is not None
-        assert stored.session.agent_type == "original"
-        assert len(stored.tool_events) == 3
-
-
-def test_an_internally_inconsistent_snapshot_writes_nothing(tmp_path: Path) -> None:
-    """Duplicate ordinals within one snapshot violate the tool-event key.
-
-    The write must fail atomically: the offending snapshot's events collide on
-    insert, and the existing, previously stored rows for that session are left
-    exactly as they were.
-    """
-    db_path = tmp_path / "agentlens.db"
-    with Store(db_path) as store:
-        store.upsert_session(
-            _facts_for(
-                session_id="session-a",
-                content_hash="hash-1",
-                mtime_ns=100,
-                n_events=3,
-                agent_type="original",
-            )
-        )
-        identity = build_session_identity(session_id="session-a")
-        revision = build_source_revision(content_hash="hash-2", mtime_ns=200)
-        session = build_fact_session(identity=identity, revision=revision, agent_type="corrupt")
-        duplicated_events = (
-            build_fact_tool_event(session_id="session-a", ordinal=0),
-            build_fact_tool_event(session_id="session-a", ordinal=0),
-        )
-        malformed = build_session_facts(session=session, tool_events=duplicated_events)
-
-        with pytest.raises(StoreError):
-            store.upsert_session(malformed)
-
-        stored = store.read_session("session-a")
-        assert stored is not None
-        assert stored.session.agent_type == "original"
-        assert len(stored.tool_events) == 3
-        assert _count_rows_for_session(db_path, "fact_tool_event", "session-a") == 3
-
-
-def test_batch_upserts_definitions_and_sessions_together(tmp_path: Path) -> None:
-    db_path = tmp_path / "agentlens.db"
-    definition = build_agent_definition(config=build_agent_definition_config(name="implementer"))
-    facts = (_facts_for(session_id="session-a"), _facts_for(session_id="session-b"))
-    with Store(db_path) as store:
-        outcomes = store.upsert_batch(definitions=(definition,), facts=facts)
-    assert outcomes == (UpsertOutcome.REPLACED, UpsertOutcome.REPLACED)
-    assert _count_rows(db_path, "dim_agent") == 1
-    assert _count_rows(db_path, "fact_session") == 2
-
-
-def test_four_same_type_spawns_in_one_batch_remain_four_distinct_rows(tmp_path: Path) -> None:
-    """The batch grain is the spawn: four ``implementer`` spawns are four rows, never one."""
-    db_path = tmp_path / "agentlens.db"
-    facts = tuple(
-        _facts_for(session_id=f"session-{index}", agent_type="implementer") for index in range(4)
-    )
-    with Store(db_path) as store:
-        outcomes = store.upsert_batch(definitions=(), facts=facts)
-    assert outcomes == (UpsertOutcome.REPLACED,) * 4
-    assert _count_rows(db_path, "fact_session") == 4
-
-
-def test_reingesting_the_same_batch_does_not_duplicate_rows(tmp_path: Path) -> None:
-    db_path = tmp_path / "agentlens.db"
-    facts = (_facts_for(session_id="session-a"), _facts_for(session_id="session-b"))
-    with Store(db_path) as store:
-        store.upsert_batch(definitions=(), facts=facts)
-        outcomes = store.upsert_batch(definitions=(), facts=facts)
-    assert outcomes == (UpsertOutcome.SKIPPED_IDENTICAL, UpsertOutcome.SKIPPED_IDENTICAL)
-    assert _count_rows(db_path, "fact_session") == 2
-
-
-def test_a_mid_batch_database_failure_writes_nothing_from_that_batch(tmp_path: Path) -> None:
-    db_path = tmp_path / "agentlens.db"
-    good = _facts_for(session_id="session-a")
-    identity = build_session_identity(session_id="session-b")
-    revision = build_source_revision(content_hash="hash-corrupt")
-    corrupt_session = build_fact_session(identity=identity, revision=revision)
-    duplicated_events = (
-        build_fact_tool_event(session_id="session-b", ordinal=0),
-        build_fact_tool_event(session_id="session-b", ordinal=0),
-    )
-    corrupt = build_session_facts(session=corrupt_session, tool_events=duplicated_events)
-
-    with Store(db_path) as store, pytest.raises(StoreError):
-        store.upsert_batch(definitions=(), facts=(good, corrupt))
-
-    assert _count_rows(db_path, "fact_session") == 0
-    assert _count_rows(db_path, "fact_tool_event") == 0
-
-
-def test_a_later_failing_batch_leaves_an_earlier_successful_batchs_rows_untouched(
-    tmp_path: Path,
-) -> None:
-    db_path = tmp_path / "agentlens.db"
-    with Store(db_path) as store:
-        store.upsert_batch(definitions=(), facts=(_facts_for(session_id="session-a"),))
-
-        identity = build_session_identity(session_id="session-b")
-        revision = build_source_revision(content_hash="hash-corrupt")
-        corrupt_session = build_fact_session(identity=identity, revision=revision)
-        duplicated_events = (
-            build_fact_tool_event(session_id="session-b", ordinal=0),
-            build_fact_tool_event(session_id="session-b", ordinal=0),
-        )
-        corrupt = build_session_facts(session=corrupt_session, tool_events=duplicated_events)
-        with pytest.raises(StoreError):
-            store.upsert_batch(definitions=(), facts=(corrupt,))
-
-        assert _count_rows(db_path, "fact_session") == 1
-        assert store.read_session("session-a") is not None
-        assert store.read_session("session-b") is None
-
-
-def test_read_agent_definition_returns_none_for_an_unknown_identity(tmp_path: Path) -> None:
-    with Store(tmp_path / "agentlens.db") as store:
-        assert store.read_agent_definition("does-not-exist") is None
-
-
-def test_agent_definition_round_trips_through_upsert_and_read(tmp_path: Path) -> None:
-    db_path = tmp_path / "agentlens.db"
-    definition = build_agent_definition(
-        scope=DefinitionScope.USER,
-        config=build_agent_definition_config(name="implementer"),
-    )
-    with Store(db_path) as store:
-        store.upsert_agent_definition(definition)
-        stored = store.read_agent_definition(definition.agent_definition_id)
-    assert stored == definition
-
-
-def test_rescanning_an_unchanged_definition_does_not_duplicate_the_catalog_row(
-    tmp_path: Path,
-) -> None:
-    """A definition's identity is content-addressed, so re-cataloging it twice is a no-op."""
-    db_path = tmp_path / "agentlens.db"
-    definition = build_agent_definition()
-    with Store(db_path) as store:
-        store.upsert_agent_definition(definition)
-        store.upsert_agent_definition(definition)
-    assert _count_rows(db_path, "dim_agent") == 1
-
-
-def test_two_scoped_definitions_with_different_content_catalog_as_two_rows(
-    tmp_path: Path,
-) -> None:
-    db_path = tmp_path / "agentlens.db"
-    first = build_agent_definition(
-        source_project="project-one",
-        config=build_agent_definition_config(name="implementer", effort="high"),
-        revision=build_source_revision(content_hash="content-hash-high"),
-    )
-    second = build_agent_definition(
-        source_project="project-one",
-        config=build_agent_definition_config(name="implementer", effort="medium"),
-        revision=build_source_revision(content_hash="content-hash-medium"),
-    )
-    assert first.agent_definition_id != second.agent_definition_id
-    with Store(db_path) as store:
-        store.upsert_agent_definition(first)
-        store.upsert_agent_definition(second)
-    assert _count_rows(db_path, "dim_agent") == 2
-
-
-def test_agent_definition_catalog_is_equivalent_after_a_store_rebuild(tmp_path: Path) -> None:
-    """Deleting the store and re-cataloging the same definitions reproduces the same rows."""
-    definitions = (
-        build_agent_definition(
-            scope=DefinitionScope.USER, config=build_agent_definition_config(name="implementer")
-        ),
-        build_agent_definition(
-            scope=DefinitionScope.PROJECT,
-            source_project="project-one",
-            config=build_agent_definition_config(name="pathfinder"),
-        ),
-    )
-
-    first_db_path = tmp_path / "first.db"
-    with Store(first_db_path) as store:
-        for definition in definitions:
-            store.upsert_agent_definition(definition)
-        first_read = [store.read_agent_definition(d.agent_definition_id) for d in definitions]
-
-    second_db_path = tmp_path / "second.db"
-    with Store(second_db_path) as store:
-        for definition in definitions:
-            store.upsert_agent_definition(definition)
-        second_read = [store.read_agent_definition(d.agent_definition_id) for d in definitions]
-
-    assert first_read == second_read == list(definitions)
-
-
-_WINDOW_START = datetime(2026, 1, 8, tzinfo=UTC)
-_WINDOW_END = datetime(2026, 1, 15, tzinfo=UTC)
-
-
-def test_read_spawns_in_window_includes_a_spawn_starting_at_the_lower_bound(
-    tmp_path: Path,
-) -> None:
-    with Store(tmp_path / "agentlens.db") as store:
-        store.upsert_session(_facts_for(session_id="session-lower", started_at=_WINDOW_START))
-        spawns = store.read_spawns_in_window(_WINDOW_START, _WINDOW_END, None)
-    assert [spawn.identity.session_id for spawn in spawns] == ["session-lower"]
-
-
-def test_read_spawns_in_window_excludes_a_spawn_starting_at_the_upper_bound(
-    tmp_path: Path,
-) -> None:
-    with Store(tmp_path / "agentlens.db") as store:
-        store.upsert_session(_facts_for(session_id="session-upper", started_at=_WINDOW_END))
-        spawns = store.read_spawns_in_window(_WINDOW_START, _WINDOW_END, None)
-    assert spawns == ()
-
-
-def test_read_spawns_in_window_returns_four_same_type_spawns_from_different_parents(
-    tmp_path: Path,
-) -> None:
-    """Spawn is the grain: four spawns from four parents are four rows, never deduped."""
-    with Store(tmp_path / "agentlens.db") as store:
-        for index in range(4):
-            store.upsert_session(
-                _facts_for(
-                    session_id=f"session-{index}",
-                    started_at=_WINDOW_START + timedelta(hours=index),
-                    agent_type="implementer",
-                    parent_session_id=f"parent-{index}",
-                )
-            )
-        spawns = store.read_spawns_in_window(_WINDOW_START, _WINDOW_END, None)
-    assert len(spawns) == 4
-    assert {spawn.parent_session_id for spawn in spawns} == {f"parent-{i}" for i in range(4)}
-
-
-def test_read_spawns_in_window_excludes_main_session_rows(tmp_path: Path) -> None:
-    with Store(tmp_path / "agentlens.db") as store:
-        store.upsert_session(
-            _facts_for(
-                session_id="session-main", session_kind=SessionKind.MAIN, started_at=_WINDOW_START
-            )
-        )
-        store.upsert_session(_facts_for(session_id="session-subagent", started_at=_WINDOW_START))
-        spawns = store.read_spawns_in_window(_WINDOW_START, _WINDOW_END, None)
-    assert [spawn.identity.session_id for spawn in spawns] == ["session-subagent"]
-
-
-def test_read_spawns_in_window_round_trips_a_spawn_with_unknown_context(tmp_path: Path) -> None:
-    """A spawn whose definition and parent could not be resolved still reads back."""
-    with Store(tmp_path / "agentlens.db") as store:
-        store.upsert_session(
-            _facts_for(
-                session_id="session-unknown-context",
-                started_at=_WINDOW_START,
-                agent_definition_id=None,
-                parent_session_id=None,
-            )
-        )
-        spawns = store.read_spawns_in_window(_WINDOW_START, _WINDOW_END, None)
-    assert len(spawns) == 1
-    assert spawns[0].agent_definition_id is None
-    assert spawns[0].parent_session_id is None
-
-
-def test_read_spawns_in_window_returns_empty_tuple_for_zero_results(tmp_path: Path) -> None:
-    with Store(tmp_path / "agentlens.db") as store:
-        assert store.read_spawns_in_window(_WINDOW_START, _WINDOW_END, None) == ()
-
-
-def test_read_spawns_in_window_filters_to_the_given_agent_type(tmp_path: Path) -> None:
-    with Store(tmp_path / "agentlens.db") as store:
-        store.upsert_session(
-            _facts_for(
-                session_id="session-implementer",
-                started_at=_WINDOW_START,
-                agent_type="implementer",
-            )
-        )
-        store.upsert_session(
-            _facts_for(
-                session_id="session-pathfinder", started_at=_WINDOW_START, agent_type="pathfinder"
-            )
-        )
-        spawns = store.read_spawns_in_window(_WINDOW_START, _WINDOW_END, "pathfinder")
-    assert [spawn.agent_type for spawn in spawns] == ["pathfinder"]
-
-
-def test_read_spawns_in_window_orders_by_started_at_then_session_id(tmp_path: Path) -> None:
-    with Store(tmp_path / "agentlens.db") as store:
-        store.upsert_session(
-            _facts_for(session_id="session-b", started_at=_WINDOW_START + timedelta(hours=1))
-        )
-        store.upsert_session(_facts_for(session_id="session-z", started_at=_WINDOW_START))
-        store.upsert_session(_facts_for(session_id="session-a", started_at=_WINDOW_START))
-        spawns = store.read_spawns_in_window(_WINDOW_START, _WINDOW_END, None)
-    assert [spawn.identity.session_id for spawn in spawns] == [
-        "session-a",
-        "session-z",
-        "session-b",
-    ]
-
-
-def test_read_skill_signals_for_sessions_returns_empty_mapping_for_empty_input(
-    tmp_path: Path,
-) -> None:
-    with Store(tmp_path / "agentlens.db") as store:
-        assert store.read_skill_signals_for_sessions([]) == {}
-
-
-def test_read_skill_signals_for_sessions_groups_rows_by_session_id(tmp_path: Path) -> None:
-    with Store(tmp_path / "agentlens.db") as store:
-        store.upsert_session(
-            _facts_for(
-                session_id="session-one",
-                skill_signals=(
-                    build_session_skill_signal(session_id="session-one", skill_name="skill-a"),
-                ),
-            )
-        )
-        store.upsert_session(
-            _facts_for(
-                session_id="session-two",
-                skill_signals=(
-                    build_session_skill_signal(session_id="session-two", skill_name="skill-b"),
-                ),
-            )
-        )
-        grouped = store.read_skill_signals_for_sessions(["session-one", "session-two"])
-    assert set(grouped) == {"session-one", "session-two"}
-    assert [signal.skill_name for signal in grouped["session-one"]] == ["skill-a"]
-    assert [signal.skill_name for signal in grouped["session-two"]] == ["skill-b"]
-
-
-def test_read_skill_signals_for_sessions_orders_skill_names_within_a_session(
-    tmp_path: Path,
-) -> None:
-    with Store(tmp_path / "agentlens.db") as store:
-        store.upsert_session(
-            _facts_for(
-                session_id="session-multi",
-                skill_signals=(
-                    build_session_skill_signal(session_id="session-multi", skill_name="skill-z"),
-                    build_session_skill_signal(session_id="session-multi", skill_name="skill-a"),
-                ),
-            )
-        )
-        grouped = store.read_skill_signals_for_sessions(["session-multi"])
-    assert [signal.skill_name for signal in grouped["session-multi"]] == ["skill-a", "skill-z"]
-
-
-def test_read_skill_signals_for_sessions_omits_a_session_with_no_bridge_rows(
-    tmp_path: Path,
-) -> None:
-    with Store(tmp_path / "agentlens.db") as store:
-        store.upsert_session(_facts_for(session_id="session-no-skills"))
-        grouped = store.read_skill_signals_for_sessions(["session-no-skills"])
-    assert grouped == {}
-
-
-def test_read_skill_signals_for_sessions_never_returns_a_session_not_requested(
-    tmp_path: Path,
-) -> None:
-    with Store(tmp_path / "agentlens.db") as store:
-        store.upsert_session(
-            _facts_for(
-                session_id="session-in",
-                skill_signals=(
-                    build_session_skill_signal(session_id="session-in", skill_name="skill-a"),
-                ),
-            )
-        )
-        store.upsert_session(
-            _facts_for(
-                session_id="session-out",
-                skill_signals=(
-                    build_session_skill_signal(session_id="session-out", skill_name="skill-b"),
-                ),
-            )
-        )
-        grouped = store.read_skill_signals_for_sessions(["session-in"])
-    assert set(grouped) == {"session-in"}
-
-
-_CURRENT_START = datetime(2026, 2, 1, tzinfo=UTC)
-_CURRENT_END = datetime(2026, 2, 8, tzinfo=UTC)
-_PRIOR_START = datetime(2026, 1, 25, tzinfo=UTC)
-_PRIOR_END = _CURRENT_START
-
-
-def _rollup_for(rollups: tuple[AgentRollup, ...], agent_type: str) -> AgentRollup:
-    for rollup in rollups:
-        if rollup.agent_type == agent_type:
-            return rollup
-    raise AssertionError(f"no rollup for agent type {agent_type!r}")
-
-
-def test_read_agent_rollups_returns_empty_tuple_when_the_current_window_has_no_spawns(
-    tmp_path: Path,
-) -> None:
-    with Store(tmp_path / "agentlens.db") as store:
-        store.upsert_session(_facts_for(session_id="session-prior-only", started_at=_PRIOR_START))
-        rollups = store.read_agent_rollups(
-            _CURRENT_START, _CURRENT_END, _PRIOR_START, _PRIOR_END, None
-        )
-    assert rollups == ()
-
-
-def test_read_agent_rollups_excludes_an_agent_type_present_only_in_the_prior_window(
-    tmp_path: Path,
-) -> None:
-    with Store(tmp_path / "agentlens.db") as store:
-        store.upsert_session(
-            _facts_for(
-                session_id="session-prior-only",
-                started_at=_PRIOR_START,
-                agent_type="prior-only-agent",
-            )
-        )
-        store.upsert_session(
-            _facts_for(
-                session_id="session-current",
-                started_at=_CURRENT_START,
-                agent_type="current-agent",
-            )
-        )
-        rollups = store.read_agent_rollups(
-            _CURRENT_START, _CURRENT_END, _PRIOR_START, _PRIOR_END, None
-        )
-    assert {rollup.agent_type for rollup in rollups} == {"current-agent"}
-
-
-def test_read_agent_rollups_reports_no_prior_comparison_for_a_current_only_agent(
-    tmp_path: Path,
-) -> None:
-    with Store(tmp_path / "agentlens.db") as store:
-        store.upsert_session(
-            _facts_for(
-                session_id="session-current-only", started_at=_CURRENT_START, agent_type="scout"
-            )
-        )
-        rollups = store.read_agent_rollups(
-            _CURRENT_START, _CURRENT_END, _PRIOR_START, _PRIOR_END, None
-        )
-    rollup = _rollup_for(rollups, "scout")
-    assert rollup.n_spawns == 1
-    assert rollup.n_spawns_prior == 0
-    assert rollup.trend_status is TrendStatus.INSUFFICIENT_DATA
-    assert rollup.prior_averages is None
-    assert rollup.average_deltas is None
-    assert rollup.cache_read_proportion.prior is None
-
-
-def test_read_agent_rollups_shows_an_available_prior_average_below_threshold_without_a_delta(
-    tmp_path: Path,
-) -> None:
-    """Prior window below the trend threshold still surfaces its raw average, never a direction."""
-    with Store(tmp_path / "agentlens.db") as store:
-        for index in range(5):
-            store.upsert_session(
-                _facts_for(
-                    session_id=f"session-current-{index}",
-                    started_at=_CURRENT_START + timedelta(hours=index),
-                    agent_type="scout",
-                    n_turns=4,
-                )
-            )
-        for index in range(2):
-            store.upsert_session(
-                _facts_for(
-                    session_id=f"session-prior-{index}",
-                    started_at=_PRIOR_START + timedelta(hours=index),
-                    agent_type="scout",
-                    n_turns=8,
-                )
-            )
-        rollups = store.read_agent_rollups(
-            _CURRENT_START, _CURRENT_END, _PRIOR_START, _PRIOR_END, None, min_sessions_for_trend=5
-        )
-    rollup = _rollup_for(rollups, "scout")
-    assert rollup.n_spawns == 5
-    assert rollup.n_spawns_prior == 2
-    assert rollup.trend_status is TrendStatus.INSUFFICIENT_DATA
-    assert rollup.prior_averages is not None
-    assert rollup.prior_averages.n_turns == pytest.approx(8.0)
-    assert rollup.average_deltas is None
-
-
-def test_read_agent_rollups_signs_the_delta_when_both_windows_meet_the_threshold(
-    tmp_path: Path,
-) -> None:
-    with Store(tmp_path / "agentlens.db") as store:
-        for index in range(5):
-            store.upsert_session(
-                _facts_for(
-                    session_id=f"session-current-{index}",
-                    started_at=_CURRENT_START + timedelta(hours=index),
-                    agent_type="scout",
-                    n_turns=6,
-                )
-            )
-        for index in range(5):
-            store.upsert_session(
-                _facts_for(
-                    session_id=f"session-prior-{index}",
-                    started_at=_PRIOR_START + timedelta(hours=index),
-                    agent_type="scout",
-                    n_turns=4,
-                )
-            )
-        rollups = store.read_agent_rollups(
-            _CURRENT_START, _CURRENT_END, _PRIOR_START, _PRIOR_END, None, min_sessions_for_trend=5
-        )
-    rollup = _rollup_for(rollups, "scout")
-    assert rollup.trend_status is TrendStatus.COMPARABLE
-    assert rollup.averages.n_turns == pytest.approx(6.0)
-    assert rollup.prior_averages is not None
-    assert rollup.prior_averages.n_turns == pytest.approx(4.0)
-    assert rollup.average_deltas is not None
-    assert rollup.average_deltas.n_turns == pytest.approx(2.0)
-
-
-def test_read_agent_rollups_totals_never_drive_the_directional_trend(tmp_path: Path) -> None:
-    """A population that grew, with identical per-spawn behavior, reports a zero average delta."""
-    with Store(tmp_path / "agentlens.db") as store:
-        for index in range(5):
-            store.upsert_session(
-                _facts_for(
-                    session_id=f"session-current-{index}",
-                    started_at=_CURRENT_START + timedelta(hours=index),
-                    agent_type="scout",
-                    n_turns=3,
-                    duration_ms=1_000,
-                )
-            )
-        for index in range(10):
-            store.upsert_session(
-                _facts_for(
-                    session_id=f"session-prior-{index}",
-                    started_at=_PRIOR_START + timedelta(hours=index),
-                    agent_type="scout",
-                    n_turns=3,
-                    duration_ms=1_000,
-                )
-            )
-        rollups = store.read_agent_rollups(
-            _CURRENT_START, _CURRENT_END, _PRIOR_START, _PRIOR_END, None, min_sessions_for_trend=5
-        )
-    rollup = _rollup_for(rollups, "scout")
-    assert rollup.trend_status is TrendStatus.COMPARABLE
-    assert rollup.totals.n_turns == 15
-    assert rollup.prior_averages is not None
-    assert rollup.prior_averages.n_turns == pytest.approx(3.0)
-    assert rollup.average_deltas is not None
-    assert rollup.average_deltas.n_turns == pytest.approx(0.0)
-    assert rollup.average_deltas.duration_ms == pytest.approx(0.0)
-
-
-def test_read_agent_rollups_computes_the_cache_read_proportion_from_summed_totals(
-    tmp_path: Path,
-) -> None:
-    """The proportion is weighted by volume, never the average of each spawn's own percentage."""
-    with Store(tmp_path / "agentlens.db") as store:
-        store.upsert_session(
-            _facts_for(
-                session_id="session-large",
-                started_at=_CURRENT_START,
-                agent_type="scout",
-                input_tokens=100,
-                cache_read_tokens=900,
-                cache_creation_tokens=0,
-            )
-        )
-        store.upsert_session(
-            _facts_for(
-                session_id="session-small",
-                started_at=_CURRENT_START + timedelta(hours=1),
-                agent_type="scout",
-                input_tokens=90,
-                cache_read_tokens=10,
-                cache_creation_tokens=0,
-            )
-        )
-        rollups = store.read_agent_rollups(
-            _CURRENT_START, _CURRENT_END, _PRIOR_START, _PRIOR_END, None
-        )
-    rollup = _rollup_for(rollups, "scout")
-    naive_average_of_percentages = (0.9 + 0.1) / 2
-    weighted_proportion = 910 / 1_100
-    assert rollup.cache_read_proportion.current == pytest.approx(weighted_proportion)
-    assert rollup.cache_read_proportion.current != pytest.approx(naive_average_of_percentages)
-
-
-def test_read_agent_rollups_leaves_the_cache_read_proportion_absent_when_the_denominator_is_zero(
-    tmp_path: Path,
-) -> None:
-    with Store(tmp_path / "agentlens.db") as store:
-        store.upsert_session(
-            _facts_for(
-                session_id="session-no-tokens",
-                started_at=_CURRENT_START,
-                agent_type="scout",
-                input_tokens=0,
-                cache_read_tokens=0,
-                cache_creation_tokens=0,
-            )
-        )
-        rollups = store.read_agent_rollups(
-            _CURRENT_START, _CURRENT_END, _PRIOR_START, _PRIOR_END, None
-        )
-    rollup = _rollup_for(rollups, "scout")
-    assert rollup.cache_read_proportion.current is None
-
-
-def test_read_agent_rollups_are_ordered_by_agent_type(tmp_path: Path) -> None:
-    with Store(tmp_path / "agentlens.db") as store:
-        store.upsert_session(
-            _facts_for(session_id="session-z", started_at=_CURRENT_START, agent_type="zebra")
-        )
-        store.upsert_session(
-            _facts_for(session_id="session-a", started_at=_CURRENT_START, agent_type="alpaca")
-        )
-        rollups = store.read_agent_rollups(
-            _CURRENT_START, _CURRENT_END, _PRIOR_START, _PRIOR_END, None
-        )
-    assert [rollup.agent_type for rollup in rollups] == ["alpaca", "zebra"]
-
-
-def test_read_agent_rollups_filters_to_the_given_agent_type(tmp_path: Path) -> None:
-    with Store(tmp_path / "agentlens.db") as store:
-        store.upsert_session(
-            _facts_for(session_id="session-scout", started_at=_CURRENT_START, agent_type="scout")
-        )
-        store.upsert_session(
-            _facts_for(
-                session_id="session-implementer",
-                started_at=_CURRENT_START,
-                agent_type="implementer",
-            )
-        )
-        rollups = store.read_agent_rollups(
-            _CURRENT_START, _CURRENT_END, _PRIOR_START, _PRIOR_END, "scout"
-        )
-    assert [rollup.agent_type for rollup in rollups] == ["scout"]
-
-
-def test_read_agent_rollups_uses_a_default_trend_threshold_of_five(tmp_path: Path) -> None:
-    """Four spawns in each window is below the unstated default, so the trend stays insufficient."""
-    with Store(tmp_path / "agentlens.db") as store:
-        for index in range(4):
-            store.upsert_session(
-                _facts_for(
-                    session_id=f"session-current-{index}",
-                    started_at=_CURRENT_START + timedelta(hours=index),
-                    agent_type="scout",
-                )
-            )
-            store.upsert_session(
-                _facts_for(
-                    session_id=f"session-prior-{index}",
-                    started_at=_PRIOR_START + timedelta(hours=index),
-                    agent_type="scout",
-                )
-            )
-        rollups = store.read_agent_rollups(
-            _CURRENT_START, _CURRENT_END, _PRIOR_START, _PRIOR_END, None
-        )
-    rollup = _rollup_for(rollups, "scout")
-    assert rollup.n_spawns == 4
-    assert rollup.n_spawns_prior == 4
-    assert rollup.trend_status is TrendStatus.INSUFFICIENT_DATA
-
-
-def _clone_temp_files() -> list[Path]:
-    return list(Path(tempfile.gettempdir()).glob("agentlens-clone-*.sqlite3"))
-
-
-def test_open_disposable_clone_reproduces_every_row_of_an_existing_store(tmp_path: Path) -> None:
-    source_path = tmp_path / "agentlens.db"
-    with Store(source_path) as store:
-        store.upsert_session(_facts_for(session_id="session-a"))
-
-    with open_disposable_clone(source_path) as clone:
-        cloned = clone.read_session("session-a")
-
-    assert cloned is not None
-    assert cloned.session.identity.session_id == "session-a"
-
-
-def test_open_disposable_clone_starts_empty_when_no_persistent_store_exists(
-    tmp_path: Path,
-) -> None:
-    source_path = tmp_path / "agentlens.db"
-
-    with open_disposable_clone(source_path) as clone:
-        assert clone.read_session("session-a") is None
-        clone.upsert_session(_facts_for(session_id="session-a"))
-        assert clone.read_session("session-a") is not None
-
-    assert not source_path.exists()
-
-
-def test_open_disposable_clone_never_modifies_the_configured_source_file(tmp_path: Path) -> None:
-    source_path = tmp_path / "agentlens.db"
-    with Store(source_path) as store:
-        store.upsert_session(_facts_for(session_id="session-a"))
-    before = source_path.read_bytes()
-
-    with open_disposable_clone(source_path) as clone:
-        clone.upsert_session(_facts_for(session_id="session-b"))
-        assert clone.read_session("session-b") is not None
-
-    assert source_path.read_bytes() == before
-    with Store(source_path) as store:
-        assert store.read_session("session-b") is None
-
-
-def test_open_disposable_clone_removes_the_temporary_database_on_success(tmp_path: Path) -> None:
-    source_path = tmp_path / "agentlens.db"
-    before = _clone_temp_files()
-
-    with open_disposable_clone(source_path) as clone:
-        clone.upsert_session(_facts_for(session_id="session-a"))
-
-    assert _clone_temp_files() == before
-
-
-def test_open_disposable_clone_removes_the_temporary_database_when_the_body_raises(
-    tmp_path: Path,
-) -> None:
-    source_path = tmp_path / "agentlens.db"
-    before = _clone_temp_files()
-
-    with pytest.raises(RuntimeError, match="forced failure"), open_disposable_clone(source_path):
-        raise RuntimeError("forced failure")
-
-    assert _clone_temp_files() == before
+        assert conn.execute(
+            "SELECT n_errors FROM fact_session WHERE session_id = 's1'"
+        ).fetchone() == (1,)
+    finally:
+        conn.close()

@@ -50,7 +50,7 @@ Four stages, each a thin layer over the previous. Read-only against the user's `
 
 ### Entry commands
 
-- `agentlens session --file <path>` — analyze one subagent transcript, full detail. **Implemented** (`ingest-single-transcript`). Flags: `--format json` (JSON to stdout, nothing else on that stream), `--store <path>` (override the default store location), `--dryrun` (report what would be written without writing the store or the artifact). Lookup by an already-ingested `<id>` without `--file` is not yet built.
+- `agentlens session <id|--file path>` — analyze one session, full detail. The primitive; everything else builds on it. Cheapest path, ideal for "how did my new agent do?"
 - `agentlens report --agent <name> --since 7d` — aggregate rollup across sessions in a window, grouped by agent, with prior-window deltas. Modeled scores name one explicit `(rubric_version, concrete judge_model)` cohort; ambiguous multi-model windows require `--judge-model`.
 
 ### Source identity and snapshot integrity
@@ -60,6 +60,7 @@ a subagent ID, or in more than one project bucket. Discovery therefore derives a
 `session_id` as a deterministic SHA-256 of `(source_project, session_kind, raw_session_id)`.
 The tuple remains stored for display and unambiguous lookup. Qualified parent IDs use the
 same project and the `main` kind, so lineage cannot cross projects accidentally. See
+[ADR 0012](adr/0012-qualified-source-identity.md).
 
 Each parse is a versioned snapshot. The parser streams JSONL while recording parse-health
 counters and a source revision `(mtime_ns, size, content_hash)`, then verifies that the file
@@ -69,9 +70,9 @@ schema change uses rebuild-from-source rather than an in-place migration.
 
 ### Judge coupling
 
-The LLM judge shells out to the user's existing `claude` CLI in headless mode. Behind a **pluggable interface** so an `ANTHROPIC_API_KEY` backend can be added for CI. Pin `--model`; what goes into the cache key is the resolved concrete model identifier read from the response envelope, not the alias as typed. See 
+The LLM judge shells out to the user's existing `claude` CLI in headless mode. Behind a **pluggable interface** so an `ANTHROPIC_API_KEY` backend can be added for CI. Pin `--model`; what goes into the cache key is the resolved concrete model identifier read from the response envelope, not the alias as typed. See [ADR 0010](adr/0010-verdict-comparability.md).
 
-**Auth:** the judge runs with `--bare` (see below), and `--bare` skips keychain reads entirely. Under `--bare`, auth is strictly `ANTHROPIC_API_KEY` or an `apiKeyHelper` configured via user settings (`--setting-sources "user"`): OAuth login and keychain credentials are never read, regardless of what's logged in on the machine. An unauthenticated environment fails fast with a `Not logged in` response rather than hanging or silently degrading;
+**Auth:** the judge runs with `--bare` (see below), and `--bare` skips keychain reads entirely. Under `--bare`, auth is strictly `ANTHROPIC_API_KEY` or an `apiKeyHelper` configured via user settings (`--setting-sources "user"`): OAuth login and keychain credentials are never read, regardless of what's logged in on the machine. An unauthenticated environment fails fast with a `Not logged in` response rather than hanging or silently degrading; see [ADR 0008](adr/0008-judge-invoked-without-tools.md) and the README's Limitations section.
 
 ### Confirmed CLI contract (hardened; see `harden-judge-invocation`)
 
@@ -137,7 +138,7 @@ The grain is a single agent run, not an agent *type*. Four `implementer` spawns 
 - **Agent identity:** `agent_id` (raw per-spawn filename ID), `agent_type` (canonical name), `agent_definition_id` (the effective versioned definition), `name_source`, `spawn_depth`
 - **Lineage:** qualified `parent_session_id`, `spawn_tool_use_id` (from `.meta.json` — joins to the exact `Task` block in the parent), `task_description` (from `.meta.json`)
 - **Volume:** `n_turns`, `n_tool_calls`, `n_reads`, `n_edits`, `n_writes`, `n_bash`, `n_files_touched`
-- **Health:** `n_errors`, `n_permission_denials`, `n_duplicate_tool_calls`, `final_report_flagged_partial` (raw boolean marker — *not* a completion verdict;
+- **Health:** `n_errors`, `n_permission_denials`, `n_duplicate_tool_calls`, `final_report_flagged_partial` (raw boolean marker — *not* a completion verdict; see [ADR 0003](adr/0003-deterministic-layer-emits-counts-not-verdicts.md))
 - **Cost/time:** `duration_sec`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_creation_tokens`
 - **Context:** `task_prompt_len`, `n_skills_fired`
 
@@ -178,7 +179,7 @@ Whether a *missing* fire was a mistake is a judgment call → belongs in the jud
 ### `fact_verdict` — LLM judge output (separate, never mixed with deterministic facts)
 
 - Key: `session_id` + `judge_input_hash` + `rubric_version` + `judge_model`
-- `verdict_json` shape: `{dimensions: {task_completion, honesty, efficiency, scope_adherence} (each {score, evidence[]}), overall_score, suggested_fixes[] (each {dimension, target, recommendation, rationale}), provenance: {locally_derived[], untrusted_model_output[]}}`. `session_id`, `rubric_version`, `judge_model`, and the three judge cost/token fields are `fact_verdict` columns, not part of the JSON blob. `provenance` marks which fields are locally derived and validated (scores) versus untrusted model output (evidence, and each fix's recommendation/rationale)
+- `verdict_json` shape: `{dimensions: {task_completion, honesty, efficiency, scope_adherence} (each {score, evidence[]}), overall_score, suggested_fixes[] (each {dimension, target, recommendation, rationale}), provenance: {locally_derived[], untrusted_model_output[]}}`. `session_id`, `rubric_version`, `judge_model`, and the three judge cost/token fields are `fact_verdict` columns, not part of the JSON blob. `provenance` marks which fields are locally derived and validated (scores) versus untrusted model output (evidence, and each fix's recommendation/rationale) — see [ADR 0011](adr/0011-handoff-trust-boundary.md).
 - **Judge run-cost:** `judge_cost_usd`, `judge_input_tokens`, `judge_output_tokens` (from the `claude -p` envelope's `total_cost_usd` / `usage`) — the tool's *own* footprint, so agentlens is honest about what a run costs.
 
 `judge_input_hash` is the SHA-256 of the exact prepared transcript view. An unchanged
@@ -186,6 +187,7 @@ re-ingest remains a cache hit; changed judge input creates a distinct verdict id
 Verdict finalization rechecks the session's current hash so an in-flight score cannot attach
 to a newer ingest. Concurrent scorers use expiring owner-scoped SQLite claims and never
 hold a transaction during the external judge call. See
+[ADR 0013](adr/0013-input-bound-verdicts-and-scoring-claims.md).
 
 ### Token & cost reporting
 
@@ -222,7 +224,7 @@ Ground-truth signals, cheapest first: self-report vs. transcript consistency (ju
 
 ### Caching
 
-Cache identity = `session_id + judge_input_hash + rubric_version + judge_model`, stored in `~/.cache/agentlens/`, where `judge_model` is the resolved concrete model identifier, never the alias supplied at the CLI. Only a current-input miss calls the judge. Floating aliases resolve through healthy candidates under one invocation-wide attempt budget; failed candidates do not wedge later sessions. Atomic expiring claims prevent concurrent processes from paying twice for the same identity.
+Cache identity = `session_id + judge_input_hash + rubric_version + judge_model`, stored in `~/.cache/agentlens/`, where `judge_model` is the resolved concrete model identifier, never the alias supplied at the CLI (see [ADR 0010](adr/0010-verdict-comparability.md)). Only a current-input miss calls the judge. Floating aliases resolve through healthy candidates under one invocation-wide attempt budget; failed candidates do not wedge later sessions. Atomic expiring claims prevent concurrent processes from paying twice for the same identity.
 
 ---
 
@@ -234,7 +236,7 @@ Cache identity = `session_id + judge_input_hash + rubric_version + judge_model`,
 - **Low-volume guard:** below `min_sessions_for_trend` (default 5), show raw scores + count but **suppress trend arrows**, labeled "insufficient data."
 - **N counts spawns, not parent sessions.** "implementer: 12 runs this week" may be 3 sessions × 4 spawns — label it as spawns so trends and the low-volume guard aren't misread. Use `task_description` to distinguish same-type spawns in detail views.
 - **Intra-session view (parent lens):** because spawns carry `parent_session_id`, roll up "this session fanned out 4 implementers + 3 explorers; 1 failed, 1 hit denials" — a health lens per parent session, not just per agent type.
-- **One comparable verdict cohort:** a report selects one rubric version and concrete model, joins verdicts on the session's current input hash, and averages at most one score per spawn. It never combines model or rubric cohorts or chooses a row by insertion order.
+- **One comparable verdict cohort:** a report selects one rubric version and concrete model, joins verdicts on the session's current input hash, and averages at most one score per spawn. It never combines model or rubric cohorts or chooses a row by insertion order. See [ADR 0014](adr/0014-reports-select-one-verdict-cohort.md).
 - **Complete deterministic slice:** JSON includes one typed row for every qualified spawn, including unscored spawns, then derives agent and parent rollups from those rows.
 
 ---
@@ -247,7 +249,7 @@ Cache identity = `session_id + judge_input_hash + rubric_version + judge_model`,
 | **HTML** | hero, designed, self-contained single file, shareable, `file://` | `./reports/<scope>.html` |
 | **Markdown** | Claude handoff — fixes are advisory, rendered as untrusted content | `./reports/<scope>.md` |
 | **JSON** | scripting / piping / dashboard feed | `./reports/<scope>.json` or `--format json` to stdout |
-| **Store** | append-only dimensional SQLite (source of truth) | the platform's app-data directory (`click.get_app_dir("agentlens")`), overridable with `--store <path>` |
+| **Store** | append-only dimensional SQLite (source of truth) | `~/.cache/agentlens/` (or configurable) |
 
 Never write into `.claude/` — read-only.
 
@@ -280,29 +282,23 @@ Same pattern as a static GitHub Pages dashboard reading a data blob: date-range 
 
 Each phase is independently valuable and testable — one focused Claude Code session (or a small OpenSpec change) each. `⟂` = can run in parallel.
 
-### Phase 0 — Scaffold & contracts
+### Phase 0 — Scaffold & contracts (*COMPLETED*)
 Repo init, language/runtime decision (see Open Decisions), CLI skeleton with `session`/`report` stubs, the SQLite schema DDL, and the verdict-JSON shape. **Exit:** empty pipeline runs end-to-end and writes an empty store.
 
-### Phase 1 — Parser core (deterministic, no LLM)
+### Phase 1 — Parser core (deterministic, no LLM) (*COMPLETED*)
 Discover main sessions (`projects/**/*.jsonl`), subagent runs (`projects/**/<sid>/subagents/agent-*.jsonl`) + their `.meta.json` sidecars, and agent defs (`.claude/agents/**`). Parse into `fact_tool_event` + `dim_agent`, persist to SQLite. Path-based parent linkage + `.meta.json` pairing + name-resolution fallback chain. Ingest `main` sessions too (`session_kind`), even though they aren't scored until v2. Single-session path first. **Exit:** point it at the sample `agent-*.jsonl` (+ meta) and get a correctly populated store with parent lineage resolved. ~60% of the value ships here.
 
-**Single-session slice shipped** (`ingest-single-transcript`, archived 2026-08-18): `agentlens session --file <path>` parses one subagent transcript end to end — qualified identity, snapshot soundness, tool-invocation pairing, two-link name resolution (`.meta.json` sidecar, then an `agent_id`-hash fallback), and a `fact_session`/`fact_tool_event` write to SQLite, with a JSON artifact and terminal summary. The behavior contract now lives in `openspec/specs/{session-command,session-parser,session-report,store-schema}/spec.md`; the "row derived in Python, inside `ingest`" decision is `docs/adr/0008-session-row-derivation.md`.
-
-Still open within Phase 1: bulk discovery under `projects/**` (this slice takes one `--file` at a time, not a directory walk), `main` sessions, `dim_agent`/agent-definition scanning, `bridge_session_skill`, parent lineage through `spawn_tool_use_id`, and name-resolution links 2–3 (`attribution_agent`, the parent's `Task` `subagent_type`). The exit criterion above is therefore only partly met: the store is correctly populated, but parent lineage is not yet resolved.
-
-A few column names landed differently than the sketch in §3 below: on `fact_tool_event`, `seq`→`ordinal`, `input_hash`→`input_fingerprint`, `file_path_hash`→`file_identity`, `output_bytes`→`result_size`; on `fact_session`, `spawn_tool_use_id`→`spawning_tool_use_id`, `n_tool_calls`→`n_invocations`, `n_permission_denials`→`n_denials`, `n_duplicate_tool_calls`→`n_repeated_invocations`. `agent_id`, `agent_definition_id`, `parent_session_id`, `final_report_flagged_partial`, `task_prompt_len`, and `n_skills_fired` are not yet columns — each depends on one of the still-open items above. Treat §3 as the original sketch and the `openspec/specs/` files as the authoritative names going forward.
-
-### Phase 2 — Deterministic signals & aggregation
+### Phase 2 — Deterministic signals & aggregation (*COMPLETED*)
 Derive `fact_session` from events, build `bridge_session_skill` (declared/available/fired), implement windows + prior-window deltas + low-volume guards, emit the deterministic slice of the verdict JSON. **Exit:** `report --since 7d` produces real numbers with no LLM.
 
-### Phase 3 — LLM judge
+### Phase 3 — LLM judge (*COMPLETED*)
 Pluggable judge interface, `claude -p` backend, rubric v1 (pinned + versioned), caching, `fact_verdict`. **Exit:** sessions get scored + fix proposals; re-runs hit cache.
 
 ### Phase 4 — Design system ⟂ (*COMPLETED*)
 Dedicated session. Visual identity, design tokens, component library (score/verdict cards, timeline, trend charts, fix-proposal cards), static HTML mockups with fake data. Use the `impeccable` skill. **Exit:** an approved, reusable design spec + mockups. Deliverables: `PRODUCT.md`, `DESIGN.md`, `design/report-mockup.html` (dark theme, primary), `design/report-mockup-light.html` (reference).
 
 ### Phase 5 — Renderers
-Implement markdown (handoff) + JSON export + thin terminal summary + HTML report (Phase 4 design over real verdict JSON). Every renderer that surfaces fixes or evidence must present them inside an explicitly marked untrusted block and must not emit anything shaped like a patch, diff, or command for direct application. **Exit:** all four surfaces render from one verdict core. **Depends on:** 3 + 4.
+Implement markdown (handoff) + JSON export + thin terminal summary + HTML report (Phase 4 design over real verdict JSON). Every renderer that surfaces fixes or evidence must present them inside an explicitly marked untrusted block and must not emit anything shaped like a patch, diff, or command for direct application — see [ADR 0011](adr/0011-handoff-trust-boundary.md). **Exit:** all four surfaces render from one verdict core. **Depends on:** 3 + 4.
 
 ### Phase 6 — Dashboard (separate initiative)
 Cumulative JSON export + static `gh-pages` site (windows, compare, drill-down). **Depends on:** 2 (data model) + 4 (design).
@@ -328,7 +324,6 @@ Cumulative JSON export + static `gh-pages` site (windows, compare, drill-down). 
 
 **Deferred to v2:**
 
-- **Main-session scoring.** Main sessions are parsed and stored from Phase 1 (`session_kind = main`), but *scoring* them needs an adapted rubric (open-ended conversation, no single delegated task). No data-model change required, just a rubric variant.
-- **Sanitized committed fixtures** to close the synthetic-vs-real drift gap in §8.
-- **Split `n_spawns_with_errors`** into tool-errors and self-reported-partial as two metrics (§5).
-- **Store: Parquet** for warehouse/S3 export.
+- **Main-session scoring.** Main sessions are parsed and stored from Phase 1 (`session_kind = main`), but *scoring* them needs an adapted rubric (open-ended conversation, no single delegated task). Subagent scoring ships v1; main-session scoring is v2 — no data-model change required, just a rubric variant.
+- **Store: Parquet.** Parquet later for warehouse/S3 export.
+```

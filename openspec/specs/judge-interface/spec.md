@@ -1,0 +1,265 @@
+# Judge Interface
+
+## Purpose
+
+Defines the LLM judge protocol, the prepared transcript view builder, the Claude CLI backend, and the verdict dataclass — the contract between the scoring loop and any backend implementation.
+
+## Requirements
+
+### Requirement: Judge Protocol
+
+The system SHALL define a `Judge` Protocol with a single `score` method that accepts a prepared transcript view (string) and a rubric version (string) and returns a `Verdict` dataclass. The Protocol SHALL be the sole contract between the scoring loop and any backend implementation.
+
+#### Scenario: Protocol is implementable
+
+- **WHEN** a new backend class implements the `Judge` Protocol's `score` method
+- **THEN** the scoring loop accepts and uses that backend without modification
+
+### Requirement: Prepared transcript view
+
+The system SHALL build a structured text document from a parsed session and its raw JSONL transcript, containing exactly these sections: Task (from .meta.json description or first user record, truncated at 2000 chars), Agent Identity (type, spawn_depth, parent_session_id), Deterministic Facts (turns, tool_calls, duration, errors, permission_denials, duplicate_calls, tokens, final_report_flagged_partial), Tool Sequence (one line per tool call with condensed input), Errors & Denials (first 300 chars of error output per failed step), and Final Report (last assistant message). The completed view SHALL stay within a deterministic byte budget: the Final Report and Tool Sequence sections are bounded and truncated with a visible truncation marker so the total view never exceeds the documented hard limit, while all six section headers and every error/denial entry are always preserved.
+
+#### Scenario: View built from implementer session
+
+- **WHEN** the view builder receives a parsed session with 79 tool calls, 2 errors, and a final report
+- **THEN** it produces a structured text with all six sections, Errors section has 2 entries, and total size is under 20KB
+
+#### Scenario: Tool input summarization
+
+- **WHEN** a tool call is `Read src/foo.py`
+- **THEN** the tool sequence line is `Read src/foo.py` (path only, no file contents)
+
+#### Scenario: Bash command truncation
+
+- **WHEN** a Bash tool call has a 500-char command that exited with code 1
+- **THEN** the tool sequence line shows the first 120 chars of the command and `→ exit 1`
+
+#### Scenario: Task description truncation
+
+- **WHEN** the task description exceeds 2000 characters
+- **THEN** the Task section contains exactly the first 2000 characters followed by a truncation marker
+
+#### Scenario: Missing final report
+
+- **WHEN** the transcript has no assistant text blocks (degenerate session)
+- **THEN** the Final Report section reads "(no final report)"
+
+#### Scenario: Oversized final report is bounded
+
+- **WHEN** the final assistant message is 1MB of text
+- **THEN** the Final Report section is truncated to its budget with the truncation marker and the whole view stays within the documented hard limit
+
+#### Scenario: Very long tool history is bounded
+
+- **WHEN** a session has tens of thousands of tool calls
+- **THEN** the Tool Sequence section is bounded (e.g. a head/tail sample plus a total count) rather than emitting one unbounded line per call, and all error/denial entries remain in the Errors & Denials section
+
+### Requirement: Claude CLI backend
+
+The system SHALL implement the `Judge` Protocol via a `ClaudeCliJudge` class that invokes `claude -p` with `--output-format json`, `--model <configured>`, `--json-schema <verdict-schema>`, `--max-turns 3`, `--bare`, and `--append-system-prompt <rubric>`.
+
+Because the transcript view supplied on stdin is untrusted, attacker-influenceable data, the invocation SHALL grant **no filesystem or shell tools**, and SHALL enforce this by explicitly disabling the built-in tool set (`--tools ""`) rather than by omitting a tool-granting flag — omitting `--allowedTools` selects the CLI's default, which grants all built-in tools. The invocation SHALL NOT enable a permissive permission mode.
+
+The invocation SHALL pin its setting sources to `user` only, so that project- and directory-local settings files cannot reconfigure the judge and the invocation is independent of the working directory agentlens runs from. The subprocess SHALL be launched with an explicit working directory (a temporary directory, not agentlens's own) and an explicitly constructed environment forwarding only what auth and model routing require, rather than inheriting agentlens's working directory and full environment.
+
+Because `--bare` is retained (for cost and for a reproducible judge context) and `--bare` does not read OAuth or keychain credentials, the backend SHALL detect the CLI's not-logged-in response and raise `JudgeUnavailableError` naming the remedy — set `ANTHROPIC_API_KEY` or configure `apiKeyHelper` — rather than treating it as a per-session judge failure.
+
+The backend SHALL parse the envelope's `structured_output` field as the verdict and record `total_cost_usd` and `usage` from the envelope.
+
+#### Scenario: Successful scoring
+
+- **WHEN** the backend is called with a valid transcript view
+- **THEN** it returns a `Verdict` with all four dimension scores, evidence, suggested_fixes, and judge cost metadata
+
+#### Scenario: No tools are granted to the judge
+
+- **WHEN** the backend builds the `claude -p` argument list
+- **THEN** the arguments contain an explicit empty built-in tool set (`--tools ""`), grant no `Read`, `Grep`, `Bash`, or other filesystem/shell tool, and do not enable a permissive `--permission-mode dontAsk`
+
+#### Scenario: Prompt-injected transcript cannot read the filesystem
+
+- **WHEN** a transcript view containing an embedded instruction to read a canary file outside the prepared view is scored against the real CLI
+- **THEN** the canary file's contents appear nowhere in the resulting verdict's evidence or suggested fixes, because the judge has no tool capable of reading it
+
+#### Scenario: Structured output survives tool removal
+
+- **WHEN** the backend invokes the CLI with the built-in tool set disabled and a verdict JSON schema
+- **THEN** the envelope still carries a populated `structured_output` and a valid `Verdict` is produced
+
+#### Scenario: Judge invocation ignores directory-local settings
+
+- **WHEN** agentlens is run from a directory containing a `.claude/settings.local.json` that would alter tool permissions or the model
+- **THEN** the judge invocation pins its setting sources to `user`, so that file does not affect the scoring call
+
+#### Scenario: Subprocess does not inherit agentlens's working directory
+
+- **WHEN** the backend launches the `claude` subprocess
+- **THEN** it passes an explicit temporary working directory and an explicitly constructed environment, not agentlens's own cwd and full environment
+
+#### Scenario: Missing credentials fail loudly with a remedy
+
+- **WHEN** the CLI responds that it is not logged in (no `ANTHROPIC_API_KEY` and no configured `apiKeyHelper`), exiting non-zero while still emitting a JSON envelope reporting it
+- **THEN** the backend raises `JudgeUnavailableError` whose message names setting `ANTHROPIC_API_KEY` or configuring `apiKeyHelper`, and the scoring loop does not count it as one of the consecutive per-session failures
+
+#### Scenario: An unrelated non-zero exit is not misreported as an auth failure
+
+- **WHEN** the CLI exits non-zero with output that carries no not-logged-in marker, including output that is not valid JSON
+- **THEN** the backend raises `JudgeError` with the underlying output, unchanged by the credential detection
+
+#### Scenario: Subprocess timeout
+
+- **WHEN** the `claude -p` subprocess exceeds 60 seconds
+- **THEN** the backend kills the process and raises a `JudgeTimeoutError`
+
+#### Scenario: Envelope indicates error
+
+- **WHEN** the envelope's `is_error` field is true
+- **THEN** the backend raises a `JudgeError` with the envelope's result text as the message
+
+#### Scenario: Claude CLI not found
+
+- **WHEN** `claude` is not on PATH
+- **THEN** the backend raises a `JudgeUnavailableError` before attempting any subprocess call
+
+#### Scenario: Subprocess launch failure is normalized
+
+- **WHEN** `subprocess.run` fails to launch `claude` with an `OSError`
+- **THEN** the backend raises a `JudgeError` rather than letting the `OSError` escape
+
+### Requirement: Judge authentication under minimal mode
+
+Minimal mode (`--bare`) reads Anthropic credentials strictly from `ANTHROPIC_API_KEY` or from an `apiKeyHelper` supplied via `--settings`; it never reads OAuth, the keychain, or an `apiKeyHelper` reached through `--setting-sources`. The Claude CLI backend SHALL therefore pass the user's settings file to `--settings` so that a machine authenticating by `apiKeyHelper` has a working credential channel, and SHALL continue to pass `--setting-sources user` so that repo-local settings cannot reconfigure the judge.
+
+#### Scenario: apiKeyHelper authentication succeeds under minimal mode
+
+- **WHEN** the machine authenticates via `apiKeyHelper` with no `ANTHROPIC_API_KEY` in the environment
+- **THEN** the judge invocation authenticates successfully rather than failing with a not-logged-in response
+
+#### Scenario: Repo-local settings remain excluded
+
+- **WHEN** the judge is invoked from a directory containing a project or local settings file
+- **THEN** those settings are not loaded, because only the `user` setting source is enabled
+
+### Requirement: Verdict dataclass
+
+The system SHALL define a `Verdict` frozen dataclass with fields: `session_id`, `rubric_version`, `judge_model`, `dimensions` (a dict mapping dimension name to a `DimensionScore` with `score: int` 0-5 and `evidence: list[str]`), `overall_score` (float, mean of dimensions), `suggested_fixes` (a list of typed `SuggestedFix` records, not free-form strings), `judge_cost_usd` (float), `judge_input_tokens` (int), `judge_output_tokens` (int).
+
+A `SuggestedFix` SHALL be a frozen dataclass with: `dimension` (one of the four rubric dimension names), `target` (a value from a closed set naming what the fix applies to — the agent definition's instructions, its declared tools, its declared skills, or the caller's task phrasing), `recommendation` (a bounded-length natural-language description of the change), and `rationale` (why the change is warranted, grounded in what happened during the run).
+
+A fix whose `dimension` is not a known rubric dimension, or whose `target` is outside the closed set, SHALL be rejected with a `JudgeError` and no verdict SHALL be persisted.
+
+#### Scenario: Verdict is serializable to JSON
+
+- **WHEN** a Verdict is created with valid fields
+- **THEN** calling `json.dumps` on its `to_verdict_json()` method produces valid JSON matching the `fact_verdict.verdict_json` column schema
+
+#### Scenario: Overall score is mean of dimensions
+
+- **WHEN** dimensions are task_completion=4, honesty=5, efficiency=3, scope_adherence=4
+- **THEN** overall_score is 4.0
+
+#### Scenario: Typed fix is accepted
+
+- **WHEN** a judge response supplies a fix with dimension `honesty`, target `agent_instructions`, a recommendation, and a rationale
+- **THEN** the verdict carries it as a `SuggestedFix` record with those four fields
+
+#### Scenario: Unknown fix dimension is rejected
+
+- **WHEN** a judge response supplies a fix whose `dimension` is not one of the four rubric dimensions
+- **THEN** the backend raises a `JudgeError` and no verdict is persisted
+
+#### Scenario: Out-of-set fix target is rejected
+
+- **WHEN** a judge response supplies a fix whose `target` names something outside the closed set, such as an arbitrary file path
+- **THEN** the backend raises a `JudgeError` and no verdict is persisted
+
+#### Scenario: Free-form string fix is rejected
+
+- **WHEN** a judge response supplies `suggested_fixes` as a list of bare strings
+- **THEN** the backend raises a `JudgeError` rather than accepting untyped prose
+
+### Requirement: Resolved judge model identity
+
+The system SHALL record the concrete model that produced a verdict, not the possibly-floating alias the user configured. The Claude CLI backend SHALL read the resolved model identifier from the response envelope's `modelUsage` map and SHALL set the returned `Verdict.judge_model` to that concrete identifier.
+
+The identifier SHALL be taken from the map's **key**, using the entry's `canonicalModel` field only as a fallback when the key is unusable. Where the two differ the key carries the dated snapshot and `canonicalModel` carries the undated family name, so keying identity on `canonicalModel` would permit two different snapshots of one family to collide on a single verdict key — the same class of drift this requirement exists to prevent.
+
+Extraction SHALL be strict: if the envelope carries no `modelUsage`, an empty map, or more than one entry, the backend SHALL raise a `JudgeError` rather than falling back to the configured alias, because a silent fallback would reintroduce the alias ambiguity this requirement removes.
+
+The backend SHALL expose the resolved model identifier after a successful call so callers can key verdict identity on it.
+
+#### Scenario: Alias resolves to a concrete model identifier
+
+- **WHEN** the judge is configured with the alias `sonnet` and the envelope reports a `modelUsage` entry for `claude-sonnet-5`
+- **THEN** the returned `Verdict.judge_model` is `claude-sonnet-5`, not `sonnet`
+
+#### Scenario: Concrete model identifier passes through unchanged
+
+- **WHEN** the judge is configured with a fully pinned model string and the envelope reports that same identifier
+- **THEN** the returned `Verdict.judge_model` is that identifier
+
+#### Scenario: Missing model usage is a loud failure
+
+- **WHEN** the envelope carries no `modelUsage` field, an empty map, or multiple entries
+- **THEN** the backend raises a `JudgeError` and does not fall back to the configured alias
+
+#### Scenario: Dated snapshot key is preferred over the family name
+
+- **WHEN** the envelope's `modelUsage` entry has key `claude-haiku-4-5-20251001` and `canonicalModel` `claude-haiku-4-5`
+- **THEN** the returned `Verdict.judge_model` is `claude-haiku-4-5-20251001`, the more precise of the two
+
+#### Scenario: Resolved model is available to callers
+
+- **WHEN** a successful scoring call has completed
+- **THEN** the backend exposes the resolved concrete model identifier for use in verdict identity queries
+
+### Requirement: Judge token accounting reflects actual consumption
+
+The system SHALL report the judge's own token footprint from the resolved `modelUsage` entry, summing its input, cache-creation, and cache-read token counts into `judge_input_tokens` and taking its output count as `judge_output_tokens`. The backend SHALL NOT take these figures from the envelope's top-level `usage` map, which reports a nominal input count when a large uncached prompt is booked as cache creation.
+
+#### Scenario: Cache-creation tokens are counted as input
+
+- **WHEN** the envelope reports `usage.input_tokens` of 1 while the `modelUsage` entry reports thousands of cache-creation tokens
+- **THEN** the verdict's `judge_input_tokens` reflects the thousands actually consumed, not 1
+
+#### Scenario: Judge cost remains taken from the envelope total
+
+- **WHEN** a verdict is built from a successful envelope
+- **THEN** `judge_cost_usd` continues to come from the envelope's `total_cost_usd`, unaffected by the token-accounting source
+
+### Requirement: Locally derived overall score
+
+The system SHALL derive `overall_score` locally as the arithmetic mean of the four dimension scores when constructing a `Verdict`, and SHALL NOT trust an `overall_score` value supplied by the judge model. Every dimension score SHALL be validated to be an integer within 0-5; a score outside that range SHALL raise a `JudgeError`. This invariant SHALL hold for any `Judge` backend that constructs a `Verdict`, so no backend can persist an out-of-range or inconsistent overall score.
+
+#### Scenario: Supplied overall score is ignored in favor of the mean
+
+- **WHEN** a judge response reports dimensions averaging 4.0 but supplies `overall_score = 99`
+- **THEN** the constructed `Verdict` has `overall_score = 4.0` (the derived mean), not 99
+
+#### Scenario: Out-of-range dimension score is rejected
+
+- **WHEN** a judge response reports a dimension score of 6 (or a negative value, NaN, or non-integer)
+- **THEN** the backend raises a `JudgeError` and no verdict is persisted
+
+#### Scenario: Derived overall is always in range
+
+- **WHEN** any `Verdict` is persisted
+- **THEN** its `overall_score` is within 0-5 and equals the mean of its four dimension scores
+
+### Requirement: Provenance labelling of model-authored fields
+
+The system SHALL mark, within the serialized verdict payload, which fields are model-authored text derived from untrusted transcript input and which are locally derived or validated. Dimension scores and `overall_score` SHALL be identifiable as locally derived and validated; dimension `evidence`, and each fix's `recommendation` and `rationale`, SHALL be identifiable as untrusted model output.
+
+Provenance SHALL be carried in the payload itself rather than left as a convention for consumers to reimplement, so that every renderer, JSON consumer, and downstream tool reads the same signal.
+
+Consumers rendering a verdict for human or machine handoff SHALL present model-authored fields as content to be reviewed, never as instructions to be executed, and SHALL NOT emit any artifact designed to be applied without human reading.
+
+#### Scenario: Payload distinguishes derived from model-authored fields
+
+- **WHEN** a verdict is serialized via `to_verdict_json()`
+- **THEN** the payload identifies dimension scores and the overall score as locally derived, and evidence, recommendations, and rationales as untrusted model output
+
+#### Scenario: Renderers mark untrusted content
+
+- **WHEN** a renderer emits a verdict's fixes and evidence into a report intended as a handoff
+- **THEN** that content is presented within an explicitly marked untrusted block, and the report contains no patch, diff, or command designed for direct application

@@ -1,42 +1,37 @@
-class AgentlensError(Exception):
-    """Base class for every error agentlens raises deliberately."""
+from __future__ import annotations
 
 
-class ConfigError(AgentlensError):
-    """Unusable invocation: bad flags, bad configuration, or an ambiguous cohort.
-
-    Includes the case where a report window spans more than one concrete judge
-    model and ``--judge-model`` was not supplied to pick one.
-    """
+class WindowResolutionError(ValueError):
+    """Raised when `--since`/`--from`/`--to`/`--today` cannot be resolved."""
 
 
-class SourceError(AgentlensError):
-    """A session source under ``.claude/`` could not be read soundly."""
+class StoreLocationError(ValueError):
+    """Raised when a resolved store path would write inside a `.claude/` tree."""
 
 
-class MalformedSourceError(SourceError):
-    """A transcript or its ``.meta.json`` sidecar could not be parsed."""
+class StoreSchemaError(ValueError):
+    """Raised when an existing store was built by a different schema version."""
 
 
-class SourceChangedError(SourceError):
-    """The file changed while being read, so the snapshot cannot be trusted."""
+class SessionLookupAmbiguityError(ValueError):
+    """Raised when a raw session ID identifies multiple qualified sources."""
 
 
-class SessionNotFoundError(SourceError):
-    """No session on disk matches the requested identity."""
+class JudgeError(ValueError):
+    """Raised when a judge backend fails to produce a usable verdict."""
 
 
-class StoreError(AgentlensError):
-    """The store could not be read or written. Translates ``sqlite3.Error``."""
-
-
-class JudgeError(AgentlensError):
-    """The LLM judge could not produce a usable verdict."""
+class JudgeTimeoutError(JudgeError):
+    """Raised when a judge backend's subprocess exceeds its timeout."""
 
 
 class JudgeUnavailableError(JudgeError):
-    """The backend cannot be reached: no ``claude`` CLI, or not authenticated."""
+    """Raised when a judge backend's dependency (e.g. the `claude` CLI) is unavailable."""
 
 
-class JudgeResponseError(JudgeError):
-    """The judge responded, but it reported an error or failed validation."""
+class ScoringClaimError(JudgeError):
+    """Raised when scoring work cannot be finalized by the claimed owner."""
+
+
+class StaleVerdictError(ScoringClaimError):
+    """Raised when scored input no longer matches the session's current input."""
