@@ -224,8 +224,8 @@ def test_no_path_under_claude_changes_across_success_failure_and_dry_run(
     before = _snapshot(claude_root)
     context_cache = SubagentContextCache(claude_root)
     parsed = tuple(
-        parse_transcript(path, context_cache=context_cache)
-        for path in discover_subagent_sources(claude_root / "projects")
+        parse_transcript(bundle, context_cache=context_cache)
+        for bundle in discover_subagent_sources(claude_root / "projects")
     )
     assert len(parsed) == 2
     assert _snapshot(claude_root) == before

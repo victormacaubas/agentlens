@@ -218,8 +218,9 @@ def test_resolve_local_timezone_uses_the_tz_environment_variable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("TZ", "America/New_York")
+    clock = FakeClock(instant=datetime(2026, 1, 15, tzinfo=UTC))
 
-    resolved = resolve_local_timezone()
+    resolved = resolve_local_timezone(clock=clock)
 
     assert resolved.identifier == "America/New_York"
     assert isinstance(resolved.zone, ZoneInfo)
@@ -247,19 +248,29 @@ def test_resolve_local_timezone_extracts_the_name_after_the_last_zoneinfo_segmen
     localtime_link.parent.mkdir(parents=True)
     localtime_link.symlink_to(zone_file)
     monkeypatch.setattr(windows_module, "_LOCALTIME_LINK", localtime_link)
+    clock = FakeClock(instant=datetime(2026, 1, 15, tzinfo=UTC))
 
-    resolved = resolve_local_timezone()
+    resolved = resolve_local_timezone(clock=clock)
 
     assert resolved.identifier == "America/Recife"
 
 
-def test_resolve_local_timezone_falls_back_to_a_fixed_utc_offset(
+def test_resolve_local_timezone_falls_back_to_the_offset_at_the_injected_instant(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """Neither ``TZ`` nor ``/etc/localtime`` yields a name in this setup.
+
+    The fallback then computes a fixed offset from the clock's instant
+    rather than reading the wall clock; the expected offset is derived from
+    that same instant here, independent of when the test itself runs.
+    """
     monkeypatch.delenv("TZ", raising=False)
     monkeypatch.setattr(windows_module, "_LOCALTIME_LINK", tmp_path / "does-not-exist")
+    instant = datetime(2026, 6, 15, 12, 0, tzinfo=UTC)
+    clock = FakeClock(instant=instant)
 
-    resolved = resolve_local_timezone()
+    resolved = resolve_local_timezone(clock=clock)
 
+    expected_offset = instant.astimezone().utcoffset() or timedelta(0)
+    assert resolved.zone == timezone(expected_offset)
     assert resolved.identifier.startswith("UTC")
-    assert isinstance(resolved.zone, timezone)

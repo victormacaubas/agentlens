@@ -120,3 +120,29 @@ def test_discovered_definitions_collects_every_distinct_effective_definition_see
 def test_discovered_definitions_is_empty_before_any_resolve(tmp_path: Path) -> None:
     cache = SubagentContextCache(tmp_path / ".claude")
     assert cache.discovered_definitions() == ()
+
+
+def test_shadowed_user_definition_and_winning_project_definition_are_both_cataloged(
+    tmp_path: Path,
+) -> None:
+    """A project override wins the effective binding but must not erase the
+    user-scoped identity it shadows from the reproducible catalog.
+    """
+    claude_root = tmp_path / ".claude"
+    project_root = tmp_path / "project"
+    _write(
+        claude_root / "agents" / "implementer.md",
+        build_agent_definition_text(name="implementer", effort="high"),
+    )
+    _write(
+        project_root / ".claude" / "agents" / "implementer.md",
+        build_agent_definition_text(name="implementer", effort="medium"),
+    )
+
+    cache = SubagentContextCache(claude_root)
+    context = cache.resolve(str(project_root))
+
+    assert context.effective_definitions["implementer"].config.effort == "medium"
+    cataloged_efforts = {definition.config.effort for definition in cache.discovered_definitions()}
+    assert cataloged_efforts == {"high", "medium"}
+    assert len(cache.discovered_definitions()) == 2

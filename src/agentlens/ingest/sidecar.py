@@ -1,4 +1,9 @@
-"""Reading the optional ``.meta.json`` sidecar next to a subagent transcript."""
+"""Reading the optional ``.meta.json`` sidecar a discovered source bundle names.
+
+The relationship between a transcript and its sidecar's path is resolved
+once, by :func:`agentlens.ingest.identity.build_subagent_source_bundle`; this
+module only reads whatever concrete path the caller hands it.
+"""
 
 import json
 from dataclasses import dataclass
@@ -7,8 +12,6 @@ from pathlib import Path
 from agentlens.errors import MalformedSourceError, SourceChangedError
 from agentlens.models.identity import SourceRevision
 from agentlens.utils.hashing import hash_text
-
-_SIDECAR_SUFFIX = ".meta.json"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -33,8 +36,13 @@ class Sidecar:
     revision: SourceRevision
 
 
-def read_sidecar(transcript_path: Path) -> Sidecar | None:
-    """Return the sidecar next to ``transcript_path``, or ``None`` if absent.
+def read_sidecar(sidecar_path: Path | None) -> Sidecar | None:
+    """Return the sidecar at ``sidecar_path``, or ``None`` when there is none to read.
+
+    ``sidecar_path`` is ``None`` when a discovered bundle found no sidecar
+    next to its transcript; that case returns ``None`` immediately without
+    touching the filesystem. A concrete path that no longer exists (deleted
+    between discovery and this read) is treated the same way.
 
     Raises:
         MalformedSourceError: The sidecar could not be statted or read for a
@@ -44,7 +52,8 @@ def read_sidecar(transcript_path: Path) -> Sidecar | None:
         SourceChangedError: The sidecar changed between the stat taken before
             its read and the one taken immediately after it.
     """
-    sidecar_path = transcript_path.with_suffix(_SIDECAR_SUFFIX)
+    if sidecar_path is None:
+        return None
     try:
         stat_before = sidecar_path.stat()
     except FileNotFoundError:

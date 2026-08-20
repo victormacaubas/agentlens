@@ -36,13 +36,13 @@ _DURATION_PATTERN = re.compile(r"^(?P<value>\d+)(?P<unit>[dhm])$")
 _DURATION_UNIT_FIELDS = {"d": "days", "h": "hours", "m": "minutes"}
 
 
-def resolve_local_timezone() -> LocalTimezone:
+def resolve_local_timezone(*, clock: Clock) -> LocalTimezone:
     """Determine the machine's local timezone without a third-party lookup.
 
     Tries, in order: the ``TZ`` environment variable; the IANA zone name
     embedded in the resolved target of ``/etc/localtime``; and, if neither
-    yields a usable name, the machine's fixed UTC offset. Never raises for
-    want of a name.
+    yields a usable name, the machine's fixed UTC offset at ``clock``'s
+    current instant. Never raises for want of a name.
     """
     tz_env = os.environ.get("TZ")
     if tz_env:
@@ -56,7 +56,7 @@ def resolve_local_timezone() -> LocalTimezone:
         if zone is not None:
             return LocalTimezone(zone=zone, identifier=name)
 
-    offset = datetime.now().astimezone().utcoffset() or timedelta(0)
+    offset = clock.now().astimezone().utcoffset() or timedelta(0)
     return LocalTimezone(zone=timezone(offset), identifier=_format_offset(offset))
 
 

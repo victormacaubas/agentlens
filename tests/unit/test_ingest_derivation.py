@@ -24,6 +24,7 @@ from tests.factories import (
     build_session_identity,
     build_sidecar,
     build_source_revision,
+    build_subagent_source_bundle,
     build_tool_invocation_pair,
     build_tool_use_block,
     build_transcript_path,
@@ -57,10 +58,14 @@ def test_fingerprint_changes_when_the_sidecar_changes_but_the_transcript_does_no
     sidecar_path = path.with_suffix(".meta.json")
     sidecar_path.write_text(json.dumps(build_sidecar(description="First description")))
 
-    before = parse_transcript(path, context_cache=build_context_cache())
+    before = parse_transcript(
+        build_subagent_source_bundle(transcript_path=path), context_cache=build_context_cache()
+    )
 
     sidecar_path.write_text(json.dumps(build_sidecar(description="Second description")))
-    after = parse_transcript(path, context_cache=build_context_cache())
+    after = parse_transcript(
+        build_subagent_source_bundle(transcript_path=path), context_cache=build_context_cache()
+    )
 
     assert before.session.revision.content_hash == after.session.revision.content_hash
     assert before.session.derivation_fingerprint != after.session.derivation_fingerprint
@@ -72,8 +77,12 @@ def test_repeated_parses_of_unchanged_inputs_produce_the_same_derivation(tmp_pat
     sidecar_path = path.with_suffix(".meta.json")
     sidecar_path.write_text(json.dumps(build_sidecar()))
 
-    first = parse_transcript(path, context_cache=build_context_cache())
-    second = parse_transcript(path, context_cache=build_context_cache())
+    first = parse_transcript(
+        build_subagent_source_bundle(transcript_path=path), context_cache=build_context_cache()
+    )
+    second = parse_transcript(
+        build_subagent_source_bundle(transcript_path=path), context_cache=build_context_cache()
+    )
 
     assert first.session.derivation_fingerprint == second.session.derivation_fingerprint
     assert first.session.derivation_observed_mtime_ns == second.session.derivation_observed_mtime_ns
@@ -91,7 +100,9 @@ def test_derivation_observed_mtime_ns_is_the_newer_of_the_transcript_and_sidecar
     older_sidecar_mtime_ns = transcript_mtime_ns - _FIVE_SECONDS_IN_NS
     os.utime(sidecar_path, ns=(older_sidecar_mtime_ns, older_sidecar_mtime_ns))
 
-    facts = parse_transcript(path, context_cache=build_context_cache())
+    facts = parse_transcript(
+        build_subagent_source_bundle(transcript_path=path), context_cache=build_context_cache()
+    )
 
     assert facts.session.derivation_observed_mtime_ns == transcript_mtime_ns
 
@@ -106,11 +117,15 @@ def test_derivation_fingerprint_is_unaffected_by_a_content_preserving_mtime_touc
     path = build_transcript_path(tmp_path)
     _write_transcript(path)
 
-    before = parse_transcript(path, context_cache=build_context_cache())
+    before = parse_transcript(
+        build_subagent_source_bundle(transcript_path=path), context_cache=build_context_cache()
+    )
 
     touched_mtime_ns = path.stat().st_mtime_ns + _FIVE_SECONDS_IN_NS
     os.utime(path, ns=(touched_mtime_ns, touched_mtime_ns))
-    after = parse_transcript(path, context_cache=build_context_cache())
+    after = parse_transcript(
+        build_subagent_source_bundle(transcript_path=path), context_cache=build_context_cache()
+    )
 
     assert before.session.derivation_fingerprint == after.session.derivation_fingerprint
     assert after.session.derivation_observed_mtime_ns == touched_mtime_ns
@@ -322,11 +337,15 @@ def test_fingerprint_changes_when_the_consulted_parent_transcript_content_change
     )
     _write(parent_path, build_transcript_text([parent_record]))
 
-    before = parse_transcript(path, context_cache=build_context_cache())
+    before = parse_transcript(
+        build_subagent_source_bundle(transcript_path=path), context_cache=build_context_cache()
+    )
 
     extra_record = build_user_record(content=[])
     _write(parent_path, build_transcript_text([parent_record, extra_record]))
-    after = parse_transcript(path, context_cache=build_context_cache())
+    after = parse_transcript(
+        build_subagent_source_bundle(transcript_path=path), context_cache=build_context_cache()
+    )
 
     assert before.session.agent_type == after.session.agent_type == "pathfinder"
     assert before.session.derivation_fingerprint != after.session.derivation_fingerprint
@@ -346,10 +365,14 @@ def test_fingerprint_is_unaffected_by_a_content_preserving_touch_on_the_consulte
     )
     _write(parent_path, build_transcript_text([parent_record]))
 
-    before = parse_transcript(path, context_cache=build_context_cache())
+    before = parse_transcript(
+        build_subagent_source_bundle(transcript_path=path), context_cache=build_context_cache()
+    )
 
     touched_mtime_ns = parent_path.stat().st_mtime_ns + _FIVE_SECONDS_IN_NS
     os.utime(parent_path, ns=(touched_mtime_ns, touched_mtime_ns))
-    after = parse_transcript(path, context_cache=build_context_cache())
+    after = parse_transcript(
+        build_subagent_source_bundle(transcript_path=path), context_cache=build_context_cache()
+    )
 
     assert before.session.derivation_fingerprint == after.session.derivation_fingerprint

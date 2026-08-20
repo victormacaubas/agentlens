@@ -52,6 +52,14 @@ existing concrete collaborators, and calls one core report function. Core runs
 discovery, parsing, persistence, querying, document assembly, and output in
 that order.
 
+The entrypoint uses a real Click root command for subcommand dispatch while
+retaining `main(argv) -> int` and the centralized error-to-exit-code mapping.
+It configures INFO logging once at the composition root and sends logs to
+stderr, so machine-readable stdout remains isolated. `_run_session` and
+`_run_report` stay thin: each receives parsed arguments, constructs concrete
+collaborators, calls one core workflow, and emits that workflow's result.
+Command docstrings describe the stable interface rather than rollout status.
+
 The stage packages remain independent:
 
 ```text

@@ -7,6 +7,8 @@ from typing import Literal
 from agentlens.ingest.agent_definitions import content_addressed_definition_id
 from agentlens.ingest.context import SubagentContextCache
 from agentlens.ingest.derivation import derive_session_derivation, transcript_derivation_input
+from agentlens.ingest.identity import SubagentSourceBundle
+from agentlens.ingest.identity import build_subagent_source_bundle as _build_subagent_source_bundle
 from agentlens.models.agent_definitions import (
     AgentDefinition,
     AgentDefinitionConfig,
@@ -714,6 +716,19 @@ def build_main_session_path(
     under when the two calls share the same ``project`` and id.
     """
     return base / ".claude" / "projects" / project / f"{raw_session_id}.jsonl"
+
+
+def build_subagent_source_bundle(*, transcript_path: Path) -> SubagentSourceBundle:
+    """The bundle discovery would build for a transcript written at ``transcript_path``.
+
+    Lets a test that writes a transcript directly, without going through
+    :func:`agentlens.ingest.discovery.discover_subagent_sources`, still hand
+    :func:`~agentlens.ingest.transcript.parse_transcript` the same bundle
+    shape production code would, including its existence-checked sidecar
+    path. Call this after writing every file the transcript depends on, so
+    the sidecar check sees what the test actually wrote.
+    """
+    return _build_subagent_source_bundle(transcript_path)
 
 
 def build_transcript_text(records: Sequence[Mapping[str, object]]) -> str:

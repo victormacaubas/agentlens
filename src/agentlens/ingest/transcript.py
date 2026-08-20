@@ -1,10 +1,15 @@
-"""Turning one subagent transcript into ``SessionFacts``.
+"""Turning one discovered subagent source into ``SessionFacts``.
 
-:func:`parse_transcript` is the package's sole entry point: derive identity
-from the path, read the file once while verifying it did not change,
-resolve the agent's name, and derive the session row from what was read.
-This is the only place in the package where a filesystem ``OSError`` is
-caught and translated, since the read itself happens here and nowhere lower.
+:func:`parse_transcript` is the package's sole entry point: read the
+transcript the bundle names while verifying it did not change, resolve the
+agent's name, and derive the session row from what was read. This is the
+only place in the package where a filesystem ``OSError`` is caught and
+translated, since the read itself happens here and nowhere lower.
+
+The bundle already resolved the transcript's identity, its optional
+sidecar's path, and its qualified parent session at discovery time; this
+module consumes those fields rather than re-deriving any of them from
+``bundle.transcript_path``.
 
 Name resolution may read one more file beyond the transcript and its
 sidecar: the parent transcript that carries the spawning invocation. That
@@ -21,17 +26,14 @@ read, then derive the session row from both together.
 """
 
 from dataclasses import dataclass
-from pathlib import Path
 
 from agentlens.errors import MalformedSourceError, SourceChangedError
 from agentlens.ingest.agent_definitions import resolve_agent_definition_binding
 from agentlens.ingest.context import SubagentContextCache
 from agentlens.ingest.identity import (
-    TranscriptLocation,
+    SubagentSourceBundle,
     build_session_identity,
     derive_parent_evidence_path,
-    derive_parent_session_id,
-    derive_transcript_location,
 )
 from agentlens.ingest.name_resolution import resolve_agent_type
 from agentlens.ingest.reading import read_transcript
@@ -60,8 +62,10 @@ class _ParentEvidence:
 _NO_PARENT_EVIDENCE = _ParentEvidence(subagent_type=None, revision=None)
 
 
-def parse_transcript(path: Path, *, context_cache: SubagentContextCache) -> SessionFacts:
-    """Parse the subagent transcript at ``path`` into one session and its rows.
+def parse_transcript(
+    bundle: SubagentSourceBundle, *, context_cache: SubagentContextCache
+) -> SessionFacts:
+    """Parse the subagent source in ``bundle`` into one session and its rows.
 
     ``context_cache`` resolves the spawn's project-scoped agent-definition
     catalog and skill inventory from the ``cwd`` this transcript itself
@@ -72,30 +76,28 @@ def parse_transcript(path: Path, *, context_cache: SubagentContextCache) -> Sess
     that would make it unsound raises instead of producing a flagged value.
 
     Raises:
-        MalformedSourceError: ``path`` does not identify an owning subagent
-            transcript, its sidecar could not be parsed, or the transcript
-            yielded no usable records.
+        MalformedSourceError: The sidecar named by ``bundle`` could not be
+            parsed, or the transcript yielded no usable records.
         ~agentlens.errors.SourceChangedError: The file changed while being
             read.
     """
-    location = derive_transcript_location(path)
-    identity = build_session_identity(location)
+    identity = build_session_identity(bundle)
 
     try:
-        contents = read_transcript(path)
+        contents = read_transcript(bundle.transcript_path)
     except OSError as exc:
-        raise MalformedSourceError(f"could not read {path}") from exc
+        raise MalformedSourceError(f"could not read {bundle.transcript_path}") from exc
     if not contents.records:
-        raise MalformedSourceError(f"{path} yielded no usable records")
+        raise MalformedSourceError(f"{bundle.transcript_path} yielded no usable records")
 
     context = context_cache.resolve(resolve_cwd(contents.records))
 
-    sidecar = read_sidecar(path)
+    sidecar = read_sidecar(bundle.sidecar_path)
     sidecar_agent_type = sidecar.agent_type if sidecar is not None and sidecar.agent_type else None
     attribution_agent_types = resolve_attribution_agent_types(contents.records)
     parent_evidence = _NO_PARENT_EVIDENCE
     if sidecar is not None and sidecar_agent_type is None and not attribution_agent_types:
-        parent_evidence = _resolve_parent_evidence(path=path, location=location, sidecar=sidecar)
+        parent_evidence = _resolve_parent_evidence(bundle=bundle, sidecar=sidecar)
 
     name_resolution = resolve_agent_type(
         sidecar_agent_type=sidecar_agent_type,
@@ -109,14 +111,13 @@ def parse_transcript(path: Path, *, context_cache: SubagentContextCache) -> Sess
         started_at=earliest_timestamp(contents.records),
     )
     agent_id = resolve_agent_id(contents.records, fallback=identity.raw_session_id)
-    parent_session_id = derive_parent_session_id(location)
     tool_events = pair_tool_events(contents.records, session_id=identity.session_id)
     session, skill_signals = build_fact_session(
         identity=identity,
         revision=contents.revision,
         agent_id=agent_id,
         agent_definition=agent_definition,
-        parent_session_id=parent_session_id,
+        parent_session_id=bundle.parent_session_id,
         records=contents.records,
         tool_events=tool_events,
         sidecar=sidecar,
@@ -129,18 +130,14 @@ def parse_transcript(path: Path, *, context_cache: SubagentContextCache) -> Sess
     return SessionFacts(session=session, tool_events=tool_events, skill_signals=skill_signals)
 
 
-def _resolve_parent_evidence(
-    *, path: Path, location: TranscriptLocation, sidecar: Sidecar
-) -> _ParentEvidence:
+def _resolve_parent_evidence(*, bundle: SubagentSourceBundle, sidecar: Sidecar) -> _ParentEvidence:
     """Read the file expected to hold the spawning invocation, tolerating its absence.
 
     A missing, unreadable, or mid-read-changed parent transcript is never a
     hard failure for the subagent being parsed: it leaves ``parent_evidence``
     at its default, and name resolution falls through to the raw-id hash.
     """
-    parent_path = derive_parent_evidence_path(
-        path, location, parent_agent_id=sidecar.parent_agent_id
-    )
+    parent_path = derive_parent_evidence_path(bundle, parent_agent_id=sidecar.parent_agent_id)
     try:
         parent_contents = read_transcript(parent_path)
     except (OSError, SourceChangedError):

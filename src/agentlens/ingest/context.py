@@ -31,11 +31,13 @@ _PLUGINS_CACHE_RELATIVE = ("plugins", "cache")
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SubagentContext:
-    """The agent-definition catalog and skill inventory one spawn's project sees.
+    """The effective agent-definition bindings and skill inventory one spawn's project sees.
 
     ``effective_definitions`` already resolves project-over-user precedence,
-    keyed by agent name. ``skill_inventory`` merges user, project, and
-    plugin-cache entries.
+    keyed by agent name — it is a binding map, not the full catalog. The
+    complete set of observed definitions, including any a project definition
+    shadows, is retained separately by :meth:`SubagentContextCache.discovered_definitions`.
+    ``skill_inventory`` merges user, project, and plugin-cache entries.
     """
 
     effective_definitions: Mapping[str, AgentDefinition]
@@ -48,6 +50,12 @@ class SubagentContextCache:
     Keyed on the transcript's own ``cwd`` value, with ``None`` a distinct key
     for a spawn whose transcript names no project at all — that spawn falls
     back to user scope only, never to decoding the encoded project directory.
+
+    Every observed user- and project-scoped definition is retained in the
+    catalog, keyed by its content identity, independently of
+    :attr:`SubagentContext.effective_definitions`: a project-scoped
+    definition that wins precedence for binding does not remove the
+    user-scoped definition it shadows from the reproducible catalog.
     """
 
     def __init__(self, claude_root: Path) -> None:
@@ -61,14 +69,14 @@ class SubagentContextCache:
         if context is None:
             context = self._build(cwd)
             self._resolved[cwd] = context
-            for definition in context.effective_definitions.values():
-                self._definitions[definition.agent_definition_id] = definition
         return context
 
     def discovered_definitions(self) -> tuple[AgentDefinition, ...]:
-        """Return every distinct effective definition resolved so far, for cataloging.
+        """Return every distinct definition observed so far, for cataloging.
 
-        Ordered by identity for a deterministic catalog write.
+        Includes every user- and project-scoped definition seen, whether or
+        not it won precedence to become effective for any spawn. Ordered by
+        identity for a deterministic catalog write.
         """
         return tuple(
             sorted(
@@ -89,6 +97,8 @@ class SubagentContextCache:
             if cwd is not None
             else ()
         )
+        for definition in (*user_definitions, *project_definitions):
+            self._definitions[definition.agent_definition_id] = definition
         effective_definitions = resolve_effective_definitions(
             user_definitions=user_definitions, project_definitions=project_definitions
         )

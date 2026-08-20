@@ -9,6 +9,7 @@ from agentlens.errors import SourceChangedError
 from agentlens.ingest.transcript import parse_transcript
 from tests.factories import (
     build_context_cache,
+    build_subagent_source_bundle,
     build_tool_invocation_pair,
     build_transcript_path,
     build_transcript_text,
@@ -21,6 +22,7 @@ def test_raises_source_changed_error_when_file_changes_between_the_two_stats(
     path = build_transcript_path(tmp_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(build_transcript_text(build_tool_invocation_pair()))
+    bundle = build_subagent_source_bundle(transcript_path=path)
 
     real_stat = Path.stat
     call_count = 0
@@ -36,7 +38,7 @@ def test_raises_source_changed_error_when_file_changes_between_the_two_stats(
     monkeypatch.setattr(Path, "stat", fake_stat)
 
     with pytest.raises(SourceChangedError):
-        parse_transcript(path, context_cache=build_context_cache())
+        parse_transcript(bundle, context_cache=build_context_cache())
 
 
 def test_unchanged_file_is_accepted(tmp_path: Path) -> None:
@@ -44,6 +46,8 @@ def test_unchanged_file_is_accepted(tmp_path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(build_transcript_text(build_tool_invocation_pair()))
 
-    facts = parse_transcript(path, context_cache=build_context_cache())
+    facts = parse_transcript(
+        build_subagent_source_bundle(transcript_path=path), context_cache=build_context_cache()
+    )
 
     assert facts.session.revision.content_hash

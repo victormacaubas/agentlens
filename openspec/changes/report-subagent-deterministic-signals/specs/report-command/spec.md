@@ -5,6 +5,20 @@ filter its scope, and consume its output without invoking an LLM.
 
 ## ADDED Requirements
 
+### Requirement: CLI help is successful control flow
+
+The CLI SHALL use root-command dispatch and SHALL treat help as a successful
+request rather than an exception.
+
+#### Scenario: Root help is requested
+- **WHEN** the caller runs `agentlens --help`
+- **THEN** the CLI lists its subcommands, writes no traceback, and exits 0
+
+#### Scenario: Subcommand help is requested
+- **WHEN** the caller runs `agentlens session --help` or `agentlens report --help`
+- **THEN** the CLI shows that subcommand's options, writes no traceback, and
+  exits 0
+
 ### Requirement: Report command discovers before aggregating
 
 The command SHALL accept `agentlens report`, discover and ingest sound subagent
@@ -70,6 +84,23 @@ else to standard output while sending diagnostics to the diagnostic stream.
 - **WHEN** a JSON report discovers skipped or unchanged sources
 - **THEN** standard output remains one parseable JSON document and diagnostics
   appear only on the diagnostic stream
+
+#### Scenario: Resolved arguments are logged
+- **WHEN** either CLI workflow starts successfully
+- **THEN** its resolved arguments are logged once at INFO level on the
+  diagnostic stream without adding content to standard output
+
+### Requirement: Report exit codes preserve the CLI taxonomy
+
+The report command SHALL return the existing public exit codes: 0 for success,
+1 for an unexpected failure, 2 for configuration errors, 3 for source errors,
+and 4 for store errors.
+
+#### Scenario: Report workflow fails
+- **WHEN** report execution raises a configuration, source, store, or unexpected
+  failure
+- **THEN** the process exits with the corresponding public code and keeps
+  diagnostics off standard output
 
 ### Requirement: Default output overwrites a stable artifact
 

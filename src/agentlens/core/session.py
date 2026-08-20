@@ -11,6 +11,7 @@ from pathlib import Path
 
 from agentlens.errors import StoreError
 from agentlens.ingest.context import SubagentContextCache
+from agentlens.ingest.identity import build_subagent_source_bundle
 from agentlens.ingest.transcript import parse_transcript
 from agentlens.models.agent_definitions import AgentDefinition
 from agentlens.models.protocols import Clock
@@ -58,7 +59,8 @@ def analyze_session(
             or read back.
     """
     context_cache = SubagentContextCache(claude_root)
-    facts = parse_transcript(transcript_path, context_cache=context_cache)
+    bundle = build_subagent_source_bundle(transcript_path)
+    facts = parse_transcript(bundle, context_cache=context_cache)
     session_id = facts.session.identity.session_id
     logger.info(
         "Parsed session %s (agent_type=%s, name_source=%s)",

@@ -1,4 +1,4 @@
-"""Discovering subagent transcript sources across a Claude projects tree."""
+"""Discovering subagent source bundles across a Claude projects tree."""
 
 from pathlib import Path
 from types import SimpleNamespace
@@ -34,7 +34,10 @@ def test_discovers_every_subagent_transcript_across_multiple_projects(tmp_path: 
 
     discovered = discover_subagent_sources(tmp_path / ".claude" / "projects")
 
-    assert set(discovered) == {first.resolve(), second.resolve()}
+    assert {bundle.transcript_path for bundle in discovered} == {
+        first.resolve(),
+        second.resolve(),
+    }
 
 
 def test_ordering_is_deterministic_by_resolved_path_not_filesystem_order(tmp_path: Path) -> None:
@@ -44,9 +47,10 @@ def test_ordering_is_deterministic_by_resolved_path_not_filesystem_order(tmp_pat
     _write_transcript(written_first)
 
     discovered = discover_subagent_sources(tmp_path / ".claude" / "projects")
+    discovered_paths = [bundle.transcript_path for bundle in discovered]
 
-    assert discovered == tuple(sorted(discovered, key=str))
-    assert discovered == (written_first.resolve(), written_last.resolve())
+    assert discovered_paths == sorted(discovered_paths, key=str)
+    assert discovered_paths == [written_first.resolve(), written_last.resolve()]
 
 
 def test_duplicate_raw_session_ids_across_projects_qualify_to_distinct_sessions(
@@ -62,8 +66,8 @@ def test_duplicate_raw_session_ids_across_projects_qualify_to_distinct_sessions(
 
     cache = build_context_cache()
     session_ids = {
-        parse_transcript(path, context_cache=cache).session.identity.session_id
-        for path in discovered
+        parse_transcript(bundle, context_cache=cache).session.identity.session_id
+        for bundle in discovered
     }
     assert len(session_ids) == 2
 
@@ -76,7 +80,43 @@ def test_main_session_transcript_is_never_discovered(tmp_path: Path) -> None:
 
     discovered = discover_subagent_sources(tmp_path / ".claude" / "projects")
 
-    assert discovered == (subagent.resolve(),)
+    assert [bundle.transcript_path for bundle in discovered] == [subagent.resolve()]
+
+
+def test_bundle_sidecar_path_is_none_when_no_meta_json_sits_next_to_the_transcript(
+    tmp_path: Path,
+) -> None:
+    path = build_transcript_path(tmp_path, project="project-one")
+    _write_transcript(path)
+
+    discovered = discover_subagent_sources(tmp_path / ".claude" / "projects")
+
+    assert discovered[0].sidecar_path is None
+
+
+def test_bundle_sidecar_path_is_populated_when_a_meta_json_sits_next_to_the_transcript(
+    tmp_path: Path,
+) -> None:
+    path = build_transcript_path(tmp_path, project="project-one")
+    _write_transcript(path)
+    sidecar_path = path.with_suffix(".meta.json")
+    sidecar_path.write_text("{}")
+
+    discovered = discover_subagent_sources(tmp_path / ".claude" / "projects")
+
+    assert discovered[0].sidecar_path == sidecar_path.resolve()
+
+
+def test_bundle_carries_the_qualified_parent_session_id(tmp_path: Path) -> None:
+    path = build_transcript_path(
+        tmp_path, project="project-one", parent_session_id="raw-parent-xyz"
+    )
+    _write_transcript(path)
+
+    discovered = discover_subagent_sources(tmp_path / ".claude" / "projects")
+
+    assert discovered[0].source_project == "project-one"
+    assert discovered[0].raw_parent_session_id == "raw-parent-xyz"
 
 
 def test_a_discovered_source_that_changes_mid_read_raises_when_parsed(
@@ -84,16 +124,16 @@ def test_a_discovered_source_that_changes_mid_read_raises_when_parsed(
 ) -> None:
     """A source that changes after discovery but during its own read is caught at read time.
 
-    Discovery only locates the path; it never inspects content, so a source
-    that changes after being discovered but before being read is still
-    returned unchanged. Reading that discovered path is where the change is
-    caught.
+    Discovery only locates and interprets the path; it never inspects
+    content, so a source that changes after being discovered but before
+    being read is still returned unchanged. Reading that discovered bundle
+    is where the change is caught.
     """
     path = build_transcript_path(tmp_path, project="project-one")
     _write_transcript(path)
 
     discovered = discover_subagent_sources(tmp_path / ".claude" / "projects")
-    assert discovered == (path.resolve(),)
+    assert [bundle.transcript_path for bundle in discovered] == [path.resolve()]
 
     real_stat = Path.stat
     call_count = 0

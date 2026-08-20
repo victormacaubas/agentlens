@@ -13,6 +13,7 @@ from pathlib import Path
 
 from agentlens.ingest.context import SubagentContextCache
 from agentlens.ingest.discovery import discover_subagent_sources
+from agentlens.ingest.identity import SubagentSourceBundle
 from agentlens.ingest.transcript import parse_transcript
 from agentlens.models.session_facts import SessionFacts
 from agentlens.store import Store, UpsertOutcome
@@ -40,11 +41,11 @@ def batch_ingest_subagents(
         ~agentlens.errors.StoreError: The store could not be opened or
             written.
     """
-    paths = discover_subagent_sources(projects_root)
-    logger.info("Discovered %d subagent source(s) under %s", len(paths), projects_root)
+    bundles = discover_subagent_sources(projects_root)
+    logger.info("Discovered %d subagent source(s) under %s", len(bundles), projects_root)
 
     context_cache = SubagentContextCache(claude_root)
-    facts = _parse_all(paths, context_cache=context_cache)
+    facts = _parse_all(bundles, context_cache=context_cache)
 
     with Store(store_path) as store:
         outcomes = store.upsert_batch(
@@ -55,6 +56,6 @@ def batch_ingest_subagents(
 
 
 def _parse_all(
-    paths: Sequence[Path], *, context_cache: SubagentContextCache
+    bundles: Sequence[SubagentSourceBundle], *, context_cache: SubagentContextCache
 ) -> tuple[SessionFacts, ...]:
-    return tuple(parse_transcript(path, context_cache=context_cache) for path in paths)
+    return tuple(parse_transcript(bundle, context_cache=context_cache) for bundle in bundles)
