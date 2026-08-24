@@ -15,11 +15,12 @@ from agentlens.models.agent_definitions import (
     AgentDefinitionConfig,
     DefinitionScope,
 )
-from agentlens.models.facts import FactSession, FactToolEvent
+from agentlens.models.facts import FactSession, FactToolEvent, FactVerdict
 from agentlens.models.identity import NameSource, SessionIdentity, SessionKind, SourceRevision
 from agentlens.models.judging import (
     VERDICT_PROVENANCE,
     DimensionScore,
+    JudgeResponse,
     RubricDimension,
     SuggestedFix,
     Verdict,
@@ -1061,3 +1062,53 @@ def build_plugin_cache_skill_path(
     if shape == "plugin_hash_skill":
         return root / plugin / plugin_hash / skill_name / "SKILL.md"
     return root / plugin / version / "skills" / skill_name / "SKILL.md"
+
+
+def build_judge_response(
+    *,
+    resolved_model: str = "claude-sonnet-5",
+    is_error: bool = False,
+    raw_result: str | None = None,
+    structured_output: Mapping[str, object] | None = None,
+    cost_usd: float | None = 0.011002,
+    input_tokens: int | None = 675,
+    output_tokens: int | None = 52,
+    duration_ms: int | None = 4820,
+) -> JudgeResponse:
+    """One judge envelope. Defaults mirror a real observed successful response."""
+    return JudgeResponse(
+        resolved_model=resolved_model,
+        is_error=is_error,
+        raw_result=raw_result,
+        structured_output=structured_output,
+        cost_usd=cost_usd,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        duration_ms=duration_ms,
+    )
+
+
+def build_fact_verdict(
+    *,
+    session_id: str = "session-abc123",
+    judge_input_hash: str = "a" * 64,
+    rubric_version: str = "v1",
+    judge_model: str = "claude-sonnet-5",
+    verdict: Verdict | None = None,
+    judge_cost_usd: float = 0.011002,
+    judge_input_tokens: int = 675,
+    judge_output_tokens: int = 52,
+    scored_at: datetime | None = None,
+) -> FactVerdict:
+    """One persisted verdict row, keyed on session, input hash, rubric, and model."""
+    return FactVerdict(
+        session_id=session_id,
+        judge_input_hash=judge_input_hash,
+        rubric_version=rubric_version,
+        judge_model=judge_model,
+        verdict=build_verdict() if verdict is None else verdict,
+        judge_cost_usd=judge_cost_usd,
+        judge_input_tokens=judge_input_tokens,
+        judge_output_tokens=judge_output_tokens,
+        scored_at=datetime(2026, 8, 24, 12, 0, tzinfo=UTC) if scored_at is None else scored_at,
+    )

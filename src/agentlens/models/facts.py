@@ -1,13 +1,15 @@
-"""Fact row types: what the store persists, one row per tool invocation and per spawn.
+"""Fact row types: what the store persists, one row per tool invocation, spawn, and verdict.
 
-Both are pure data. Deriving their field values from a transcript is ``ingest``'s
-job; writing them is ``store``'s.
+All three are pure data. Deriving a measured row's field values from a transcript is
+``ingest``'s job; deriving a verdict's is ``judge``'s; writing any of them is
+``store``'s.
 """
 
 from dataclasses import dataclass
 from datetime import datetime
 
 from agentlens.models.identity import NameSource, SessionIdentity, SourceRevision
+from agentlens.models.judging import Verdict
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -93,3 +95,34 @@ class FactSession:
     unreadable_line_count: int
     derivation_fingerprint: str
     derivation_observed_mtime_ns: int
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class FactVerdict:
+    """One modeled verdict for one spawn, under one input, rubric, and judge model.
+
+    The four identity fields are the natural key. ``judge_model`` is the concrete
+    identifier read back from the response envelope, never the alias that was
+    requested, because verdicts scored under different concrete models are not
+    comparable. ``judge_input_hash`` covers the exact prepared prompt, so a
+    projection that elided different content hashes differently.
+
+    ``verdict`` carries the rubric output and its own provenance split. The cost
+    fields are agentlens's own spend, which is the only spend reported in currency;
+    the analyzed spawn's token usage lives on :class:`FactSession` and is never
+    dollarized.
+
+    ``scored_at`` is stamped from the injected clock rather than left to be inferred.
+    Unlike a measured row, a verdict cannot be regenerated for free, so a column
+    added later would cost real money to backfill.
+    """
+
+    session_id: str
+    judge_input_hash: str
+    rubric_version: str
+    judge_model: str
+    verdict: Verdict
+    judge_cost_usd: float
+    judge_input_tokens: int
+    judge_output_tokens: int
+    scored_at: datetime
