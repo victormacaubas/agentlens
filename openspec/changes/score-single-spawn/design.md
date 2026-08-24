@@ -49,6 +49,14 @@ Other envelope facts the parser has to survive, all observed:
 The probe envelope is saved at `/tmp/agentlens-envelope-probe.json` for as long as
 that file survives; it is evidence, not a fixture, and no real envelope is committed.
 
+**Probe result 4: the rubric's nested schema is accepted as-is.** A third call passed
+the full verdict schema, four dimensions each with an integer score and an evidence
+array plus an array of fix objects, all with `additionalProperties: false`, and
+`structured_output` came back as a populated nested dict. So the rubric needs no
+flattening to survive the `--json-schema` path, and `raw_result` is not the fallback
+the validator has to depend on. That call reported `num_turns: 2` again, confirming the
+turn floor is a property of structured output rather than of that one probe.
+
 ## Goals / Non-Goals
 
 **Goals:**
@@ -245,6 +253,23 @@ No score, verdict, or fix column is added to any deterministic table. The import
 contract already makes `ingest` and `judge` unable to see each other; keeping the
 tables separate is the storage-level form of the same rule.
 
+`fact_verdict` returns no `UpsertOutcome` and adds no member to it. `fact_session`
+needs that vocabulary because it compares derivation fingerprints and can legitimately
+refuse a stale write; `dim_agent` needs none because content-addressed identity makes
+every conflict definitionally identical, so it uses `ON CONFLICT DO NOTHING`.
+`fact_verdict` is a third case: a conflict on the full natural key means the same
+input, rubric, and model were scored again, and because the judge is nondeterministic
+the new verdict can differ from the stored one. So the conflict clause is an
+unconditional `DO UPDATE` with no staleness comparison and nothing to report back.
+There is no refusal case to name.
+
+The provenance split is a constant, `VERDICT_PROVENANCE`, and a fix's `target` sits on
+the untrusted side of it. Only `dimension` is locally derived among a fix's fields,
+because the validator constrains it to the rubric's fixed set and rejects anything
+else. A `target` is free text the model wrote to name what to fix, so nothing local
+derives it and every surface must escape it. Classifying it as locally derived would
+let a path or a control sequence the model invented through unescaped.
+
 ## Risks / Trade-offs
 
 **The judge works today on this machine for a reason unrelated to agentlens.** The
@@ -305,7 +330,10 @@ These can be answered during implementation without changing the specs, the appr
 or the task breakdown.
 
 - The concrete wall-clock timeout and spend ceiling values. Both are constructor
-  arguments with defaults; tuning them changes no requirement.
+  arguments with defaults; tuning them changes no requirement. One data point from
+  scoping: a deliberately trivial scoring prompt against the real rubric schema cost
+  `$0.011`, roughly six times the one-line probe, so a ceiling in the low tens of cents
+  is the right order and `0.25` was not reached.
 - The concrete byte caps for per-message, whole-projection, and tool-event count.
   Same reasoning.
 - What `--max-budget-usd` does on breach: refuse, or truncate mid-response. Unverified

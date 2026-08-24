@@ -9,6 +9,7 @@ from agentlens.ingest.context import SubagentContextCache
 from agentlens.ingest.derivation import derive_session_derivation, transcript_derivation_input
 from agentlens.ingest.identity import SubagentSourceBundle
 from agentlens.ingest.identity import build_subagent_source_bundle as _build_subagent_source_bundle
+from agentlens.ingest.sidecar import Sidecar
 from agentlens.models.agent_definitions import (
     AgentDefinition,
     AgentDefinitionConfig,
@@ -16,6 +17,15 @@ from agentlens.models.agent_definitions import (
 )
 from agentlens.models.facts import FactSession, FactToolEvent
 from agentlens.models.identity import NameSource, SessionIdentity, SessionKind, SourceRevision
+from agentlens.models.judging import (
+    VERDICT_PROVENANCE,
+    DimensionScore,
+    RubricDimension,
+    SuggestedFix,
+    Verdict,
+    VerdictProvenance,
+)
+from agentlens.models.narrative import SpawnNarrative, ToolNarrativeEvent
 from agentlens.models.report_aggregates import (
     AgentRollup,
     MetricTotals,
@@ -212,6 +222,93 @@ def build_session_skill_signal(
         available=available,
         fired=fired,
     )
+
+
+def build_dimension_score(
+    *,
+    score: int = 4,
+    evidence: tuple[str, ...] = ("The transcript shows the file was read before it was edited.",),
+) -> DimensionScore:
+    return DimensionScore(score=score, evidence=evidence)
+
+
+def build_suggested_fix(
+    *,
+    dimension: RubricDimension = RubricDimension.EFFICIENCY,
+    target: str = "the retry loop in ingest/session.py",
+    recommendation: str = "Cap the retry count instead of retrying unconditionally.",
+    rationale: str = "The transcript shows five retries of the same read.",
+) -> SuggestedFix:
+    return SuggestedFix(
+        dimension=dimension,
+        target=target,
+        recommendation=recommendation,
+        rationale=rationale,
+    )
+
+
+def build_verdict_provenance(
+    *,
+    locally_derived: tuple[str, ...] = VERDICT_PROVENANCE.locally_derived,
+    untrusted_model_output: tuple[str, ...] = VERDICT_PROVENANCE.untrusted_model_output,
+) -> VerdictProvenance:
+    return VerdictProvenance(
+        locally_derived=locally_derived, untrusted_model_output=untrusted_model_output
+    )
+
+
+def build_verdict(
+    *,
+    overall_score: int = 4,
+    dimensions: Mapping[RubricDimension, DimensionScore] | None = None,
+    suggested_fixes: tuple[SuggestedFix, ...] | None = None,
+    provenance: VerdictProvenance | None = None,
+) -> Verdict:
+    """Build a fully populated ``Verdict``: every rubric dimension scored, one fix, keyword-only.
+
+    ``dimensions`` defaults to every ``RubricDimension`` scored with
+    :func:`build_dimension_score`, so a caller that only wants a validly
+    shaped verdict does not have to name all four itself.
+    """
+    resolved_dimensions = (
+        dimensions
+        if dimensions is not None
+        else {dimension: build_dimension_score() for dimension in RubricDimension}
+    )
+    return Verdict(
+        overall_score=overall_score,
+        dimensions=resolved_dimensions,
+        suggested_fixes=(
+            suggested_fixes if suggested_fixes is not None else (build_suggested_fix(),)
+        ),
+        provenance=provenance if provenance is not None else build_verdict_provenance(),
+    )
+
+
+def build_tool_narrative_event(
+    *,
+    tool_name: str = "Read",
+    tool_input: Mapping[str, object] | None = None,
+    is_error: bool = False,
+    denial_kind: str | None = None,
+) -> ToolNarrativeEvent:
+    return ToolNarrativeEvent(
+        tool_name=tool_name,
+        tool_input=(
+            dict(tool_input) if tool_input is not None else {"file_path": "/workspace/example.txt"}
+        ),
+        is_error=is_error,
+        denial_kind=denial_kind,
+    )
+
+
+def build_spawn_narrative(
+    *,
+    task_prompt: str = "Implement the ingest pipeline",
+    messages: tuple[str, ...] = ("I will read the file.",),
+    tool_events: tuple[ToolNarrativeEvent, ...] = (),
+) -> SpawnNarrative:
+    return SpawnNarrative(task_prompt=task_prompt, messages=messages, tool_events=tool_events)
 
 
 def build_metric_totals(
@@ -716,6 +813,34 @@ def build_fragmented_turn(
 def build_unparseable_line() -> str:
     """A transcript line that fails JSON parsing outright."""
     return "{not valid json"
+
+
+def build_parsed_sidecar(
+    *,
+    agent_type: str = "implementer",
+    description: str = "Implement the ingest pipeline",
+    tool_use_id: str = "toolu_spawn",
+    spawn_depth: int = 1,
+    parent_agent_id: str | None = None,
+    model: str | None = None,
+    revision: SourceRevision | None = None,
+) -> Sidecar:
+    """Build the parsed ``Sidecar`` dataclass a real ``.meta.json`` read would return.
+
+    Distinct from :func:`build_sidecar`, which renders the on-disk JSON
+    shape: this is the value ``ingest.sidecar.read_sidecar`` hands back,
+    for callers that want a sidecar without writing one to disk and reading
+    it back.
+    """
+    return Sidecar(
+        agent_type=agent_type,
+        description=description,
+        tool_use_id=tool_use_id,
+        spawn_depth=spawn_depth,
+        parent_agent_id=parent_agent_id,
+        model=model,
+        revision=revision if revision is not None else build_source_revision(),
+    )
 
 
 def build_sidecar(

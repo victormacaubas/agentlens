@@ -25,18 +25,27 @@ that a naming convention it has to learn puts the burden in the wrong place.
 
 ### Requirement: Absence of a score stays absent rather than becoming empty
 
-A row for a spawn that was not scored SHALL continue to carry no score, verdict, or
-fix field at all, in the same document as rows that were scored.
+A document produced by a run that did not score SHALL carry no score, verdict, or fix
+field at all, even though the document's shape now admits them.
 
-#### Scenario: Mixed document
+#### Scenario: Unscored run under the scored-capable shape
 
-- **WHEN** an artifact covers both a scored and an unscored spawn
-- **THEN** the scored row carries its verdict fields and the unscored row carries
-  none of them, rather than carrying them set to null, zero, or empty
+- **WHEN** a run that scored nothing produces a document under the schema version that
+  admits verdict fields
+- **THEN** no verdict, score, or fix key is present anywhere in the document, rather
+  than being present and set to null, zero, or empty
 
-Rationale: the unscored contract already promises absence, and a consumer testing
-field presence must keep working once scoring exists. Turning absence into a null
-would break every such consumer silently.
+#### Scenario: Scored and unscored documents differ only by presence
+
+- **WHEN** the same spawn is analyzed once without scoring and once with it
+- **THEN** the two documents are identical except that the scored one adds its verdict
+  keys, and the unscored one carries no placeholder where they would go
+
+Rationale: the unscored contract already promises absence, and a consumer testing field
+presence must keep working once scoring exists. Turning absence into a null would break
+every such consumer silently. A document holding both a scored and an unscored spawn is
+only reachable through the windowed report, so that case belongs to the change that
+adds it rather than to this one.
 
 ### Requirement: The schema version reflects the scored shape
 

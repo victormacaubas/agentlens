@@ -1,13 +1,13 @@
 ## 1. Domain types and the narrative the judge is shown
 
-- [ ] 1.1 Add the verdict domain types to `models`: the verdict, its four dimension
+- [x] 1.1 Add the verdict domain types to `models`: the verdict, its four dimension
   scores with evidence, its suggested fixes, and the provenance split marking which
   fields are locally derived and which are untrusted model output. Frozen, slotted,
   keyword-only, no logic and no I/O, per the layer map. Verify by constructing a fully
   populated verdict and asserting the provenance split names every field, and that no
   field defaults in a way that would let a missing score read as a real one.
 
-- [ ] 1.2 Add `SpawnNarrative` to `models` and its extraction to `ingest`, reusing
+- [x] 1.2 Add `SpawnNarrative` to `models` and its extraction to `ingest`, reusing
   `ingest.records.assistant_message_groups` rather than re-deriving the grouping.
   Cover: a logical turn fragmented across several records sharing one `message.id`
   appears once; a run with no assistant text; a run with no tool events; an assistant
