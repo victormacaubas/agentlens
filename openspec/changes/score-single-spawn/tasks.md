@@ -68,7 +68,7 @@
 
 ## 4. Verdict storage
 
-- [ ] 4.1 Add `fact_verdict` to `store`: schema, row mapping, and upsert on the natural
+- [x] 4.1 Add `fact_verdict` to `store`: schema, row mapping, and upsert on the natural
   key of session, judge-input hash, rubric version, and resolved model. Cover: a fully
   populated verdict round-tripping every field including provenance and cost;
   re-scoring the same identity replacing the row; the same spawn under two resolved
@@ -117,6 +117,17 @@
   `core` legitimately depends on it. Verify by asserting `lint-imports` reports the
   report-path contract BROKEN when a judge import is temporarily added to
   `core/report.py`, then removing it.
+
+- [ ] 6.1a Repair the runtime judge-isolation guard in
+  `tests/unit/test_cli_report.py`, which asserts `"agentlens.judge" not in sys.modules`
+  inside a shared pytest process. Proven order-dependent: it passes alone and fails
+  whenever any judge test ran earlier in the same session, so it fails permanently now
+  that `judge` has tests. Nothing about the report path's behavior changed, so the test
+  was wrong. Either re-establish the guarantee under real process isolation, by driving
+  the report path in a fresh interpreter and asserting on that interpreter's
+  `sys.modules`, or retire the assertion and rely on the `lint-imports` contract, which
+  already forbids the import edge and disallows indirect imports. Decide which, record
+  why in the change's design, and leave the suite order-independent either way.
 
 - [ ] 6.2 Amend `docs/agentlens-design.md`'s hardened invocation to add `--settings`,
   drop `--max-turns`, add the wall-clock timeout and spend ceiling, and correct the

@@ -9,14 +9,22 @@ from agentlens.models.agent_definitions import (
     AgentDefinitionConfig,
     DefinitionScope,
 )
-from agentlens.models.facts import FactSession, FactToolEvent
+from agentlens.models.facts import FactSession, FactToolEvent, FactVerdict
 from agentlens.models.identity import NameSource, SessionIdentity, SessionKind, SourceRevision
+from agentlens.models.judging import (
+    DimensionScore,
+    RubricDimension,
+    SuggestedFix,
+    Verdict,
+    VerdictProvenance,
+)
 from agentlens.models.skill_signals import KnownState, SessionSkillSignal
 from agentlens.store.schema import (
     BRIDGE_SESSION_SKILL_COLUMN_NAMES,
     DIM_AGENT_COLUMN_NAMES,
     FACT_SESSION_COLUMN_NAMES,
     FACT_TOOL_EVENT_COLUMN_NAMES,
+    FACT_VERDICT_COLUMN_NAMES,
 )
 
 SqliteRow = tuple[object, ...]
@@ -219,4 +227,115 @@ def row_to_fact_tool_event(row: sqlite3.Row) -> FactToolEvent:
         is_error=bool(row["is_error"]),
         denial_kind=cast("str | None", row["denial_kind"]),
         result_size=cast("int | None", row["result_size"]),
+    )
+
+
+def _dimension_evidence_payload(verdict: Verdict) -> dict[str, list[str]]:
+    return {
+        dimension.value: list(score.evidence) for dimension, score in verdict.dimensions.items()
+    }
+
+
+def _suggested_fixes_payload(verdict: Verdict) -> list[dict[str, str]]:
+    return [
+        {
+            "dimension": fix.dimension.value,
+            "target": fix.target,
+            "recommendation": fix.recommendation,
+            "rationale": fix.rationale,
+        }
+        for fix in verdict.suggested_fixes
+    ]
+
+
+def _provenance_payload(provenance: VerdictProvenance) -> dict[str, list[str]]:
+    return {
+        "locally_derived": list(provenance.locally_derived),
+        "untrusted_model_output": list(provenance.untrusted_model_output),
+    }
+
+
+_FACT_VERDICT_VALUE_EXTRACTORS: Mapping[str, Callable[[FactVerdict], object]] = {
+    "session_id": lambda fact: fact.session_id,
+    "judge_input_hash": lambda fact: fact.judge_input_hash,
+    "rubric_version": lambda fact: fact.rubric_version,
+    "judge_model": lambda fact: fact.judge_model,
+    "overall_score": lambda fact: fact.verdict.overall_score,
+    "task_completion_score": (
+        lambda fact: fact.verdict.dimensions[RubricDimension.TASK_COMPLETION].score
+    ),
+    "honesty_score": lambda fact: fact.verdict.dimensions[RubricDimension.HONESTY].score,
+    "efficiency_score": lambda fact: fact.verdict.dimensions[RubricDimension.EFFICIENCY].score,
+    "scope_adherence_score": (
+        lambda fact: fact.verdict.dimensions[RubricDimension.SCOPE_ADHERENCE].score
+    ),
+    "dimension_evidence": lambda fact: json.dumps(_dimension_evidence_payload(fact.verdict)),
+    "suggested_fixes": lambda fact: json.dumps(_suggested_fixes_payload(fact.verdict)),
+    "provenance": lambda fact: json.dumps(_provenance_payload(fact.verdict.provenance)),
+    "judge_cost_usd": lambda fact: fact.judge_cost_usd,
+    "judge_input_tokens": lambda fact: fact.judge_input_tokens,
+    "judge_output_tokens": lambda fact: fact.judge_output_tokens,
+    "scored_at": lambda fact: fact.scored_at.isoformat(timespec="microseconds"),
+}
+
+
+def fact_verdict_to_row(verdict: FactVerdict) -> SqliteRow:
+    """Return ``verdict``'s field values in the column order of ``fact_verdict``."""
+    return tuple(
+        _FACT_VERDICT_VALUE_EXTRACTORS[name](verdict) for name in FACT_VERDICT_COLUMN_NAMES
+    )
+
+
+def row_to_fact_verdict(row: sqlite3.Row) -> FactVerdict:
+    """Rebuild a ``FactVerdict`` from a ``fact_verdict`` row, read by column name."""
+    dimension_evidence = cast(
+        "dict[str, list[str]]", json.loads(cast(str, row["dimension_evidence"]))
+    )
+    dimensions = {
+        RubricDimension.TASK_COMPLETION: DimensionScore(
+            score=cast(int, row["task_completion_score"]),
+            evidence=tuple(dimension_evidence[RubricDimension.TASK_COMPLETION.value]),
+        ),
+        RubricDimension.HONESTY: DimensionScore(
+            score=cast(int, row["honesty_score"]),
+            evidence=tuple(dimension_evidence[RubricDimension.HONESTY.value]),
+        ),
+        RubricDimension.EFFICIENCY: DimensionScore(
+            score=cast(int, row["efficiency_score"]),
+            evidence=tuple(dimension_evidence[RubricDimension.EFFICIENCY.value]),
+        ),
+        RubricDimension.SCOPE_ADHERENCE: DimensionScore(
+            score=cast(int, row["scope_adherence_score"]),
+            evidence=tuple(dimension_evidence[RubricDimension.SCOPE_ADHERENCE.value]),
+        ),
+    }
+    suggested_fixes = tuple(
+        SuggestedFix(
+            dimension=RubricDimension(fix["dimension"]),
+            target=fix["target"],
+            recommendation=fix["recommendation"],
+            rationale=fix["rationale"],
+        )
+        for fix in cast("list[dict[str, str]]", json.loads(cast(str, row["suggested_fixes"])))
+    )
+    provenance_payload = cast("dict[str, list[str]]", json.loads(cast(str, row["provenance"])))
+    verdict = Verdict(
+        overall_score=cast(int, row["overall_score"]),
+        dimensions=dimensions,
+        suggested_fixes=suggested_fixes,
+        provenance=VerdictProvenance(
+            locally_derived=tuple(provenance_payload["locally_derived"]),
+            untrusted_model_output=tuple(provenance_payload["untrusted_model_output"]),
+        ),
+    )
+    return FactVerdict(
+        session_id=cast(str, row["session_id"]),
+        judge_input_hash=cast(str, row["judge_input_hash"]),
+        rubric_version=cast(str, row["rubric_version"]),
+        judge_model=cast(str, row["judge_model"]),
+        verdict=verdict,
+        judge_cost_usd=cast(float, row["judge_cost_usd"]),
+        judge_input_tokens=cast(int, row["judge_input_tokens"]),
+        judge_output_tokens=cast(int, row["judge_output_tokens"]),
+        scored_at=datetime.fromisoformat(cast(str, row["scored_at"])),
     )

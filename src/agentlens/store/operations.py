@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from typing import cast
 
 from agentlens.models.agent_definitions import AgentDefinition
-from agentlens.models.facts import FactSession
+from agentlens.models.facts import FactSession, FactVerdict
 from agentlens.models.identity import SessionKind
 from agentlens.models.report_aggregates import (
     AgentRollup,
@@ -21,9 +21,11 @@ from agentlens.store.rows import (
     agent_definition_to_row,
     fact_session_to_row,
     fact_tool_event_to_row,
+    fact_verdict_to_row,
     row_to_agent_definition,
     row_to_fact_session,
     row_to_fact_tool_event,
+    row_to_fact_verdict,
     row_to_session_skill_signal,
     session_skill_signal_to_row,
 )
@@ -32,6 +34,7 @@ from agentlens.store.schema import (
     DIM_AGENT_COLUMN_NAMES,
     FACT_SESSION_COLUMN_NAMES,
     FACT_TOOL_EVENT_COLUMN_NAMES,
+    FACT_VERDICT_COLUMN_NAMES,
 )
 
 _ADDITIVE_METRIC_COLUMNS: tuple[str, ...] = (
@@ -140,6 +143,38 @@ SELECT
     {_DIM_AGENT_COLUMN_LIST}
 FROM dim_agent
 WHERE agent_definition_id = ?
+"""  # noqa: S608
+
+_FACT_VERDICT_CONFLICT_TARGET = "session_id, judge_input_hash, rubric_version, judge_model"
+_FACT_VERDICT_NATURAL_KEY_COLUMNS = (
+    "session_id",
+    "judge_input_hash",
+    "rubric_version",
+    "judge_model",
+)
+
+_FACT_VERDICT_COLUMN_LIST = ", ".join(FACT_VERDICT_COLUMN_NAMES)
+_FACT_VERDICT_PLACEHOLDERS = ", ".join(["?"] * len(FACT_VERDICT_COLUMN_NAMES))
+_FACT_VERDICT_UPDATE_ASSIGNMENTS = ",\n    ".join(
+    f"{name} = excluded.{name}"
+    for name in FACT_VERDICT_COLUMN_NAMES
+    if name not in _FACT_VERDICT_NATURAL_KEY_COLUMNS
+)
+
+_UPSERT_VERDICT_SQL = f"""
+INSERT INTO fact_verdict (
+    {_FACT_VERDICT_COLUMN_LIST}
+) VALUES ({_FACT_VERDICT_PLACEHOLDERS})
+ON CONFLICT({_FACT_VERDICT_CONFLICT_TARGET}) DO UPDATE SET
+    {_FACT_VERDICT_UPDATE_ASSIGNMENTS}
+"""  # noqa: S608
+
+_SELECT_VERDICTS_FOR_SESSION_SQL = f"""
+SELECT
+    {_FACT_VERDICT_COLUMN_LIST}
+FROM fact_verdict
+WHERE session_id = ?
+ORDER BY judge_input_hash, rubric_version, judge_model
 """  # noqa: S608
 
 _SELECT_SPAWNS_IN_WINDOW_SQL = f"""
@@ -292,6 +327,29 @@ def read_agent_definition(
     if row is None:
         return None
     return row_to_agent_definition(row)
+
+
+def upsert_verdict(connection: sqlite3.Connection, verdict: FactVerdict) -> None:
+    """Write ``verdict``, replacing any row already stored under its natural key.
+
+    The judge is nondeterministic, so a conflict on the natural key of
+    session, judge-input hash, rubric version, and resolved model always
+    replaces the stored row unconditionally; there is no staleness
+    comparison and nothing to report back.
+    """
+    with connection:
+        connection.execute(_UPSERT_VERDICT_SQL, fact_verdict_to_row(verdict))
+
+
+def read_verdicts_for_session(
+    connection: sqlite3.Connection, session_id: str
+) -> tuple[FactVerdict, ...]:
+    """Return every stored verdict for ``session_id``, ordered for reproducibility.
+
+    A session with no verdicts returns an empty tuple.
+    """
+    rows = connection.execute(_SELECT_VERDICTS_FOR_SESSION_SQL, (session_id,)).fetchall()
+    return tuple(row_to_fact_verdict(row) for row in rows)
 
 
 def read_skill_signals_for_sessions(
