@@ -18,13 +18,13 @@
 
 ## 2. The rubric, the prepared prompt, and verdict validation
 
-- [ ] 2.1 Add the pinned rubric to `judge`: the four dimensions, the 0-to-5 scale, the
+- [x] 2.1 Add the pinned rubric to `judge`: the four dimensions, the 0-to-5 scale, the
   verdict JSON Schema dict literal handed to the CLI, the judge instructions, and the
   `rubric_version` string. Add the pinning test that ties the rubric's content digest
   to the declared version. Verify by asserting the pinning test **fails** when the
   rubric text is edited without bumping the version before trusting it to pass.
 
-- [ ] 2.2 Render `SpawnNarrative` into the prepared prompt in `judge`, with the
+- [x] 2.2 Render `SpawnNarrative` into the prepared prompt in `judge`, with the
   head-and-tail per-message cap, the whole-projection ceiling, the tool-event count
   cap, and an in-band elision marker at every point content was shortened. Cover: a
   narrative under every cap renders unchanged; a long message is shortened and marked
@@ -34,7 +34,7 @@
   narrative rendering byte-identically across repeated calls. Verify the hash is
   stable and that no cap path can produce a prompt that fails to state it is partial.
 
-- [ ] 2.3 Add the hand-written verdict validator to `judge`, returning a frozen
+- [x] 2.3 Add the hand-written verdict validator to `judge`, returning a frozen
   verdict or raising `JudgeResponseError`. Cover: a well-formed verdict; a dimension
   score outside 0 to 5; a missing dimension; a dimension the rubric does not define; a
   non-integer score; absent suggested fixes; and an empty or absent structured output.
@@ -43,14 +43,14 @@
 
 ## 3. The judge backend and its fake
 
-- [ ] 3.1 Build the hardened argv as a pure function in `judge`, per design.md's
+- [x] 3.1 Build the hardened argv as a pure function in `judge`, per design.md's
   amended invocation. Cover: every element of the contract present; the expanded user
   settings path; the spend ceiling; the temporary working directory; the environment
   reduced to `PATH`, `HOME`, and `ANTHROPIC_*` with nothing else surviving; and no
   `--max-turns`. Verify by asserting on the constructed argv and env directly, since
   ADR 0004 makes this a security control that carries its own assertions.
 
-- [ ] 3.2 Add `ClaudeCliJudge` implementing `JudgeBackend`, with the timeout and spend
+- [x] 3.2 Add `ClaudeCliJudge` implementing `JudgeBackend`, with the timeout and spend
   ceiling as constructor arguments, envelope parsing, and error translation at the
   package boundary; and add its fake to `tests/fakes.py` in this same task, which is
   what earns the Protocol under ADR 0004. Cover: a successful envelope; `is_error`
@@ -61,7 +61,7 @@
   the right `JudgeError` subclass with a message naming the cause, and that no
   `subprocess` type appears in any signature the package exposes.
 
-- [ ] 3.3 Add the single `@pytest.mark.integration` canary that runs the real hardened
+- [x] 3.3 Add the single `@pytest.mark.integration` canary that runs the real hardened
   invocation against the installed `claude` and asserts it authenticates and returns a
   parseable envelope. Verify it passes under `make integration` and is not collected by
   `make test`.
