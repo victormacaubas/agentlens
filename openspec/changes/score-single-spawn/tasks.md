@@ -100,7 +100,7 @@
   with no currency figure anywhere. Verify no rendered surface emits anything shaped
   like a patch, diff, or runnable command.
 
-- [ ] 5.3 Add the opt-in scoring flag to `cli.py`, construct the real backend there as
+- [x] 5.3 Add the opt-in scoring flag to `cli.py`, construct the real backend there as
   the only composition root, extend the single exit-code mapping to 5, and log the
   resolved arguments once as JSON including whether scoring was requested and which
   model. Cover: the flag absent and present; a judge failure exiting 5 and not 3 or 4;
@@ -111,14 +111,14 @@
 
 ## 6. Contracts, documentation, and the merge gate
 
-- [ ] 6.1 Verify the existing import contracts still hold with the scoring path in
+- [x] 6.1 Verify the existing import contracts still hold with the scoring path in
   place: `judge` reaching neither `ingest` nor `store`, `subprocess` confined to
   `judge`, and the deterministic report path still unable to reach a judge now that
   `core` legitimately depends on it. Verify by asserting `lint-imports` reports the
   report-path contract BROKEN when a judge import is temporarily added to
   `core/report.py`, then removing it.
 
-- [ ] 6.1a Repair the runtime judge-isolation guard in
+- [x] 6.1a Repair the runtime judge-isolation guard in
   `tests/unit/test_cli_report.py`, which asserts `"agentlens.judge" not in sys.modules`
   inside a shared pytest process. Proven order-dependent: it passes alone and fails
   whenever any judge test ran earlier in the same session, so it fails permanently now
@@ -129,7 +129,7 @@
   already forbids the import edge and disallows indirect imports. Decide which, record
   why in the change's design, and leave the suite order-independent either way.
 
-- [ ] 6.2 Amend `docs/agentlens-design.md`'s hardened invocation to add `--settings`,
+- [x] 6.2 Amend `docs/agentlens-design.md`'s hardened invocation to add `--settings`,
   drop `--max-turns`, add the wall-clock timeout and spend ceiling, and correct the
   claim that `--tools ""` bounds the call to one turn. Write the new ADR recording what
   bounds a judge call, how it authenticates, why the resolved model comes from
@@ -137,5 +137,5 @@
   `DESIGN.md`'s dangling "ADR 0011" citation at the real source of the untrusted-output
   rule. Verify the invocation in the doc matches the argv the tests in 3.1 assert on.
 
-- [ ] 6.3 Run `make check` once for the whole change and confirm the full gate passes:
+- [x] 6.3 Run `make check` once for the whole change and confirm the full gate passes:
   tests, typing, lint, and every import contract.

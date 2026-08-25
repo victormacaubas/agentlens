@@ -1,7 +1,6 @@
 """The ``agentlens report`` command: end to end, exit codes, and stream discipline."""
 
 import json
-import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -54,7 +53,7 @@ def test_report_help_exits_0_without_a_traceback(capsys: pytest.CaptureFixture[s
     assert "Traceback" not in captured.err
 
 
-def test_since_7d_emits_real_current_and_prior_numbers_without_a_judge(
+def test_since_7d_emits_real_current_and_prior_numbers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.chdir(tmp_path)
@@ -78,7 +77,6 @@ def test_since_7d_emits_real_current_and_prior_numbers_without_a_judge(
     rollup = document["agent_rollups"][0]
     assert rollup["n_spawns"] == 2
     assert rollup["n_spawns_prior"] == 1
-    assert "agentlens.judge" not in sys.modules
 
 
 def test_resolved_report_arguments_are_logged_once_on_stderr_only(

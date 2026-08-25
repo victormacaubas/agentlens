@@ -270,6 +270,43 @@ else. A `target` is free text the model wrote to name what to fix, so nothing lo
 derives it and every surface must escape it. Classifying it as locally derived would
 let a path or a control sequence the model invented through unescaped.
 
+### The judge-isolation guard moves from a runtime assertion to the import contract
+
+`test_cli_report.py` asserted `"agentlens.judge" not in sys.modules` inside a
+shared pytest process, to prove the deterministic report path never touches the
+judge. That assertion is order-dependent: it only holds if no earlier test in
+the same process imported `agentlens.judge`, which stopped being true the
+moment `judge` gained its own test modules. The report path's own behavior
+never changed; the test was checking a process-global side effect of whichever
+tests happened to run first.
+
+Two ways to re-establish the guarantee were considered. Driving the report
+command in a fresh interpreter via `subprocess.run([sys.executable, "-c",
+...])` and inspecting that interpreter's own `sys.modules` would restore
+process isolation, but it pays a subprocess's wall-clock cost on every future
+run of this one test, for a guarantee something else already gives statically.
+
+The `lint-imports` contract "The deterministic report path never reaches the
+judge" already forbids `agentlens.judge` from `agentlens.core.report` and
+`agentlens.core.ingest_run`, and `allow_indirect_imports` is not set for that
+contract, so it disallows indirect imports too: reaching the judge through a
+helper module breaks the contract exactly as directly as importing it inline
+would. That is precisely "no import of `agentlens.judge`, direct or indirect,
+from the report path" — the same property the runtime assertion existed to
+prove, checked statically instead of by inspecting one process's import
+cache. It also runs on every `make check`, not only when this one test
+happens to execute first in the suite.
+
+**Decision: retire the runtime assertion, rely on the import contract.** The
+`sys.modules` line and the now-unused `sys` import are removed from
+`test_cli_report.py`. The test's other assertions (schema version, current-
+and prior-window spawn counts) are about window arithmetic, not about the
+judge, so the test is renamed to
+`test_since_7d_emits_real_current_and_prior_numbers`, dropping the
+`without_a_judge` clause the deleted assertion justified. Task 6.1 adds the
+test that proves the import contract actually fails the build when broken,
+which is what makes relying on it here sound rather than a restated hope.
+
 ## Risks / Trade-offs
 
 **The judge works today on this machine for a reason unrelated to agentlens.** The
