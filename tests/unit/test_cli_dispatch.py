@@ -114,7 +114,7 @@ def test_json_format_stdout_is_one_parseable_document_with_diagnostics_on_stderr
     captured = capsys.readouterr()
     assert exit_code == EXIT_OK
     document = json.loads(captured.out)
-    assert document["schema_version"] == 1
+    assert document["schema_version"] == 2
     assert "Resolved session arguments" in captured.err
 
 

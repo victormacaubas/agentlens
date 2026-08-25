@@ -79,7 +79,7 @@
 
 ## 5. Orchestration and the two surfaces
 
-- [ ] 5.1 Add the scoring run to `core`, composing narrative extraction, the injected
+- [x] 5.1 Add the scoring run to `core`, composing narrative extraction, the injected
   judge, validation, and persistence. Cover: scoring not requested makes no judge call
   and leaves observable behavior identical to a pre-scoring run; scoring requested
   produces exactly one call and one verdict; `--dryrun` with scoring requested makes no
@@ -89,7 +89,7 @@
   rejected still reports the cost already spent. Verify against the fake judge with no
   patching, since a missing seam is the only reason to reach for `unittest.mock`.
 
-- [ ] 5.2 Add the scored branch to `render`: the JSON document's verdict fields with a
+- [x] 5.2 Add the scored branch to `render`: the JSON document's verdict fields with a
   machine-readable provenance split, and the terminal summary showing overall and
   dimension scores with the artifact path. Cover: a scored row carrying every field the
   spec names; a document mixing a scored and an unscored row where absence stays absent

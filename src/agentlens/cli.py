@@ -18,6 +18,8 @@ from agentlens.errors import (
     SourceError,
     StoreError,
 )
+from agentlens.judge.cli_backend import ClaudeCliJudge
+from agentlens.models.protocols import JudgeBackend
 from agentlens.models.windows import NAMED_WINDOW_THIS_WEEK, WindowSelector
 from agentlens.utils.clock import SystemClock
 
@@ -47,6 +49,8 @@ class SessionArgs:
     output_format: str | None
     store_path: Path | None
     dry_run: bool
+    score: bool
+    judge_model: str
 
 
 def default_store_path() -> Path:
@@ -80,6 +84,7 @@ def _run_session(args: SessionArgs) -> int:
     """
     store_path = args.store_path if args.store_path is not None else default_store_path()
     clock = SystemClock()
+    judge: JudgeBackend | None = ClaudeCliJudge() if args.score else None
 
     logger.info(
         "Resolved session arguments: %s",
@@ -89,6 +94,8 @@ def _run_session(args: SessionArgs) -> int:
                 "format": args.output_format,
                 "store": str(store_path),
                 "dry_run": args.dry_run,
+                "score": args.score,
+                "judge_model": args.judge_model,
             }
         ),
     )
@@ -100,6 +107,9 @@ def _run_session(args: SessionArgs) -> int:
         output_format=args.output_format,
         dry_run=args.dry_run,
         claude_root=default_claude_root(),
+        score=args.score,
+        judge=judge,
+        judge_model=args.judge_model if args.score else None,
     )
     print(output)
     return EXIT_OK
@@ -111,6 +121,8 @@ def _session_callback(
     output_format: str | None,
     store_path: Path | None,
     dry_run: bool,
+    score: bool,
+    judge_model: str,
 ) -> int:
     return _run_session(
         SessionArgs(
@@ -118,6 +130,8 @@ def _session_callback(
             output_format=output_format,
             store_path=store_path,
             dry_run=dry_run,
+            score=score,
+            judge_model=judge_model,
         )
     )
 
@@ -150,6 +164,20 @@ _SESSION_COMMAND = click.Command(
             is_flag=True,
             default=False,
             help="Report what would be written without writing the store or the artifact.",
+        ),
+        click.Option(
+            ["--score", "score"],
+            is_flag=True,
+            default=False,
+            help="Request a modeled verdict for this spawn from an LLM judge. "
+            "Costs money; never on by default.",
+        ),
+        click.Option(
+            ["--judge-model", "judge_model"],
+            type=str,
+            default="sonnet",
+            help="The model alias or id to request the verdict from. "
+            "Meaningful only when --score is also given.",
         ),
     ],
 )

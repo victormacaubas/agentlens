@@ -2,6 +2,8 @@ import json
 from collections.abc import Mapping
 from dataclasses import asdict
 
+from agentlens.models.facts import FactVerdict
+from agentlens.models.judging import RubricDimension
 from agentlens.models.protocols import Clock
 from agentlens.models.report_aggregates import AgentRollup
 from agentlens.models.report_document import ReportDocument, ReportSpawn
@@ -9,23 +11,26 @@ from agentlens.models.session_facts import SessionFacts
 from agentlens.models.skill_signals import SessionSkillSignal
 from agentlens.models.windows import ResolvedWindow
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SCORING_STATUS_UNSCORED = "unscored"
+SCORING_STATUS_SCORED = "scored"
 
 
-def build_session_document(facts: SessionFacts, *, clock: Clock) -> dict[str, object]:
+def build_session_document(
+    facts: SessionFacts, *, clock: Clock, verdict: FactVerdict | None = None
+) -> dict[str, object]:
     """Build the JSON-serializable report document for one analyzed spawn.
 
     Carries a schema version, a UTC generation timestamp read from ``clock``,
-    one row per qualified spawn, and an explicit unscored marker. This slice
-    never runs a judge, so no score, verdict, or fix field appears anywhere in
-    the result.
+    one row per qualified spawn, and an explicit scoring-status marker.
+    ``verdict`` is ``None`` for a run that did not score its spawn, which
+    keeps the row's ``"verdict"`` key absent rather than present and empty.
     """
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": clock.now().isoformat(),
-        "scoring_status": SCORING_STATUS_UNSCORED,
-        "spawns": [_build_spawn_row(facts)],
+        "scoring_status": SCORING_STATUS_SCORED if verdict is not None else SCORING_STATUS_UNSCORED,
+        "spawns": [_build_spawn_row(facts, verdict=verdict)],
     }
 
 
@@ -38,10 +43,10 @@ def render_document_json(document: Mapping[str, object]) -> str:
     return json.dumps(document, indent=2)
 
 
-def _build_spawn_row(facts: SessionFacts) -> dict[str, object]:
+def _build_spawn_row(facts: SessionFacts, *, verdict: FactVerdict | None) -> dict[str, object]:
     session = facts.session
     identity = session.identity
-    return {
+    row: dict[str, object] = {
         "session_id": identity.session_id,
         "source_project": identity.source_project,
         "session_kind": identity.session_kind,
@@ -67,6 +72,48 @@ def _build_spawn_row(facts: SessionFacts) -> dict[str, object]:
         "cache_read_tokens": session.cache_read_tokens,
         "cache_creation_tokens": session.cache_creation_tokens,
         "unreadable_line_count": session.unreadable_line_count,
+    }
+    if verdict is not None:
+        row["verdict"] = _build_verdict_row(verdict)
+    return row
+
+
+def _build_verdict_row(fact_verdict: FactVerdict) -> dict[str, object]:
+    """Convert one persisted verdict into its JSON-safe mapping.
+
+    ``provenance`` is sourced from the verdict's own recorded split rather
+    than the field names below, so a consumer can tell what to escape without
+    already knowing this module's naming.
+    """
+    verdict = fact_verdict.verdict
+    return {
+        "rubric_version": fact_verdict.rubric_version,
+        "judge_model": fact_verdict.judge_model,
+        "judge_cost_usd": fact_verdict.judge_cost_usd,
+        "judge_input_tokens": fact_verdict.judge_input_tokens,
+        "judge_output_tokens": fact_verdict.judge_output_tokens,
+        "scored_at": fact_verdict.scored_at.isoformat(),
+        "overall_score": verdict.overall_score,
+        "dimensions": {
+            dimension.value: {
+                "score": verdict.dimensions[dimension].score,
+                "evidence": list(verdict.dimensions[dimension].evidence),
+            }
+            for dimension in RubricDimension
+        },
+        "suggested_fixes": [
+            {
+                "dimension": fix.dimension.value,
+                "target": fix.target,
+                "recommendation": fix.recommendation,
+                "rationale": fix.rationale,
+            }
+            for fix in verdict.suggested_fixes
+        ],
+        "provenance": {
+            "locally_derived": list(verdict.provenance.locally_derived),
+            "untrusted_model_output": list(verdict.provenance.untrusted_model_output),
+        },
     }
 
 
