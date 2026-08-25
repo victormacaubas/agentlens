@@ -24,7 +24,6 @@ from tests.factories import (
     build_session_facts,
     build_session_identity,
     build_session_skill_signal,
-    build_sidecar,
     build_skill_md_path,
     build_skill_md_text,
     build_tool_invocation_pair,
@@ -33,10 +32,13 @@ from tests.factories import (
     build_transcript_text,
     build_unparseable_line,
     build_user_record,
+    write_sidecar,
+    write_transcript,
 )
 from tests.fakes import FakeClock
 
 _GENERATED_AT = datetime(2026, 2, 8, tzinfo=UTC)
+_CLOCK = FakeClock(instant=_GENERATED_AT)
 
 # Covers `tests.factories.DEFAULT_TIMESTAMP`, so a freshly discovered transcript
 # built with default factory timestamps falls inside this window.
@@ -53,17 +55,7 @@ def _write(path: Path, text: str) -> None:
     path.write_text(text)
 
 
-def _write_transcript(path: Path) -> None:
-    _write(path, build_transcript_text(build_tool_invocation_pair()))
-
-
 _PREDATES_EVERY_SPAWN = datetime(2020, 1, 1, tzinfo=UTC).timestamp()
-
-
-def _write_sidecar(transcript_path: Path, *, agent_type: str) -> None:
-    transcript_path.with_suffix(".meta.json").write_text(
-        json.dumps(build_sidecar(agent_type=agent_type))
-    )
 
 
 def _skill_fire_record(skill_name: str) -> dict[str, object]:
@@ -100,7 +92,7 @@ def test_dry_run_includes_newly_discovered_spawns_without_writing_the_store(
     home = tmp_path / "home"
     claude_root = home / ".claude"
     window = _DISCOVERY_WINDOW
-    _write_transcript(build_transcript_path(home, raw_session_id="new-spawn"))
+    write_transcript(build_transcript_path(home, raw_session_id="new-spawn"), with_sidecar=False)
     store_path = tmp_path / "store" / "agentlens.db"
 
     output = generate_report(
@@ -123,12 +115,12 @@ def test_dry_run_includes_new_spawns_alongside_an_existing_stores_rows(tmp_path:
     claude_root = home / ".claude"
     window = _DISCOVERY_WINDOW
     store_path = tmp_path / "store" / "agentlens.db"
-    with Store(store_path) as store:
+    with Store(store_path, clock=_CLOCK) as store:
         store.upsert_session(
             _session_facts(session_id="session-existing", started_at=window.current_start)
         )
     before = store_path.read_bytes()
-    _write_transcript(build_transcript_path(home, raw_session_id="new-spawn"))
+    write_transcript(build_transcript_path(home, raw_session_id="new-spawn"), with_sidecar=False)
 
     output = generate_report(
         window=window,
@@ -187,8 +179,11 @@ def test_report_covers_only_subagent_spawns_when_a_main_session_is_present(
     claude_root = home / ".claude"
     store_path = tmp_path / "store" / "agentlens.db"
 
-    _write_transcript(build_main_session_path(home, project="project-one"))
-    _write_transcript(build_transcript_path(home, project="project-one", raw_session_id="agent-a"))
+    write_transcript(build_main_session_path(home, project="project-one"), with_sidecar=False)
+    write_transcript(
+        build_transcript_path(home, project="project-one", raw_session_id="agent-a"),
+        with_sidecar=False,
+    )
 
     document = json.loads(
         generate_report(
@@ -205,7 +200,7 @@ def test_report_covers_only_subagent_spawns_when_a_main_session_is_present(
     assert [spawn["session_kind"] for spawn in document["spawns"]] == ["subagent"]
     parent_session_id = document["spawns"][0]["parent_session_id"]
     assert parent_session_id is not None
-    with Store(store_path) as store:
+    with Store(store_path, clock=_CLOCK) as store:
         assert store.read_session(parent_session_id) is None
 
 
@@ -230,14 +225,14 @@ def test_rebuilding_the_store_from_the_same_source_tree_reproduces_every_determi
 
     declared_only = build_transcript_path(home, project="project-one", raw_session_id="agent-a")
     _write(declared_only, build_transcript_text([build_user_record(cwd=str(project))]))
-    _write_sidecar(declared_only, agent_type="implementer")
+    write_sidecar(declared_only, agent_type="implementer")
 
     also_fired = build_transcript_path(home, project="project-one", raw_session_id="agent-b")
     _write(
         also_fired,
         build_transcript_text([build_user_record(cwd=str(project)), _skill_fire_record("tdd")]),
     )
-    _write_sidecar(also_fired, agent_type="implementer")
+    write_sidecar(also_fired, agent_type="implementer")
 
     def build(store_path: Path) -> tuple[str, list[AgentDefinition | None]]:
         document = generate_report(
@@ -249,7 +244,7 @@ def test_rebuilding_the_store_from_the_same_source_tree_reproduces_every_determi
             clock=FakeClock(instant=_GENERATED_AT),
             dry_run=False,
         )
-        with Store(store_path) as store:
+        with Store(store_path, clock=_CLOCK) as store:
             catalog = [
                 store.read_agent_definition(spawn["agent_definition_id"])
                 for spawn in json.loads(document)["spawns"]
@@ -280,7 +275,7 @@ def test_normal_and_dry_run_documents_are_equal_apart_from_generation_timing(
     home = tmp_path / "home"
     claude_root = home / ".claude"
     window = _DISCOVERY_WINDOW
-    _write_transcript(build_transcript_path(home, raw_session_id="same-source"))
+    write_transcript(build_transcript_path(home, raw_session_id="same-source"), with_sidecar=False)
     normal_store_path = tmp_path / "normal" / "agentlens.db"
     dry_run_store_path = tmp_path / "dry" / "agentlens.db"
 
@@ -316,7 +311,7 @@ def test_json_document_reflects_the_current_and_prior_windows(tmp_path: Path) ->
         prior_end=datetime(2026, 2, 1, tzinfo=UTC),
     )
     store_path = tmp_path / "store" / "agentlens.db"
-    with Store(store_path) as store:
+    with Store(store_path, clock=_CLOCK) as store:
         store.upsert_session(
             _session_facts(session_id="session-current", started_at=window.current_start)
         )
@@ -368,7 +363,7 @@ def test_agent_filter_narrows_spawns_and_rollups(tmp_path: Path) -> None:
     claude_root = tmp_path / "home" / ".claude"
     store_path = tmp_path / "store" / "agentlens.db"
     window = build_resolved_window()
-    with Store(store_path) as store:
+    with Store(store_path, clock=_CLOCK) as store:
         store.upsert_session(
             _session_facts(
                 session_id="session-implementer",
@@ -403,7 +398,7 @@ def test_skill_signals_are_bulk_read_and_attached_to_their_matching_spawn(tmp_pa
     claude_root = tmp_path / "home" / ".claude"
     store_path = tmp_path / "store" / "agentlens.db"
     window = build_resolved_window()
-    with Store(store_path) as store:
+    with Store(store_path, clock=_CLOCK) as store:
         store.upsert_session(
             _session_facts(
                 session_id="session-with-skill",
@@ -444,7 +439,7 @@ def test_artifact_mode_writes_one_stable_artifact_across_repeated_runs(
     claude_root = tmp_path / "home" / ".claude"
     store_path = tmp_path / "store" / "agentlens.db"
     window = build_resolved_window()
-    with Store(store_path) as store:
+    with Store(store_path, clock=_CLOCK) as store:
         store.upsert_session(
             _session_facts(session_id="session-one", started_at=window.current_start)
         )

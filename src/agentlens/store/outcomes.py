@@ -13,3 +13,10 @@ class UpsertOutcome(StrEnum):
     REPLACED = "replaced"
     SKIPPED_IDENTICAL = "skipped_identical"
     REFUSED_STALE = "refused_stale"
+
+
+class ClaimOutcome(StrEnum):
+    """What happened when a scorer requested a verdict claim."""
+
+    ACQUIRED = "acquired"
+    HELD_ELSEWHERE = "held_elsewhere"

@@ -34,6 +34,9 @@ from tests.factories import (
     build_session_skill_signal,
     build_source_revision,
 )
+from tests.fakes import FakeClock
+
+_CLOCK = FakeClock(instant=datetime(2026, 1, 1, tzinfo=UTC))
 
 
 def test_row_to_fact_session_reads_by_name_under_a_reordered_projection(
@@ -46,7 +49,7 @@ def test_row_to_fact_session_reads_by_name_under_a_reordered_projection(
     """
     db_path = tmp_path / "agentlens.db"
     expected = build_fact_session()
-    with Store(db_path) as store:
+    with Store(db_path, clock=_CLOCK) as store:
         store.upsert_session(build_session_facts(session=expected))
 
     reversed_column_list = ", ".join(reversed(FACT_SESSION_COLUMN_NAMES))
@@ -71,7 +74,7 @@ def test_row_to_fact_tool_event_reads_by_name_under_a_reordered_projection(
     """
     db_path = tmp_path / "agentlens.db"
     expected = build_fact_tool_event()
-    with Store(db_path) as store:
+    with Store(db_path, clock=_CLOCK) as store:
         store.upsert_session(build_session_facts(tool_events=(expected,)))
 
     reversed_column_list = ", ".join(reversed(FACT_TOOL_EVENT_COLUMN_NAMES))
@@ -151,7 +154,7 @@ def test_a_fully_populated_session_and_tool_event_round_trip_every_field(
     facts = build_session_facts(session=session, tool_events=(tool_event,))
 
     db_path = tmp_path / "agentlens.db"
-    with Store(db_path) as store:
+    with Store(db_path, clock=_CLOCK) as store:
         store.upsert_session(facts)
         stored = store.read_session(identity.session_id)
 
@@ -170,7 +173,7 @@ def test_row_to_agent_definition_reads_by_name_under_a_reordered_projection(
             name="implementer", model="claude-sonnet-5[1m]", effort="high"
         ),
     )
-    with Store(db_path) as store:
+    with Store(db_path, clock=_CLOCK) as store:
         store.upsert_agent_definition(expected)
 
     reversed_column_list = ", ".join(reversed(DIM_AGENT_COLUMN_NAMES))
@@ -191,7 +194,7 @@ def test_agent_definition_with_no_model_effort_or_skills_round_trips(tmp_path: P
     expected = build_agent_definition(
         config=build_agent_definition_config(model=None, effort=None, tools=("Read",), skills=())
     )
-    with Store(db_path) as store:
+    with Store(db_path, clock=_CLOCK) as store:
         store.upsert_agent_definition(expected)
         stored = store.read_agent_definition(expected.agent_definition_id)
 
@@ -210,7 +213,7 @@ def test_nullable_agent_definition_and_parent_session_id_round_trip_as_none(
     facts = build_session_facts(session=session)
 
     db_path = tmp_path / "agentlens.db"
-    with Store(db_path) as store:
+    with Store(db_path, clock=_CLOCK) as store:
         store.upsert_session(facts)
         stored = store.read_session(session.identity.session_id)
 
@@ -232,7 +235,7 @@ def test_row_to_session_skill_signal_reads_by_name_under_a_reordered_projection(
         fired=True,
     )
     db_path = tmp_path / "agentlens.db"
-    with Store(db_path) as store:
+    with Store(db_path, clock=_CLOCK) as store:
         store.upsert_session(build_session_facts(session=session, skill_signals=(expected,)))
 
     reversed_column_list = ", ".join(reversed(BRIDGE_SESSION_SKILL_COLUMN_NAMES))
@@ -268,7 +271,7 @@ def test_declared_and_provably_unavailable_skill_round_trips_independently(
     )
 
     db_path = tmp_path / "agentlens.db"
-    with Store(db_path) as store:
+    with Store(db_path, clock=_CLOCK) as store:
         store.upsert_session(build_session_facts(session=session, skill_signals=(signal,)))
         stored = store.read_session(session.identity.session_id)
 

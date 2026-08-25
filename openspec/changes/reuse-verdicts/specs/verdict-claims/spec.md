@@ -9,9 +9,14 @@ becomes available again.
 
 ### Requirement: A claim is acquired before the judge is called
 
-A scorer SHALL acquire a claim on a verdict identity before invoking the judge for
-that identity, and SHALL NOT invoke the judge for an identity it does not hold a
-claim on.
+A scorer SHALL acquire a claim before invoking the judge, and SHALL NOT invoke the
+judge for an identity it does not hold a claim on.
+
+A claim's identity is keyed on the model the caller **requested**, not the concrete
+model a verdict is keyed on. Acquisition happens before the call, and the concrete
+identifier is only observable in the response envelope, so a pre-call key cannot
+carry it. Two scorers coordinate only when they requested the same model string;
+`store-schema` states the accepted consequence of that.
 
 #### Scenario: Claim precedes the call
 

@@ -1,4 +1,5 @@
-from datetime import datetime
+from collections.abc import Callable
+from datetime import datetime, timedelta
 
 from agentlens.errors import JudgeError
 from agentlens.models.judging import JudgeResponse
@@ -12,6 +13,9 @@ class FakeClock:
 
     def now(self) -> datetime:
         return self._instant
+
+    def advance(self, delta: timedelta) -> None:
+        self._instant += delta
 
 
 class FakeJudgeBackend:
@@ -30,15 +34,19 @@ class FakeJudgeBackend:
         *,
         response: JudgeResponse | None = None,
         error: JudgeError | None = None,
+        on_score: Callable[[], None] | None = None,
     ) -> None:
         if (response is None) == (error is None):
             raise ValueError("FakeJudgeBackend needs exactly one of response or error.")
         self._response = response
         self._error = error
+        self._on_score = on_score
         self.calls: list[tuple[str, str]] = []
 
     def score(self, prompt: str, *, model: str) -> JudgeResponse:
         self.calls.append((prompt, model))
+        if self._on_score is not None:
+            self._on_score()
         if self._error is not None:
             raise self._error
         assert self._response is not None

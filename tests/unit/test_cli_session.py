@@ -3,39 +3,67 @@
 import json
 import logging
 import os
-import sqlite3
+import re
 from collections.abc import Mapping
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from agentlens.cli import EXIT_OK, main
+from agentlens.ingest.narrative import build_spawn_narrative
+from agentlens.ingest.reading import read_transcript
+from agentlens.ingest.sidecar import read_sidecar
+from agentlens.judge.prompt import render_prompt
+from agentlens.judge.rubric import RUBRIC_VERSION
+from agentlens.models.facts import FactSession
 from agentlens.models.judging import RubricDimension
+from agentlens.store import Store
+from agentlens.utils.clock import SystemClock
+from agentlens.utils.hashing import hash_text
 from tests.factories import (
-    build_sidecar,
+    build_subagent_source_bundle,
     build_tool_invocation_pair,
     build_transcript_path,
     build_transcript_text,
+    build_verdict_claim,
+    build_verdict_claim_identity,
+    write_transcript,
 )
 
 
-def _write_transcript(path: Path, *, with_sidecar: bool = True) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(build_transcript_text(build_tool_invocation_pair()))
-    if with_sidecar:
-        path.with_suffix(".meta.json").write_text(json.dumps(build_sidecar()))
+def _stored_spawns(store_path: Path) -> tuple[FactSession, ...]:
+    """Every stored spawn, read through the store's own surface.
+
+    A window wide enough to hold any fixture, so this reports what was stored
+    rather than what a window selected.
+    """
+    if not store_path.exists():
+        return ()
+    with Store(store_path, clock=SystemClock()) as store:
+        return store.read_spawns_in_window(
+            datetime(2000, 1, 1, tzinfo=UTC), datetime(2100, 1, 1, tzinfo=UTC), None
+        )
 
 
-def _fact_session_count(store_path: Path) -> int:
-    with sqlite3.connect(store_path) as connection:
-        row = connection.execute("SELECT COUNT(*) FROM fact_session").fetchone()
-        return int(row[0])
+def _stored_spawn_count(store_path: Path) -> int:
+    return len(_stored_spawns(store_path))
 
 
-def _fact_verdict_count(store_path: Path) -> int:
-    with sqlite3.connect(store_path) as connection:
-        row = connection.execute("SELECT COUNT(*) FROM fact_verdict").fetchone()
-        return int(row[0])
+def _stored_verdict_count(store_path: Path) -> int:
+    """Count verdicts across every stored spawn, via the per-spawn verdict read."""
+    if not store_path.exists():
+        return 0
+    session_ids = [spawn.identity.session_id for spawn in _stored_spawns(store_path)]
+    with Store(store_path, clock=SystemClock()) as store:
+        return sum(len(store.read_verdicts_for_session(session_id)) for session_id in session_ids)
+
+
+def _judge_input_hash(transcript_path: Path) -> str:
+    bundle = build_subagent_source_bundle(transcript_path=transcript_path)
+    transcript = read_transcript(bundle.transcript_path)
+    sidecar = read_sidecar(bundle.sidecar_path)
+    return hash_text(render_prompt(build_spawn_narrative(transcript.records, sidecar=sidecar)))
 
 
 def _install_fake_claude(
@@ -99,14 +127,14 @@ def test_happy_path_produces_a_populated_store_an_artifact_and_exit_0(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path))
     transcript_path = build_transcript_path(tmp_path)
-    _write_transcript(transcript_path)
+    write_transcript(transcript_path)
     store_path = tmp_path / "store" / "agentlens.db"
 
     exit_code = main(["session", "--file", str(transcript_path), "--store", str(store_path)])
 
     assert exit_code == EXIT_OK
     assert store_path.exists()
-    assert _fact_session_count(store_path) == 1
+    assert _stored_spawn_count(store_path) == 1
     artifacts = list((tmp_path / "reports").glob("session_*.json"))
     assert len(artifacts) == 1
 
@@ -123,37 +151,23 @@ def test_deterministic_reporting_context_is_populated_after_the_session_command(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path))
     transcript_path = build_transcript_path(tmp_path)
-    _write_transcript(transcript_path)
+    write_transcript(transcript_path)
     store_path = tmp_path / "store" / "agentlens.db"
 
     exit_code = main(["session", "--file", str(transcript_path), "--store", str(store_path)])
 
     assert exit_code == EXIT_OK
-    with sqlite3.connect(store_path) as connection:
-        row = connection.execute(
-            "SELECT agent_id, agent_definition_id, parent_session_id, started_at, "
-            "task_prompt_len, n_skills_fired, derivation_fingerprint, "
-            "derivation_observed_mtime_ns FROM fact_session"
-        ).fetchone()
-    assert row is not None
-    (
-        agent_id,
-        agent_definition_id,
-        parent_session_id,
-        started_at,
-        task_prompt_len,
-        n_skills_fired,
-        derivation_fingerprint,
-        derivation_observed_mtime_ns,
-    ) = row
-    assert agent_id
-    assert agent_definition_id is None
-    assert parent_session_id
-    assert started_at
-    assert task_prompt_len > 0
-    assert n_skills_fired == 0
-    assert derivation_fingerprint
-    assert derivation_observed_mtime_ns > 0
+    stored = _stored_spawns(store_path)
+    assert len(stored) == 1
+    spawn = stored[0]
+    assert spawn.agent_id
+    assert spawn.agent_definition_id is None
+    assert spawn.parent_session_id
+    assert spawn.started_at
+    assert spawn.task_prompt_len > 0
+    assert spawn.n_skills_fired == 0
+    assert spawn.derivation_fingerprint
+    assert spawn.derivation_observed_mtime_ns > 0
 
 
 def test_nonexistent_transcript_path_exits_3_and_writes_nothing(
@@ -193,7 +207,7 @@ def test_format_json_writes_only_the_json_document_to_stdout(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path))
     transcript_path = build_transcript_path(tmp_path)
-    _write_transcript(transcript_path)
+    write_transcript(transcript_path)
     store_path = tmp_path / "store" / "agentlens.db"
 
     exit_code = main(
@@ -211,8 +225,12 @@ def test_format_json_writes_only_the_json_document_to_stdout(
     assert exit_code == EXIT_OK
     captured = capsys.readouterr()
     document = json.loads(captured.out)
-    assert document["schema_version"] == 2
+    assert document["schema_version"] == 3
     assert len(document["spawns"]) == 1
+    resolved_lines = [
+        line for line in captured.err.splitlines() if "Resolved session arguments" in line
+    ]
+    assert len(resolved_lines) == 1
     assert not (tmp_path / "reports").exists()
 
 
@@ -222,14 +240,14 @@ def test_rerunning_the_same_transcript_leaves_the_row_count_unchanged(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path))
     transcript_path = build_transcript_path(tmp_path)
-    _write_transcript(transcript_path)
+    write_transcript(transcript_path)
     store_path = tmp_path / "store" / "agentlens.db"
     argv = ["session", "--file", str(transcript_path), "--store", str(store_path)]
 
     first_exit = main(argv)
-    first_count = _fact_session_count(store_path)
+    first_count = _stored_spawn_count(store_path)
     second_exit = main(argv)
-    second_count = _fact_session_count(store_path)
+    second_count = _stored_spawn_count(store_path)
 
     assert first_exit == EXIT_OK
     assert second_exit == EXIT_OK
@@ -243,7 +261,7 @@ def test_dry_run_writes_neither_the_store_nor_the_artifact(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path))
     transcript_path = build_transcript_path(tmp_path)
-    _write_transcript(transcript_path)
+    write_transcript(transcript_path)
     store_path = tmp_path / "store" / "agentlens.db"
 
     exit_code = main(
@@ -261,7 +279,7 @@ def test_success_run_touches_no_file_under_the_claude_tree(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path))
     transcript_path = build_transcript_path(tmp_path)
-    _write_transcript(transcript_path)
+    write_transcript(transcript_path)
     claude_dir = tmp_path / ".claude"
     store_path = tmp_path / "store" / "agentlens.db"
     before = _snapshot(claude_dir)
@@ -278,7 +296,7 @@ def test_failure_run_touches_no_file_under_the_claude_tree(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path))
     transcript_path = build_transcript_path(tmp_path)
-    _write_transcript(transcript_path)
+    write_transcript(transcript_path)
     claude_dir = tmp_path / ".claude"
     before = _snapshot(claude_dir)
     missing_path = build_transcript_path(tmp_path, raw_session_id="does-not-exist")
@@ -297,7 +315,7 @@ def test_score_flag_persists_a_verdict_and_the_json_document_carries_it(
     monkeypatch.setenv("HOME", str(tmp_path))
     _install_fake_claude(tmp_path, monkeypatch, envelope=_scored_envelope())
     transcript_path = build_transcript_path(tmp_path)
-    _write_transcript(transcript_path)
+    write_transcript(transcript_path)
     store_path = tmp_path / "store" / "agentlens.db"
 
     exit_code = main(
@@ -315,7 +333,7 @@ def test_score_flag_persists_a_verdict_and_the_json_document_carries_it(
 
     captured = capsys.readouterr()
     assert exit_code == EXIT_OK
-    assert _fact_verdict_count(store_path) == 1
+    assert _stored_verdict_count(store_path) == 1
     document = json.loads(captured.out)
     assert "verdict" in document["spawns"][0]
 
@@ -327,7 +345,7 @@ def test_judge_failure_exits_5_and_keeps_the_deterministic_facts(
     monkeypatch.setenv("HOME", str(tmp_path))
     _install_fake_claude(tmp_path, monkeypatch, envelope=_not_logged_in_envelope())
     transcript_path = build_transcript_path(tmp_path)
-    _write_transcript(transcript_path)
+    write_transcript(transcript_path)
     store_path = tmp_path / "store" / "agentlens.db"
 
     exit_code = main(
@@ -335,8 +353,48 @@ def test_judge_failure_exits_5_and_keeps_the_deterministic_facts(
     )
 
     assert exit_code == 5
-    assert _fact_session_count(store_path) == 1
-    assert _fact_verdict_count(store_path) == 0
+    assert _stored_spawn_count(store_path) == 1
+    assert _stored_verdict_count(store_path) == 0
+
+
+def test_claimed_elsewhere_exits_0_without_running_the_judge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    transcript_path = build_transcript_path(tmp_path)
+    write_transcript(transcript_path)
+    store_path = tmp_path / "store" / "agentlens.db"
+    clock = SystemClock()
+
+    assert main(["session", "--file", str(transcript_path), "--store", str(store_path)]) == EXIT_OK
+    with Store(store_path, clock=clock) as store:
+        rows = store.read_spawns_in_window(
+            datetime(2000, 1, 1, tzinfo=UTC),
+            datetime(2100, 1, 1, tzinfo=UTC),
+            None,
+        )
+        assert len(rows) == 1
+        identity = build_verdict_claim_identity(
+            session_id=rows[0].identity.session_id,
+            judge_input_hash=_judge_input_hash(transcript_path),
+            rubric_version=RUBRIC_VERSION,
+            requested_model="sonnet",
+        )
+        store.acquire_verdict_claim(
+            build_verdict_claim(
+                identity=identity,
+                owner="other-scorer",
+                expires_at=clock.now() + timedelta(minutes=3),
+            )
+        )
+
+    exit_code = main(
+        ["session", "--file", str(transcript_path), "--store", str(store_path), "--score"]
+    )
+
+    assert exit_code == EXIT_OK
+    assert _stored_verdict_count(store_path) == 0
 
 
 def test_source_failure_still_exits_3_when_scoring_was_requested(
@@ -362,7 +420,7 @@ def test_resolved_arguments_are_logged_with_scoring_identity(
     monkeypatch.setenv("HOME", str(tmp_path))
     _install_fake_claude(tmp_path, monkeypatch, envelope=_scored_envelope())
     transcript_path = build_transcript_path(tmp_path)
-    _write_transcript(transcript_path)
+    write_transcript(transcript_path)
     store_path = tmp_path / "store" / "agentlens.db"
 
     with caplog.at_level(logging.INFO, logger="agentlens.cli"):
@@ -388,7 +446,10 @@ def test_resolved_arguments_are_logged_with_scoring_identity(
     assert len(resolved_messages) == 1
     payload = json.loads(resolved_messages[0].split(": ", 1)[1])
     assert payload["score"] is True
-    assert payload["judge_model"] == "opus"
+    assert payload["requested_model"] == "opus"
+    assert isinstance(payload["owner"], str)
+    assert re.fullmatch(r"[A-Za-z0-9_-]+", payload["owner"])
+    assert str(tmp_path) not in payload["owner"]
 
 
 def test_resolved_arguments_name_scoring_as_unrequested_when_the_flag_is_absent(
@@ -397,7 +458,7 @@ def test_resolved_arguments_name_scoring_as_unrequested_when_the_flag_is_absent(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path))
     transcript_path = build_transcript_path(tmp_path)
-    _write_transcript(transcript_path)
+    write_transcript(transcript_path)
     store_path = tmp_path / "store" / "agentlens.db"
 
     with caplog.at_level(logging.INFO, logger="agentlens.cli"):
@@ -412,7 +473,33 @@ def test_resolved_arguments_name_scoring_as_unrequested_when_the_flag_is_absent(
     assert len(resolved_messages) == 1
     payload = json.loads(resolved_messages[0].split(": ", 1)[1])
     assert payload["score"] is False
-    assert payload["judge_model"] == "sonnet"
+    assert payload["requested_model"] == "sonnet"
+    assert re.fullmatch(r"[A-Za-z0-9_-]+", payload["owner"])
+
+
+def test_session_invocations_log_distinct_random_scoring_owners(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    transcript_path = build_transcript_path(tmp_path)
+    write_transcript(transcript_path)
+    store_path = tmp_path / "store" / "agentlens.db"
+    argv = ["session", "--file", str(transcript_path), "--store", str(store_path)]
+
+    with caplog.at_level(logging.INFO, logger="agentlens.cli"):
+        assert main(argv) == EXIT_OK
+        assert main(argv) == EXIT_OK
+
+    owners = [
+        json.loads(record.message.split(": ", 1)[1])["owner"]
+        for record in caplog.records
+        if "Resolved session arguments" in record.message
+    ]
+    assert len(owners) == 2
+    assert owners[0] != owners[1]
 
 
 def test_dry_run_with_score_writes_nothing_and_logs_the_dry_run_scoring_identity(
@@ -421,10 +508,10 @@ def test_dry_run_with_score_writes_nothing_and_logs_the_dry_run_scoring_identity
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path))
     transcript_path = build_transcript_path(tmp_path)
-    _write_transcript(transcript_path)
+    write_transcript(transcript_path)
     store_path = tmp_path / "store" / "agentlens.db"
 
-    with caplog.at_level(logging.INFO, logger="agentlens.core.session"):
+    with caplog.at_level(logging.INFO, logger="agentlens"):
         exit_code = main(
             [
                 "session",

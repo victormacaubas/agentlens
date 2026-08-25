@@ -2,8 +2,11 @@
 
 from pathlib import Path
 
+import pytest
+
 from agentlens.models.judging import RubricDimension
 from agentlens.models.report_aggregates import TrendStatus
+from agentlens.models.scoring import ScoringStatus
 from agentlens.render.summary import build_report_summary, build_session_summary
 from tests.factories import (
     build_agent_rollup,
@@ -13,12 +16,19 @@ from tests.factories import (
     build_report_document,
     build_report_spawn,
     build_resolved_window,
+    build_run_judge_usage,
+    build_scoring_outcome,
     build_session_facts,
     build_suggested_fix,
     build_verdict,
 )
 
-_ADVERSARIAL_EVIDENCE = ('"; rm -rf /"', "\x1b[31mALERT\x1b[0m", "line one\nline two")
+_ADVERSARIAL_EVIDENCE = (
+    '"; rm -rf /"',
+    "\x1b[31mALERT\x1b[0m",
+    "line one\nline two",
+    "--- a/file.py\n+++ b/file.py\n@@ -1 +1 @@\n-old\n+rm -rf /",
+)
 
 
 def test_summary_names_agent_type_task_and_artifact_path() -> None:
@@ -83,7 +93,9 @@ def test_scored_summary_names_overall_and_dimension_scores() -> None:
     fact_verdict = build_fact_verdict(verdict=scored)
 
     summary = build_session_summary(
-        facts, artifact_path=Path("reports/session_x.json"), verdict=fact_verdict
+        facts,
+        artifact_path=Path("reports/session_x.json"),
+        scoring_outcome=build_scoring_outcome(verdict=fact_verdict),
     )
 
     assert "overall_score: 4" in summary
@@ -103,7 +115,11 @@ def test_scored_summary_names_where_fixes_were_recorded_without_fix_text() -> No
     fact_verdict = build_fact_verdict(verdict=scored)
     artifact_path = Path("reports/session_x.json")
 
-    summary = build_session_summary(facts, artifact_path=artifact_path, verdict=fact_verdict)
+    summary = build_session_summary(
+        facts,
+        artifact_path=artifact_path,
+        scoring_outcome=build_scoring_outcome(verdict=fact_verdict),
+    )
 
     assert str(artifact_path) in summary
     assert "Cap the retries." not in summary
@@ -118,12 +134,40 @@ def test_scored_summary_reports_judge_cost_and_tokens() -> None:
     )
 
     summary = build_session_summary(
-        facts, artifact_path=Path("reports/session_x.json"), verdict=fact_verdict
+        facts,
+        artifact_path=Path("reports/session_x.json"),
+        scoring_outcome=build_scoring_outcome(
+            verdict=fact_verdict,
+            run_judge_usage=build_run_judge_usage(
+                cost_usd=0.0123,
+                input_tokens=200,
+                output_tokens=40,
+            ),
+        ),
     )
 
-    assert "$0.0123" in summary
-    assert "judge_input_tokens=200" in summary
-    assert "judge_output_tokens=40" in summary
+    assert "this_run_judge_cost=$0.0123" in summary
+    assert "this_run_judge_input_tokens=200" in summary
+    assert "this_run_judge_output_tokens=40" in summary
+
+
+def test_failed_summary_formats_its_run_usage_without_a_verdict() -> None:
+    summary = build_session_summary(
+        build_session_facts(),
+        artifact_path=Path("reports/session_x.json"),
+        scoring_outcome=build_scoring_outcome(
+            status=ScoringStatus.FAILED,
+            run_judge_usage=build_run_judge_usage(
+                cost_usd=0.045,
+                input_tokens=200,
+                output_tokens=40,
+            ),
+        ),
+    )
+
+    assert "this_run_judge_cost=$0.045" in summary
+    assert "this_run_judge_input_tokens=200" in summary
+    assert "this_run_judge_output_tokens=40" in summary
 
 
 def test_scored_summary_reports_analyzed_usage_with_no_currency_figure() -> None:
@@ -134,7 +178,9 @@ def test_scored_summary_reports_analyzed_usage_with_no_currency_figure() -> None
     fact_verdict = build_fact_verdict()
 
     summary = build_session_summary(
-        facts, artifact_path=Path("reports/session_x.json"), verdict=fact_verdict
+        facts,
+        artifact_path=Path("reports/session_x.json"),
+        scoring_outcome=build_scoring_outcome(verdict=fact_verdict),
     )
 
     analyzed_line = next(
@@ -147,7 +193,8 @@ def test_scored_summary_reports_analyzed_usage_with_no_currency_figure() -> None
     assert "cache_creation=44" in analyzed_line
 
 
-def test_scored_summary_never_reaches_adversarial_evidence_or_fix_text() -> None:
+@pytest.mark.parametrize("status", (ScoringStatus.SCORED, ScoringStatus.REUSED))
+def test_summary_never_reaches_adversarial_evidence_or_fix_text(status: ScoringStatus) -> None:
     benign_dimensions = {
         dimension: build_dimension_score(score=2, evidence=("Benign evidence.",))
         for dimension in RubricDimension
@@ -161,7 +208,9 @@ def test_scored_summary_never_reaches_adversarial_evidence_or_fix_text() -> None
     artifact_path = Path("reports/session_x.json")
 
     benign_summary = build_session_summary(
-        facts, artifact_path=artifact_path, verdict=benign_fact_verdict
+        facts,
+        artifact_path=artifact_path,
+        scoring_outcome=build_scoring_outcome(status=status, verdict=benign_fact_verdict),
     )
 
     for adversarial in _ADVERSARIAL_EVIDENCE:
@@ -178,7 +227,9 @@ def test_scored_summary_never_reaches_adversarial_evidence_or_fix_text() -> None
         hostile_fact_verdict = build_fact_verdict(verdict=hostile_verdict)
 
         hostile_summary = build_session_summary(
-            facts, artifact_path=artifact_path, verdict=hostile_fact_verdict
+            facts,
+            artifact_path=artifact_path,
+            scoring_outcome=build_scoring_outcome(status=status, verdict=hostile_fact_verdict),
         )
 
         assert adversarial not in hostile_summary
@@ -192,6 +243,74 @@ def test_unscored_summary_is_unchanged_from_before_scoring() -> None:
 
     assert "unscored" in summary
     assert "overall_score" not in summary
+
+
+@pytest.mark.parametrize(
+    ("status", "has_verdict"),
+    (
+        (ScoringStatus.SCORED, True),
+        (ScoringStatus.REUSED, True),
+        (ScoringStatus.CLAIMED_ELSEWHERE, False),
+        (ScoringStatus.FAILED, False),
+    ),
+)
+def test_summary_distinguishes_every_scoring_outcome(
+    status: ScoringStatus,
+    has_verdict: bool,
+) -> None:
+    summary = build_session_summary(
+        build_session_facts(),
+        artifact_path=Path("reports/session_x.json"),
+        scoring_outcome=build_scoring_outcome(status=status),
+    )
+
+    assert f"scoring: {status.value}" in summary
+    assert ("overall_score:" in summary) is has_verdict
+
+
+def test_reused_summary_reports_this_runs_zero_usage_not_the_historical_verdict_cost() -> None:
+    historical_verdict = build_fact_verdict(
+        judge_cost_usd=0.25,
+        judge_input_tokens=200,
+        judge_output_tokens=40,
+    )
+    summary = build_session_summary(
+        build_session_facts(),
+        artifact_path=Path("reports/session_x.json"),
+        scoring_outcome=build_scoring_outcome(
+            status=ScoringStatus.REUSED,
+            verdict=historical_verdict,
+        ),
+    )
+
+    assert "verdict: reused" in summary
+    assert historical_verdict.scored_at.isoformat() in summary
+    assert "this_run_judge_cost=$0.0" in summary
+    assert "this_run_judge_input_tokens=0" in summary
+    assert "this_run_judge_output_tokens=0" in summary
+    assert "$0.25" not in summary
+
+
+def test_claimed_elsewhere_summary_names_the_reason_without_a_verdict() -> None:
+    summary = build_session_summary(
+        build_session_facts(),
+        artifact_path=Path("reports/session_x.json"),
+        scoring_outcome=build_scoring_outcome(status=ScoringStatus.CLAIMED_ELSEWHERE),
+    )
+
+    assert "another scorer holds this verdict identity" in summary
+    assert "overall_score" not in summary
+    assert "suggested_fixes" not in summary
+
+
+def test_summary_marks_a_verdict_behind_the_current_input() -> None:
+    summary = build_session_summary(
+        build_session_facts(),
+        artifact_path=Path("reports/session_x.json"),
+        scoring_outcome=build_scoring_outcome(is_behind_current_input=True),
+    )
+
+    assert "verdict_current_input: behind" in summary
 
 
 def test_report_summary_names_the_window_scope_and_artifact_path() -> None:

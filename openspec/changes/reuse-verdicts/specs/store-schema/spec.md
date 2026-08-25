@@ -2,14 +2,34 @@
 
 ### Requirement: Claim grain and key
 
-The store SHALL hold at most one claim per verdict identity, keyed by the same
-session, judge-input hash, rubric version, and judge model identifier that key a
-verdict, and each claim SHALL record its owner and its expiry instant.
+The store SHALL hold at most one claim per claim identity, keyed by the session,
+the judge-input hash, the rubric version, and **the model the caller requested**,
+and each claim SHALL record its owner and its expiry instant.
+
+The requested model is what distinguishes a claim's key from a verdict's. A claim
+is acquired before the judge is called, so the only model string in existence at
+that point is the one the caller asked for, which may be a floating alias. A
+verdict's key carries the concrete identifier read back from the response
+envelope. The two keys therefore SHALL NOT share a field name, so that neither
+can be read as the other.
 
 #### Scenario: One claim per identity
 
 - **WHEN** a claim is acquired for an identity that is already claimed and unexpired
 - **THEN** no second claim row exists for that identity
+
+#### Scenario: An alias and a concrete identifier are different claim identities
+
+- **WHEN** one scorer claims a spawn under a floating alias and another claims the
+  same spawn, hash, and rubric version under the concrete identifier that alias
+  currently resolves to
+- **THEN** both acquire, because the requested models differ
+
+Rationale: coordinating these two would require knowing what the alias resolves
+to before calling the judge, which is exactly what is not knowable in advance. The
+consequence is real and accepted — those two runs can both pay for one spawn — so
+it is stated here rather than left for a reader to discover. Requesting a
+concrete identifier is what makes coordination and reuse reliable.
 
 #### Scenario: Two identities are claimed independently
 

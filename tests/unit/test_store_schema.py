@@ -110,6 +110,15 @@ _BRIDGE_SESSION_SKILL_COLUMNS = (
     PinnedColumn("fired", "INTEGER", notnull=1, primary_key_position=0),
 )
 
+_VERDICT_CLAIM_COLUMNS = (
+    PinnedColumn("session_id", "TEXT", notnull=1, primary_key_position=1),
+    PinnedColumn("judge_input_hash", "TEXT", notnull=1, primary_key_position=2),
+    PinnedColumn("rubric_version", "TEXT", notnull=1, primary_key_position=3),
+    PinnedColumn("requested_model", "TEXT", notnull=1, primary_key_position=4),
+    PinnedColumn("owner", "TEXT", notnull=1, primary_key_position=0),
+    PinnedColumn("expires_at", "TEXT", notnull=1, primary_key_position=0),
+)
+
 
 def _emitted_columns(db_path: Path, table: str) -> tuple[PinnedColumn, ...]:
     with sqlite3.connect(db_path) as connection:
@@ -144,3 +153,8 @@ def test_dim_agent_schema_has_the_declared_columns_in_order(tmp_path: Path) -> N
 def test_bridge_session_skill_schema_has_the_declared_columns_in_order(tmp_path: Path) -> None:
     emitted = _emitted_columns(tmp_path / "agentlens.db", "bridge_session_skill")
     assert emitted == _BRIDGE_SESSION_SKILL_COLUMNS
+
+
+def test_verdict_claim_schema_has_the_declared_columns_in_order(tmp_path: Path) -> None:
+    emitted = _emitted_columns(tmp_path / "agentlens.db", "verdict_claim")
+    assert emitted == _VERDICT_CLAIM_COLUMNS

@@ -101,8 +101,23 @@ columns is `NOT NULL`, including all five scores, so representing a claim as a
 partly-filled verdict row would require either making score columns nullable — which
 lets a missing score read as a real one — or writing sentinels, which is worse.
 
-The claim grain is keyed on the same four-tuple as a verdict and carries an owner and
-an expiry instant. It holds no verdict data.
+The claim grain carries an owner and an expiry instant, and holds no verdict data.
+
+**Its key is not quite the verdict's four-tuple**, which the first draft of this document
+got wrong. Three components match — session, judge-input hash, rubric version — but the
+fourth cannot. A verdict is keyed on the *concrete* model read back from the envelope,
+while a claim is acquired *before* the call, when the only model string in existence is the
+one the caller requested and which may be a floating alias. So the claim's fourth component
+is `requested_model`, named differently on purpose: sharing the name `judge_model` would
+break the project's rule that the word always means the resolved identifier, and would let
+a reader treat a claim row as a verdict row's twin.
+
+The accepted cost is that a run requesting `sonnet` and a run requesting
+`claude-sonnet-5` do not coordinate with each other and can both pay for one spawn.
+Closing that would require resolving an alias without calling the judge, which is exactly
+what is not possible. Requesting a concrete identifier is what makes both coordination and
+reuse reliable, and `store-schema` records the limitation as a scenario rather than leaving
+it to be discovered.
 
 ### Acquisition is `BEGIN IMMEDIATE`, and the store gains a concurrency configuration
 
@@ -253,12 +268,26 @@ verified rather than assumed compatible.
 Rollback is reverting the change: the claim grain becomes an unread table and verdicts
 go back to being re-bought. Nothing written under this change is unreadable without it.
 
+## Resolved during implementation
+
+- **`busy_timeout` = 10_000 ms**, as `STORE_BUSY_TIMEOUT_MS` in `store/connection.py`.
+  Chosen over the implicit five-second default because the longest write transaction in
+  this store is `upsert_batch` over a whole window of sessions, and the bound has to
+  exceed that comfortably or ordinary ingest contention surfaces as a `StoreError`. Ten
+  seconds clears that while still failing eventually rather than hanging.
+- **Claim lease margin = 30 s**, as `CLAIM_LEASE_MARGIN_S` in `models/claims.py`, giving
+  a 150-second lease against the judge's 120-second default timeout. The margin covers
+  the gap between the claim commit and the subprocess actually starting, plus validation
+  and finalization after the call returns. `cli.py` names one `judge_timeout_s` and feeds
+  it to both `ClaudeCliJudge` and the lease, so the two cannot drift apart.
+- **No new ADR was written**, as this document's Non-Goals stated. ADR 0003 and ADR 0004
+  already commit to "atomic expiring claims" as a guarantee; what was missing was the
+  mechanism, and the "Acquisition is `BEGIN IMMEDIATE`" section above now supplies it.
+  Recorded here so the omission reads as a decision rather than an oversight. The store's
+  concurrency model earns its own ADR when a second capability needs the same primitives.
+
 ## Open Questions
 
-- The concrete `busy_timeout` value and the claim's margin over the judge timeout. Both
-  are tuning constants that do not change the specs, the approach, or the task
-  breakdown, and both want a number chosen against a real contended run rather than
-  guessed here.
 - Whether the claim grain should retain released claims as history rather than deleting
   them. Only worth answering once #28 makes batch throughput observable; nothing in
   this change reads a released claim.

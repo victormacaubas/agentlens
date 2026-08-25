@@ -17,6 +17,9 @@ from tests.factories import (
     build_verdict,
     build_verdict_provenance,
 )
+from tests.fakes import FakeClock
+
+_CLOCK = FakeClock(instant=datetime(2026, 1, 1, tzinfo=UTC))
 
 
 def _count_rows(path: Path, table: str) -> int:
@@ -68,7 +71,7 @@ def test_a_fully_populated_verdict_round_trips_every_field_including_provenance_
     )
 
     db_path = tmp_path / "agentlens.db"
-    with Store(db_path) as store:
+    with Store(db_path, clock=_CLOCK) as store:
         store.upsert_verdict(expected)
         stored = store.read_verdicts_for_session(expected.session_id)
 
@@ -83,7 +86,7 @@ def test_row_to_fact_verdict_reads_by_name_under_a_reordered_projection(tmp_path
     """
     db_path = tmp_path / "agentlens.db"
     expected = build_fact_verdict()
-    with Store(db_path) as store:
+    with Store(db_path, clock=_CLOCK) as store:
         store.upsert_verdict(expected)
 
     reversed_column_list = ", ".join(reversed(FACT_VERDICT_COLUMN_NAMES))
@@ -111,7 +114,7 @@ def test_rescoring_the_same_identity_replaces_the_row_rather_than_duplicating(
     db_path = tmp_path / "agentlens.db"
     original = build_fact_verdict(judge_cost_usd=0.01, verdict=build_verdict(overall_score=3))
     updated = build_fact_verdict(judge_cost_usd=0.02, verdict=build_verdict(overall_score=5))
-    with Store(db_path) as store:
+    with Store(db_path, clock=_CLOCK) as store:
         store.upsert_verdict(original)
         store.upsert_verdict(updated)
         stored = store.read_verdicts_for_session(original.session_id)
@@ -127,7 +130,7 @@ def test_the_same_spawn_scored_under_two_models_produces_two_rows_neither_replac
     db_path = tmp_path / "agentlens.db"
     scored_by_sonnet = build_fact_verdict(judge_model="claude-sonnet-5")
     scored_by_opus = build_fact_verdict(judge_model="claude-opus-5")
-    with Store(db_path) as store:
+    with Store(db_path, clock=_CLOCK) as store:
         store.upsert_verdict(scored_by_sonnet)
         store.upsert_verdict(scored_by_opus)
         stored = store.read_verdicts_for_session(scored_by_sonnet.session_id)
@@ -144,7 +147,7 @@ def test_a_rubric_version_change_produces_a_separate_row_while_the_earlier_row_r
     db_path = tmp_path / "agentlens.db"
     scored_under_v1 = build_fact_verdict(rubric_version="v1")
     scored_under_v2 = build_fact_verdict(rubric_version="v2")
-    with Store(db_path) as store:
+    with Store(db_path, clock=_CLOCK) as store:
         store.upsert_verdict(scored_under_v1)
         store.upsert_verdict(scored_under_v2)
         stored = store.read_verdicts_for_session(scored_under_v1.session_id)
@@ -160,7 +163,7 @@ def test_deterministic_tables_are_unchanged_by_a_verdict_write(tmp_path: Path) -
     db_path = tmp_path / "agentlens.db"
     session = build_fact_session()
     facts = build_session_facts(session=session)
-    with Store(db_path) as store:
+    with Store(db_path, clock=_CLOCK) as store:
         store.upsert_session(facts)
         store.upsert_verdict(build_fact_verdict(session_id=session.identity.session_id))
         stored_session = store.read_session(session.identity.session_id)
@@ -177,7 +180,7 @@ def test_fact_verdict_table_is_created_on_first_use_against_a_store_that_predate
         connection.execute("CREATE TABLE fact_session (session_id TEXT PRIMARY KEY)")
         connection.commit()
 
-    with Store(db_path) as store:
+    with Store(db_path, clock=_CLOCK) as store:
         store.upsert_verdict(build_fact_verdict())
 
     with sqlite3.connect(db_path) as connection:
@@ -193,5 +196,5 @@ def test_fact_verdict_table_is_created_on_first_use_against_a_store_that_predate
 def test_read_verdicts_for_session_returns_empty_tuple_for_a_session_with_none(
     tmp_path: Path,
 ) -> None:
-    with Store(tmp_path / "agentlens.db") as store:
+    with Store(tmp_path / "agentlens.db", clock=_CLOCK) as store:
         assert store.read_verdicts_for_session("does-not-exist") == ()
