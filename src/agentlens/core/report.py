@@ -66,12 +66,12 @@ def generate_report(
     prepared = prepare_ingest_batch(projects_root=claude_root / "projects", claude_root=claude_root)
 
     if dry_run:
-        with open_disposable_clone(store_path) as store:
+        with open_disposable_clone(store_path, clock=clock) as store:
             document = _upsert_and_build_document(
                 store, prepared=prepared, window=window, agent_filter=agent_filter, clock=clock
             )
     else:
-        with Store(store_path) as store:
+        with Store(store_path, clock=clock) as store:
             document = _upsert_and_build_document(
                 store, prepared=prepared, window=window, agent_filter=agent_filter, clock=clock
             )

@@ -9,6 +9,7 @@ from agentlens.models.agent_definitions import (
     AgentDefinitionConfig,
     DefinitionScope,
 )
+from agentlens.models.claims import VerdictClaim, VerdictClaimIdentity
 from agentlens.models.facts import FactSession, FactToolEvent, FactVerdict
 from agentlens.models.identity import NameSource, SessionIdentity, SessionKind, SourceRevision
 from agentlens.models.judging import (
@@ -25,6 +26,7 @@ from agentlens.store.schema import (
     FACT_SESSION_COLUMN_NAMES,
     FACT_TOOL_EVENT_COLUMN_NAMES,
     FACT_VERDICT_COLUMN_NAMES,
+    VERDICT_CLAIM_COLUMN_NAMES,
 )
 
 SqliteRow = tuple[object, ...]
@@ -338,4 +340,35 @@ def row_to_fact_verdict(row: sqlite3.Row) -> FactVerdict:
         judge_input_tokens=cast(int, row["judge_input_tokens"]),
         judge_output_tokens=cast(int, row["judge_output_tokens"]),
         scored_at=datetime.fromisoformat(cast(str, row["scored_at"])),
+    )
+
+
+_VERDICT_CLAIM_VALUE_EXTRACTORS: Mapping[str, Callable[[VerdictClaim], object]] = {
+    "session_id": lambda claim: claim.identity.session_id,
+    "judge_input_hash": lambda claim: claim.identity.judge_input_hash,
+    "rubric_version": lambda claim: claim.identity.rubric_version,
+    "requested_model": lambda claim: claim.identity.requested_model,
+    "owner": lambda claim: claim.owner,
+    "expires_at": lambda claim: claim.expires_at.isoformat(timespec="microseconds"),
+}
+
+
+def verdict_claim_to_row(claim: VerdictClaim) -> SqliteRow:
+    """Return ``claim``'s field values in the column order of ``verdict_claim``."""
+    return tuple(
+        _VERDICT_CLAIM_VALUE_EXTRACTORS[name](claim) for name in VERDICT_CLAIM_COLUMN_NAMES
+    )
+
+
+def row_to_verdict_claim(row: sqlite3.Row) -> VerdictClaim:
+    """Rebuild a ``VerdictClaim`` from a ``verdict_claim`` row, read by column name."""
+    return VerdictClaim(
+        identity=VerdictClaimIdentity(
+            session_id=cast(str, row["session_id"]),
+            judge_input_hash=cast(str, row["judge_input_hash"]),
+            rubric_version=cast(str, row["rubric_version"]),
+            requested_model=cast(str, row["requested_model"]),
+        ),
+        owner=cast(str, row["owner"]),
+        expires_at=datetime.fromisoformat(cast(str, row["expires_at"])),
     )

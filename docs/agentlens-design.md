@@ -186,16 +186,20 @@ Whether a *missing* fire was a mistake is a judgment call → belongs in the jud
 
 `judge_input_hash` is the SHA-256 of the exact prepared transcript view. An unchanged
 re-ingest remains a cache hit; changed judge input creates a distinct verdict identity.
-Verdict finalization rechecks the session's current hash so an in-flight score cannot attach
-to a newer ingest. Concurrent scorers use expiring owner-scoped SQLite claims and never
-hold a transaction during the external judge call. See
+Verdict finalization re-renders the prompt from source and compares `judge_input_hash`
+specifically — not `revision_content_hash` and not `derivation_fingerprint`, both of which
+move for reasons the judge never saw. A verdict produced while an ingest landed is stored
+under the hash the judge was actually shown and reported as behind the current input; the
+identity is what prevents it attaching to the newer ingest, so the recheck reports rather
+than guards. Concurrent scorers use expiring owner-scoped SQLite claims and never hold a
+transaction during the external judge call. See
 
 ### Token & cost reporting
 
 Two distinct figures, kept distinct:
 
 - **Analyzed agent usage** (`fact_session` token fields) → reported as an **efficiency/quality** signal, in raw tokens + cache-read %. Low cache-read across many runs = unstable context (a finding, not a dollar amount). *Do not* dollarize this — quality is the message, not spend.
-- **agentlens's own run-cost** (`fact_verdict` judge fields) → reported in **dollars + tokens** ("this analysis cost $X"). Near-zero on re-runs thanks to verdict caching.
+- **agentlens's own run-cost** (`fact_verdict` judge fields) → reported in **dollars + tokens** ("this analysis cost $X"). A reused verdict costs **exactly** zero, not near-zero: no judge is invoked. The surfaces report this run's spend as zero and mark the verdict as reused alongside its original `scored_at`, so free-because-reused never reads as nothing-happened, and the historical cost of the call that first bought the verdict is never presented as what this run spent.
 
 ### Name resolution (guarded)
 
@@ -225,7 +229,19 @@ Ground-truth signals, cheapest first: self-report vs. transcript consistency (ju
 
 ### Caching
 
-Cache identity = `session_id + judge_input_hash + rubric_version + judge_model`, stored in `~/.cache/agentlens/`, where `judge_model` is the resolved concrete model identifier, never the alias supplied at the CLI. Only a current-input miss calls the judge. Floating aliases resolve through healthy candidates under one invocation-wide attempt budget; failed candidates do not wedge later sessions. Atomic expiring claims prevent concurrent processes from paying twice for the same identity.
+Cache identity = `session_id + judge_input_hash + rubric_version + judge_model`, stored in `~/.cache/agentlens/`, where `judge_model` is the resolved concrete model identifier, never the alias supplied at the CLI. Only a current-input miss calls the judge, and the lookup happens in `core`, above the judge seam, so no backend ever learns that a cache exists.
+
+**A floating alias cannot be resolved without a call.** Because the identity carries the *resolved* model and that identifier is only observable in a response envelope, requesting `sonnet` can never short-circuit to a verdict stored under `claude-sonnet-5`: whether the alias still resolves to that concrete model is not knowable in advance. A request under a floating alias therefore always calls the judge. Pin a concrete identifier to get cache hits. (Bounded retry across model candidates is deferred to batch scoring, which is where an invocation has more than one spawn for a failed candidate to affect.)
+
+**Atomic expiring claims** are SQLite rows in `verdict_claim`, carrying an owner and an expiry instant. A claim's key shares three components with a verdict's — session, judge-input hash, rubric version — and deliberately differs on the fourth: a claim is taken *before* the call, so it can only carry `requested_model`, while a verdict carries the concrete `judge_model` from the envelope. Two scorers coordinate only when they requested the same string, which is the other reason to pin a concrete identifier. The mechanism behind "atomic":
+
+- **`PRAGMA journal_mode=WAL`** — a reader proceeds while a writer is active, which matters once two processes are expected rather than merely tolerated. WAL puts `-wal` and `-shm` sidecar files next to the database, so anything cleaning up the store must expect them.
+- **An explicit lock-wait bound** (`PRAGMA busy_timeout`, 10s) rather than the implicit five-second default nobody chose. Contention waits the stated bound instead of failing at once.
+- **`BEGIN IMMEDIATE` for claim acquisition only** — the liveness check and the write become one decision because the write lock is taken before the read. Under a deferred `BEGIN`, both racers read the identity as unclaimed and the second fails on lock upgrade, which surfaces as a store error rather than as a lost race. Ingest's batch writes stay deferred; taking the write lock earlier there would only widen contention.
+
+The **lease is derived from the judge's wall-clock timeout** plus a margin, never set independently — a lease shorter than the call it guards invites a second scorer to pay for work already in flight, and a fixed number would drift silently the first time the timeout is tuned. The owner is a random token minted once per invocation and logged in the resolved-argument line, carrying no hostname, username, or path.
+
+Losing a claim race is an **outcome, not an error**: the spawn is skipped, reported as claimed elsewhere, and the run exits successfully. Exit code 5 continues to mean a judge failure.
 
 ---
 

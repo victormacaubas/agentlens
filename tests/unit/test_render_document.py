@@ -3,8 +3,11 @@
 from dataclasses import asdict
 from datetime import UTC, datetime
 
+import pytest
+
 from agentlens.models.judging import VERDICT_PROVENANCE, RubricDimension
 from agentlens.models.report_aggregates import TrendStatus
+from agentlens.models.scoring import ScoringStatus
 from agentlens.render.document import build_report_document_json, build_session_document
 from tests.factories import (
     build_agent_rollup,
@@ -14,6 +17,8 @@ from tests.factories import (
     build_report_document,
     build_report_spawn,
     build_resolved_window,
+    build_run_judge_usage,
+    build_scoring_outcome,
     build_session_facts,
     build_session_skill_signal,
     build_suggested_fix,
@@ -41,7 +46,7 @@ def test_document_carries_schema_version_and_unscored_marker() -> None:
 
     document = build_session_document(facts, clock=clock)
 
-    assert document["schema_version"] == 2
+    assert document["schema_version"] == 3
     assert document["scoring_status"] == "unscored"
 
 
@@ -134,7 +139,11 @@ def test_scored_row_carries_every_field_the_spec_names() -> None:
         scored_at=datetime(2026, 1, 1, 1, tzinfo=UTC),
     )
 
-    document = build_session_document(facts, clock=clock, verdict=fact_verdict)
+    document = build_session_document(
+        facts,
+        clock=clock,
+        scoring_outcome=build_scoring_outcome(verdict=fact_verdict),
+    )
 
     row = document["spawns"][0]  # type: ignore[index]
     verdict_row = row["verdict"]
@@ -164,12 +173,105 @@ def test_document_built_without_verdict_matches_pre_scoring_shape_except_schema_
     facts = build_session_facts()
     clock = FakeClock(instant=datetime(2026, 1, 1, tzinfo=UTC))
 
-    document = build_session_document(facts, clock=clock, verdict=None)
+    document = build_session_document(facts, clock=clock, scoring_outcome=None)
 
-    assert document["schema_version"] == 2
+    assert document["schema_version"] == 3
     assert document["scoring_status"] == "unscored"
     row = document["spawns"][0]  # type: ignore[index]
     assert "verdict" not in row
+
+
+@pytest.mark.parametrize(
+    ("status", "has_verdict"),
+    (
+        (ScoringStatus.SCORED, True),
+        (ScoringStatus.REUSED, True),
+        (ScoringStatus.CLAIMED_ELSEWHERE, False),
+        (ScoringStatus.FAILED, False),
+    ),
+)
+def test_document_distinguishes_every_scoring_outcome(
+    status: ScoringStatus,
+    has_verdict: bool,
+) -> None:
+    document = build_session_document(
+        build_session_facts(),
+        clock=FakeClock(instant=datetime(2026, 1, 1, tzinfo=UTC)),
+        scoring_outcome=build_scoring_outcome(status=status),
+    )
+
+    row = document["spawns"][0]  # type: ignore[index]
+    assert document["scoring_status"] == status.value
+    assert ("verdict" in row) is has_verdict
+
+
+def test_reused_document_marks_the_historical_verdict_and_this_runs_zero_usage() -> None:
+    historical_verdict = build_fact_verdict(
+        judge_cost_usd=0.25,
+        judge_input_tokens=200,
+        judge_output_tokens=40,
+    )
+    document = build_session_document(
+        build_session_facts(),
+        clock=FakeClock(instant=datetime(2026, 1, 1, tzinfo=UTC)),
+        scoring_outcome=build_scoring_outcome(
+            status=ScoringStatus.REUSED,
+            verdict=historical_verdict,
+        ),
+    )
+
+    row = document["spawns"][0]  # type: ignore[index]
+    assert row["is_reused"] is True
+    assert row["verdict"]["scored_at"] == historical_verdict.scored_at.isoformat()
+    assert row["run_judge_usage"] == {
+        "cost_usd": 0.0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+    }
+
+
+def test_failed_document_serializes_its_run_usage_without_a_verdict() -> None:
+    document = build_session_document(
+        build_session_facts(),
+        clock=FakeClock(instant=datetime(2026, 1, 1, tzinfo=UTC)),
+        scoring_outcome=build_scoring_outcome(
+            status=ScoringStatus.FAILED,
+            run_judge_usage=build_run_judge_usage(
+                cost_usd=0.045,
+                input_tokens=200,
+                output_tokens=40,
+            ),
+        ),
+    )
+
+    row = document["spawns"][0]  # type: ignore[index]
+    assert row["run_judge_usage"] == {
+        "cost_usd": 0.045,
+        "input_tokens": 200,
+        "output_tokens": 40,
+    }
+
+
+def test_claimed_elsewhere_document_has_no_verdict_score_or_fix_field() -> None:
+    document = build_session_document(
+        build_session_facts(),
+        clock=FakeClock(instant=datetime(2026, 1, 1, tzinfo=UTC)),
+        scoring_outcome=build_scoring_outcome(status=ScoringStatus.CLAIMED_ELSEWHERE),
+    )
+
+    assert document["scoring_status"] == ScoringStatus.CLAIMED_ELSEWHERE.value
+    _assert_no_scoring_keys(document)
+
+
+def test_document_marks_a_verdict_behind_its_current_input() -> None:
+    document = build_session_document(
+        build_session_facts(),
+        clock=FakeClock(instant=datetime(2026, 1, 1, tzinfo=UTC)),
+        scoring_outcome=build_scoring_outcome(is_behind_current_input=True),
+    )
+
+    row = document["spawns"][0]  # type: ignore[index]
+    assert row["is_behind_current_input"] is True
 
 
 def test_provenance_in_document_exposes_exactly_verdict_provenances_two_lists() -> None:
@@ -177,7 +279,11 @@ def test_provenance_in_document_exposes_exactly_verdict_provenances_two_lists() 
     clock = FakeClock(instant=datetime(2026, 1, 1, tzinfo=UTC))
     fact_verdict = build_fact_verdict()
 
-    document = build_session_document(facts, clock=clock, verdict=fact_verdict)
+    document = build_session_document(
+        facts,
+        clock=clock,
+        scoring_outcome=build_scoring_outcome(verdict=fact_verdict),
+    )
 
     row = document["spawns"][0]  # type: ignore[index]
     provenance = row["verdict"]["provenance"]

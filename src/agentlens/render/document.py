@@ -7,30 +7,36 @@ from agentlens.models.judging import RubricDimension
 from agentlens.models.protocols import Clock
 from agentlens.models.report_aggregates import AgentRollup
 from agentlens.models.report_document import ReportDocument, ReportSpawn
+from agentlens.models.scoring import RunJudgeUsage, ScoringOutcome, ScoringStatus
 from agentlens.models.session_facts import SessionFacts
 from agentlens.models.skill_signals import SessionSkillSignal
 from agentlens.models.windows import ResolvedWindow
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 SCORING_STATUS_UNSCORED = "unscored"
-SCORING_STATUS_SCORED = "scored"
 
 
 def build_session_document(
-    facts: SessionFacts, *, clock: Clock, verdict: FactVerdict | None = None
+    facts: SessionFacts,
+    *,
+    clock: Clock,
+    scoring_outcome: ScoringOutcome | None = None,
 ) -> dict[str, object]:
     """Build the JSON-serializable report document for one analyzed spawn.
 
     Carries a schema version, a UTC generation timestamp read from ``clock``,
     one row per qualified spawn, and an explicit scoring-status marker.
-    ``verdict`` is ``None`` for a run that did not score its spawn, which
-    keeps the row's ``"verdict"`` key absent rather than present and empty.
+    ``scoring_outcome`` is ``None`` for a run that did not score its spawn,
+    which keeps the row's ``"verdict"`` key absent rather than present and
+    empty.
     """
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": clock.now().isoformat(),
-        "scoring_status": SCORING_STATUS_SCORED if verdict is not None else SCORING_STATUS_UNSCORED,
-        "spawns": [_build_spawn_row(facts, verdict=verdict)],
+        "scoring_status": (
+            scoring_outcome.status.value if scoring_outcome is not None else SCORING_STATUS_UNSCORED
+        ),
+        "spawns": [_build_spawn_row(facts, scoring_outcome=scoring_outcome)],
     }
 
 
@@ -43,7 +49,11 @@ def render_document_json(document: Mapping[str, object]) -> str:
     return json.dumps(document, indent=2)
 
 
-def _build_spawn_row(facts: SessionFacts, *, verdict: FactVerdict | None) -> dict[str, object]:
+def _build_spawn_row(
+    facts: SessionFacts,
+    *,
+    scoring_outcome: ScoringOutcome | None,
+) -> dict[str, object]:
     session = facts.session
     identity = session.identity
     row: dict[str, object] = {
@@ -73,9 +83,23 @@ def _build_spawn_row(facts: SessionFacts, *, verdict: FactVerdict | None) -> dic
         "cache_creation_tokens": session.cache_creation_tokens,
         "unreadable_line_count": session.unreadable_line_count,
     }
-    if verdict is not None:
-        row["verdict"] = _build_verdict_row(verdict)
+    if scoring_outcome is not None:
+        row["run_judge_usage"] = _build_run_judge_usage(scoring_outcome.run_judge_usage)
+        if scoring_outcome.status is ScoringStatus.REUSED:
+            row["is_reused"] = True
+        if scoring_outcome.is_behind_current_input:
+            row["is_behind_current_input"] = True
+        if scoring_outcome.verdict is not None:
+            row["verdict"] = _build_verdict_row(scoring_outcome.verdict)
     return row
+
+
+def _build_run_judge_usage(run_judge_usage: RunJudgeUsage) -> dict[str, float | int]:
+    return {
+        "cost_usd": run_judge_usage.cost_usd,
+        "input_tokens": run_judge_usage.input_tokens,
+        "output_tokens": run_judge_usage.output_tokens,
+    }
 
 
 def _build_verdict_row(fact_verdict: FactVerdict) -> dict[str, object]:

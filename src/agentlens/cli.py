@@ -1,10 +1,12 @@
 import json
 import logging
+import secrets
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Final, cast
 
 import click
 
@@ -18,8 +20,10 @@ from agentlens.errors import (
     SourceError,
     StoreError,
 )
-from agentlens.judge.cli_backend import ClaudeCliJudge
+from agentlens.judge.cli_backend import DEFAULT_TIMEOUT_S, ClaudeCliJudge
+from agentlens.models.claims import CLAIM_LEASE_MARGIN_S
 from agentlens.models.protocols import JudgeBackend
+from agentlens.models.scoring import ScoringRequest
 from agentlens.models.windows import NAMED_WINDOW_THIS_WEEK, WindowSelector
 from agentlens.utils.clock import SystemClock
 
@@ -39,6 +43,7 @@ EXIT_CODES: dict[type[AgentlensError], int] = {
 SESSION_SUBCOMMAND = "session"
 REPORT_SUBCOMMAND = "report"
 _STORE_DB_FILENAME = "agentlens.db"
+_SCORING_OWNER_TOKEN_BYTES: Final = 16
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -50,7 +55,7 @@ class SessionArgs:
     store_path: Path | None
     dry_run: bool
     score: bool
-    judge_model: str
+    requested_model: str
 
 
 def default_store_path() -> Path:
@@ -84,7 +89,20 @@ def _run_session(args: SessionArgs) -> int:
     """
     store_path = args.store_path if args.store_path is not None else default_store_path()
     clock = SystemClock()
-    judge: JudgeBackend | None = ClaudeCliJudge() if args.score else None
+    judge_timeout_s = DEFAULT_TIMEOUT_S
+    scoring_owner = secrets.token_urlsafe(_SCORING_OWNER_TOKEN_BYTES)
+    scoring = (
+        ScoringRequest(
+            requested_model=args.requested_model,
+            owner=scoring_owner,
+            claim_lease=timedelta(seconds=judge_timeout_s + CLAIM_LEASE_MARGIN_S),
+        )
+        if args.score
+        else None
+    )
+    judge: JudgeBackend | None = (
+        ClaudeCliJudge(timeout_s=judge_timeout_s) if scoring is not None else None
+    )
 
     logger.info(
         "Resolved session arguments: %s",
@@ -95,7 +113,8 @@ def _run_session(args: SessionArgs) -> int:
                 "store": str(store_path),
                 "dry_run": args.dry_run,
                 "score": args.score,
-                "judge_model": args.judge_model,
+                "requested_model": args.requested_model,
+                "owner": scoring_owner,
             }
         ),
     )
@@ -107,9 +126,8 @@ def _run_session(args: SessionArgs) -> int:
         output_format=args.output_format,
         dry_run=args.dry_run,
         claude_root=default_claude_root(),
-        score=args.score,
+        scoring=scoring,
         judge=judge,
-        judge_model=args.judge_model if args.score else None,
     )
     print(output)
     return EXIT_OK
@@ -122,7 +140,7 @@ def _session_callback(
     store_path: Path | None,
     dry_run: bool,
     score: bool,
-    judge_model: str,
+    requested_model: str,
 ) -> int:
     return _run_session(
         SessionArgs(
@@ -131,7 +149,7 @@ def _session_callback(
             store_path=store_path,
             dry_run=dry_run,
             score=score,
-            judge_model=judge_model,
+            requested_model=requested_model,
         )
     )
 
@@ -173,7 +191,7 @@ _SESSION_COMMAND = click.Command(
             "Costs money; never on by default.",
         ),
         click.Option(
-            ["--judge-model", "judge_model"],
+            ["--judge-model", "requested_model"],
             type=str,
             default="sonnet",
             help="The model alias or id to request the verdict from. "

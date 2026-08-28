@@ -17,6 +17,7 @@ from agentlens.ingest.discovery import discover_subagent_sources
 from agentlens.ingest.identity import SubagentSourceBundle
 from agentlens.ingest.transcript import parse_transcript
 from agentlens.models.agent_definitions import AgentDefinition
+from agentlens.models.protocols import Clock
 from agentlens.models.session_facts import SessionFacts
 from agentlens.store import Store, UpsertOutcome
 
@@ -56,7 +57,7 @@ def prepare_ingest_batch(*, projects_root: Path, claude_root: Path) -> PreparedI
 
 
 def batch_ingest_subagents(
-    *, projects_root: Path, claude_root: Path, store_path: Path
+    *, projects_root: Path, claude_root: Path, store_path: Path, clock: Clock
 ) -> tuple[UpsertOutcome, ...]:
     """Discover, parse, and persist every subagent transcript under ``projects_root``.
 
@@ -77,7 +78,7 @@ def batch_ingest_subagents(
     """
     prepared = prepare_ingest_batch(projects_root=projects_root, claude_root=claude_root)
 
-    with Store(store_path) as store:
+    with Store(store_path, clock=clock) as store:
         outcomes = store.upsert_batch(definitions=prepared.definitions, facts=prepared.facts)
     logger.info("Batch-upserted %d session(s) at %s", len(outcomes), store_path)
     return outcomes

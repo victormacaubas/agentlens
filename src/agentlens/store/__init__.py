@@ -1,4 +1,4 @@
 from agentlens.store.connection import Store, open_disposable_clone
-from agentlens.store.outcomes import UpsertOutcome
+from agentlens.store.outcomes import ClaimOutcome, UpsertOutcome
 
-__all__ = ["Store", "UpsertOutcome", "open_disposable_clone"]
+__all__ = ["ClaimOutcome", "Store", "UpsertOutcome", "open_disposable_clone"]

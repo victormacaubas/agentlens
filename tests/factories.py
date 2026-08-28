@@ -15,8 +15,15 @@ from agentlens.models.agent_definitions import (
     AgentDefinitionConfig,
     DefinitionScope,
 )
+from agentlens.models.claims import VerdictClaim, VerdictClaimIdentity
 from agentlens.models.facts import FactSession, FactToolEvent, FactVerdict
-from agentlens.models.identity import NameSource, SessionIdentity, SessionKind, SourceRevision
+from agentlens.models.identity import (
+    NameSource,
+    SessionIdentity,
+    SessionKind,
+    SourceRevision,
+    VerdictIdentity,
+)
 from agentlens.models.judging import (
     VERDICT_PROVENANCE,
     DimensionScore,
@@ -35,6 +42,7 @@ from agentlens.models.report_aggregates import (
     WeightedProportion,
 )
 from agentlens.models.report_document import REPORT_SCHEMA_VERSION, ReportDocument, ReportSpawn
+from agentlens.models.scoring import RunJudgeUsage, ScoringOutcome, ScoringStatus
 from agentlens.models.session_facts import SessionFacts
 from agentlens.models.skill_signals import KnownState, SessionSkillSignal
 from agentlens.models.windows import DEFAULT_MIN_SESSIONS_FOR_TREND, ResolvedWindow, WindowSelector
@@ -931,6 +939,35 @@ def build_transcript_text(records: Sequence[Mapping[str, object]]) -> str:
     return "\n".join(lines) + "\n" if lines else ""
 
 
+def write_transcript(
+    path: Path,
+    *,
+    records: Sequence[Mapping[str, object]] | None = None,
+    with_sidecar: bool = True,
+    agent_type: str = "implementer",
+) -> None:
+    """Write a transcript at ``path``, creating parents, plus its sidecar by default.
+
+    ``records`` defaults to one tool-invocation pair, which is what most callers
+    want; pass an explicit sequence to shape the spawn's narrative. Sidecar
+    presence is a knob because an unpaired transcript is a case worth covering,
+    and because some callers write the sidecar separately to control its
+    contents or its mtime.
+    """
+    records = records if records is not None else build_tool_invocation_pair()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(build_transcript_text(records))
+    if with_sidecar:
+        write_sidecar(path, agent_type=agent_type)
+
+
+def write_sidecar(transcript_path: Path, *, agent_type: str = "implementer") -> None:
+    """Write the ``.meta.json`` sidecar beside ``transcript_path``."""
+    transcript_path.with_suffix(".meta.json").write_text(
+        json.dumps(build_sidecar(agent_type=agent_type))
+    )
+
+
 def build_agent_definition_config(
     *,
     name: str = "implementer",
@@ -1111,4 +1148,93 @@ def build_fact_verdict(
         judge_input_tokens=judge_input_tokens,
         judge_output_tokens=judge_output_tokens,
         scored_at=datetime(2026, 8, 24, 12, 0, tzinfo=UTC) if scored_at is None else scored_at,
+    )
+
+
+def build_run_judge_usage(
+    *,
+    cost_usd: float = 0.011002,
+    input_tokens: int = 675,
+    output_tokens: int = 52,
+) -> RunJudgeUsage:
+    return RunJudgeUsage(
+        cost_usd=cost_usd,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+    )
+
+
+def build_scoring_outcome(
+    *,
+    status: ScoringStatus = ScoringStatus.SCORED,
+    verdict: FactVerdict | None = None,
+    run_judge_usage: RunJudgeUsage | None = None,
+    is_behind_current_input: bool = False,
+) -> ScoringOutcome:
+    resolved_verdict = (
+        build_fact_verdict()
+        if verdict is None and status in {ScoringStatus.SCORED, ScoringStatus.REUSED}
+        else verdict
+    )
+    resolved_run_judge_usage = (
+        run_judge_usage
+        if run_judge_usage is not None
+        else build_run_judge_usage(cost_usd=0.0, input_tokens=0, output_tokens=0)
+        if status in {ScoringStatus.REUSED, ScoringStatus.CLAIMED_ELSEWHERE}
+        else build_run_judge_usage(
+            cost_usd=resolved_verdict.judge_cost_usd if resolved_verdict is not None else 0.011002,
+            input_tokens=resolved_verdict.judge_input_tokens if resolved_verdict is not None else 0,
+            output_tokens=resolved_verdict.judge_output_tokens
+            if resolved_verdict is not None
+            else 0,
+        )
+    )
+    return ScoringOutcome(
+        status=status,
+        verdict=resolved_verdict,
+        run_judge_usage=resolved_run_judge_usage,
+        is_behind_current_input=is_behind_current_input,
+    )
+
+
+def build_verdict_identity(
+    *,
+    session_id: str = "session-abc123",
+    judge_input_hash: str = "a" * 64,
+    rubric_version: str = "v1",
+    judge_model: str = "claude-sonnet-5",
+) -> VerdictIdentity:
+    return VerdictIdentity(
+        session_id=session_id,
+        judge_input_hash=judge_input_hash,
+        rubric_version=rubric_version,
+        judge_model=judge_model,
+    )
+
+
+def build_verdict_claim_identity(
+    *,
+    session_id: str = "session-abc123",
+    judge_input_hash: str = "a" * 64,
+    rubric_version: str = "v1",
+    requested_model: str = "claude-sonnet-5",
+) -> VerdictClaimIdentity:
+    return VerdictClaimIdentity(
+        session_id=session_id,
+        judge_input_hash=judge_input_hash,
+        rubric_version=rubric_version,
+        requested_model=requested_model,
+    )
+
+
+def build_verdict_claim(
+    *,
+    identity: VerdictClaimIdentity | None = None,
+    owner: str = "owner-one",
+    expires_at: datetime | None = None,
+) -> VerdictClaim:
+    return VerdictClaim(
+        identity=build_verdict_claim_identity() if identity is None else identity,
+        owner=owner,
+        expires_at=datetime(2026, 8, 24, 12, 2, tzinfo=UTC) if expires_at is None else expires_at,
     )

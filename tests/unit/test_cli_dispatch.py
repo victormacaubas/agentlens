@@ -7,18 +7,9 @@ import pytest
 
 from agentlens.cli import EXIT_OK, main
 from tests.factories import (
-    build_sidecar,
-    build_tool_invocation_pair,
     build_transcript_path,
-    build_transcript_text,
+    write_transcript,
 )
-
-
-def _write_transcript(path: Path, *, with_sidecar: bool = True) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(build_transcript_text(build_tool_invocation_pair()))
-    if with_sidecar:
-        path.with_suffix(".meta.json").write_text(json.dumps(build_sidecar()))
 
 
 def test_root_help_exits_0_and_lists_the_session_subcommand_without_a_traceback(
@@ -58,7 +49,7 @@ def test_resolved_session_arguments_are_logged_once_on_stderr_only(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path))
     transcript_path = build_transcript_path(tmp_path)
-    _write_transcript(transcript_path)
+    write_transcript(transcript_path)
     store_path = tmp_path / "store" / "agentlens.db"
 
     exit_code = main(["session", "--file", str(transcript_path), "--store", str(store_path)])
@@ -75,7 +66,7 @@ def test_repeated_main_calls_do_not_duplicate_log_lines(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path))
     transcript_path = build_transcript_path(tmp_path)
-    _write_transcript(transcript_path)
+    write_transcript(transcript_path)
     store_path = tmp_path / "store" / "agentlens.db"
     argv = ["session", "--file", str(transcript_path), "--store", str(store_path)]
 
@@ -96,7 +87,7 @@ def test_json_format_stdout_is_one_parseable_document_with_diagnostics_on_stderr
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path))
     transcript_path = build_transcript_path(tmp_path)
-    _write_transcript(transcript_path)
+    write_transcript(transcript_path)
     store_path = tmp_path / "store" / "agentlens.db"
 
     exit_code = main(
@@ -114,7 +105,7 @@ def test_json_format_stdout_is_one_parseable_document_with_diagnostics_on_stderr
     captured = capsys.readouterr()
     assert exit_code == EXIT_OK
     document = json.loads(captured.out)
-    assert document["schema_version"] == 2
+    assert document["schema_version"] == 3
     assert "Resolved session arguments" in captured.err
 
 
