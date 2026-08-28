@@ -9,7 +9,7 @@ from types import TracebackType
 
 from agentlens.errors import StoreError
 from agentlens.models.agent_definitions import AgentDefinition
-from agentlens.models.facts import FactSession
+from agentlens.models.facts import FactSession, FactVerdict
 from agentlens.models.report_aggregates import AgentRollup
 from agentlens.models.session_facts import SessionFacts
 from agentlens.models.skill_signals import SessionSkillSignal
@@ -124,6 +124,30 @@ class Store:
             return operations.read_agent_definition(connection, agent_definition_id)
         except sqlite3.Error as exc:
             raise StoreError(f"could not read agent definition {agent_definition_id!r}") from exc
+
+    def upsert_verdict(self, verdict: FactVerdict) -> None:
+        """Write ``verdict``, replacing any row already stored under its natural key.
+
+        Raises:
+            ~agentlens.errors.StoreError: The write failed.
+        """
+        connection = self._require_connection()
+        try:
+            operations.upsert_verdict(connection, verdict)
+        except sqlite3.Error as exc:
+            raise StoreError(f"could not write verdict for session {verdict.session_id!r}") from exc
+
+    def read_verdicts_for_session(self, session_id: str) -> tuple[FactVerdict, ...]:
+        """Return every stored verdict for ``session_id``, or an empty tuple if it has none.
+
+        Raises:
+            ~agentlens.errors.StoreError: The read failed.
+        """
+        connection = self._require_connection()
+        try:
+            return operations.read_verdicts_for_session(connection, session_id)
+        except sqlite3.Error as exc:
+            raise StoreError(f"could not read verdicts for session {session_id!r}") from exc
 
     def read_spawns_in_window(
         self, start: datetime, end: datetime, agent_type: str | None

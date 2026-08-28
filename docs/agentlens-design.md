@@ -71,7 +71,7 @@ schema change uses rebuild-from-source rather than an in-place migration.
 
 The LLM judge shells out to the user's existing `claude` CLI in headless mode. Behind a **pluggable interface** so an `ANTHROPIC_API_KEY` backend can be added for CI. Pin `--model`; what goes into the cache key is the resolved concrete model identifier read from the response envelope, not the alias as typed. See 
 
-**Auth:** the judge runs with `--bare` (see below), and `--bare` skips keychain reads entirely. Under `--bare`, auth is strictly `ANTHROPIC_API_KEY` or an `apiKeyHelper` configured via user settings (`--setting-sources "user"`): OAuth login and keychain credentials are never read, regardless of what's logged in on the machine. An unauthenticated environment fails fast with a `Not logged in` response rather than hanging or silently degrading;
+**Auth:** the judge runs with `--bare` (see below), and `--bare` skips keychain reads entirely. Under `--bare`, auth is strictly `ANTHROPIC_API_KEY` or an `apiKeyHelper` configured via user settings, and `--setting-sources "user"` alone is not enough to make that work: `--bare` reads the `apiKeyHelper` only from an explicit `--settings <path>`, never from `--setting-sources` alone and never from the keychain. Without `--settings`, a `--bare` call with `--setting-sources "user"` still returns `Not logged in` even on a machine that is otherwise authenticated. OAuth login and keychain credentials are never read, regardless of what's logged in on the machine. An unauthenticated environment fails fast with a `Not logged in` response rather than hanging or silently degrading;
 
 ### Confirmed CLI contract (hardened; see `harden-judge-invocation`)
 
@@ -82,10 +82,11 @@ claude -p "<prompt>" \
   --output-format json \
   --model sonnet \
   --json-schema "<verdict JSON schema>" \
-  --max-turns 3 \
   --bare \
   --tools "" \
   --setting-sources "user" \
+  --settings "<expanded path to the user's settings file>" \
+  --max-budget-usd "<spend ceiling in USD>" \
   --append-system-prompt "<judge instructions; return JSON verdict>"
 ```
 
@@ -97,15 +98,17 @@ Flag notes for the implementation:
 - **`--output-format json`** — single JSON envelope (vs. `stream-json`, `text`). Use `json` for one-shot.
 - **`--tools ""`**: the enforcing mechanism for a read-only, side-effect-free judge. `--tools <tools...>` selects from the built-in set; `""` disables all of them. This is stronger than an empty `--allowedTools`: `--allowedTools` (or omitting it) is a permission decision layered over a tool set that is still loaded, so a prompt-injected transcript can still reach a tool the allowlist forgot to exclude or that the CLI adds later. `--tools ""` removes the tools themselves, so there is nothing to aim at regardless of what the prompt requests. Verified empirically: the same canary-file-read prompt that succeeded under the old `--allowedTools`-omitted invocation returned `NO_TOOLS` once `--tools ""` was added.
 - **`--setting-sources "user"`**: drops `project` and `local`, so a `.claude/settings.local.json` in whatever directory agentlens happens to run from cannot reconfigure the judge. `user` must be kept (not `""`): it is the only setting source `--bare` accepts auth through, and `--setting-sources ""` alongside `--bare` was probed and returns `Not logged in`.
-- **`--max-turns 3`**: bounds the call now that there are no tools to loop on.
+- **`--settings "<path>"`**: the expanded path to the invoking user's own `settings.json`. This is what makes `--bare` authentication work at all: `--bare` reads an `apiKeyHelper` only from an explicit `--settings` path, never from `--setting-sources "user"` alone and never from the keychain. Probed without it, an otherwise-authenticated machine still returns `Not logged in`.
+- **`--max-budget-usd <ceiling>`**: bounds spend for one call. There is no `--max-turns` flag; structured output via `--json-schema` is implemented as an internal tool call, so a schema-constrained call reports `num_turns: 2` regardless of `--tools ""`, and nothing bounds turns directly. The spend ceiling is the backstop against a run that stays within its turn floor but is unexpectedly expensive.
 - **Explicit `cwd` and filtered `env`**: the subprocess gets a temporary directory as `cwd` and an environment forwarding only `PATH`, `HOME`, and `ANTHROPIC_*`-prefixed variables (covers `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`). This is defense in depth: with `--tools ""` there is nothing to reach, but it is the control that holds if a future change reintroduces a tool.
+- **Wall-clock bound**: there is no `--timeout` flag. The subprocess caller enforces its own wall-clock timeout on the call and treats an expired one as the judge being unavailable; the CLI contributes no bound on how long a single call may run.
 - **`--append-system-prompt`** (not `--system-prompt`, which *replaces* and drops Claude Code's foundation).
 - **`--model`** — aliases `opus` \| `sonnet` \| `haiku` \| `opusplan` (auto-update), or pin a full string like `claude-opus-4-8`. An alias is accepted here as an input convenience only: what goes into the cache key is the resolved concrete identifier the backend reads back from the response envelope, never the alias as typed.
 - **`--bare`** — skips auto-discovery of hooks/skills/plugins/MCP/CLAUDE.md. Retained for reproducibility, not just speed: a non-bare call's inherited hooks, CLAUDE.md, plugin context, and auto-memory vary by machine and working directory, which would make the judge's system context, and therefore its verdicts, incomparable across runs. The cost is that OAuth-only users cannot authenticate the judge; see the auth note above.
 
 **Response envelope** — parse `result` (the model's text) as the verdict; `is_error` (bool) to detect failures; `session_id`, `total_cost_usd`, `usage`, `duration_ms` for logging. If you later use `--json-schema` structured outputs, the validated object is in `structured_output` instead of `result`.
 
-> Docs: [headless](https://code.claude.com/docs/en/headless), [CLI reference](https://code.claude.com/docs/en/cli-reference), [permission modes](https://code.claude.com/docs/en/permission-modes). Re-verify before Phase 3 — CLI flags do shift across versions.
+> Docs: [headless](https://code.claude.com/docs/en/headless), [CLI reference](https://code.claude.com/docs/en/cli-reference), [permission modes](https://code.claude.com/docs/en/permission-modes). Re-verified against CLI 2.1.241 during `score-single-spawn`, which is what fixed the invocation above; see `docs/adr/0009-judge-invocation-bounds-and-model-resolution.md` for what changed and why. Re-verify again if flags shift in a future CLI release.
 
 ---
 

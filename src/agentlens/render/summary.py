@@ -1,18 +1,27 @@
 from pathlib import Path
 
+from agentlens.models.facts import FactSession, FactVerdict
+from agentlens.models.judging import RubricDimension
 from agentlens.models.report_document import ReportDocument
 from agentlens.models.session_facts import SessionFacts
 
 UNSCORED_NOTICE = "scoring: unscored, no judge has run for this spawn"
 
 
-def build_session_summary(facts: SessionFacts, *, artifact_path: Path) -> str:
+def build_session_summary(
+    facts: SessionFacts, *, artifact_path: Path, verdict: FactVerdict | None = None
+) -> str:
     """Build the readable summary of one analyzed spawn.
 
     Names the agent type and which source named it, the task, the volume and
-    health counts, the cache-read proportion, the unscored state, and the
-    artifact path. Carries no score, verdict, or fix text: this slice never
-    runs a judge.
+    health counts, the cache-read proportion, and the artifact path. When
+    ``verdict`` is ``None``, states the spawn is unscored, unchanged from
+    before scoring existed. When it is not ``None``, names the overall score,
+    each dimension score, where the suggested fixes were recorded, the
+    judge's own cost and token counts, and the analyzed spawn's own token
+    usage. Never reads a verdict's evidence, recommendation, rationale, or fix
+    target: those are untrusted model output and this surface does not
+    render them.
     """
     session = facts.session
     proportion = _cache_read_proportion(
@@ -33,10 +42,36 @@ def build_session_summary(facts: SessionFacts, *, artifact_path: Path) -> str:
             f"unreadable_lines={session.unreadable_line_count}"
         ),
         f"cache_read_proportion={proportion:.1%}",
-        UNSCORED_NOTICE,
-        f"artifact: {artifact_path}",
     ]
+    if verdict is None:
+        lines.append(UNSCORED_NOTICE)
+    else:
+        lines.extend(_scored_lines(verdict, artifact_path=artifact_path, session=session))
+    lines.append(f"artifact: {artifact_path}")
     return "\n".join(lines)
+
+
+def _scored_lines(
+    fact_verdict: FactVerdict, *, artifact_path: Path, session: FactSession
+) -> list[str]:
+    scored = fact_verdict.verdict
+    lines = [f"overall_score: {scored.overall_score}"]
+    lines.extend(
+        f"{dimension.value}: {scored.dimensions[dimension].score}" for dimension in RubricDimension
+    )
+    lines.append(f"suggested_fixes: recorded at {artifact_path}")
+    lines.append(
+        f"judge_cost=${fact_verdict.judge_cost_usd} "
+        f"judge_input_tokens={fact_verdict.judge_input_tokens} "
+        f"judge_output_tokens={fact_verdict.judge_output_tokens}"
+    )
+    lines.append(
+        f"analyzed_tokens: input={session.input_tokens} "
+        f"output={session.output_tokens} "
+        f"cache_read={session.cache_read_tokens} "
+        f"cache_creation={session.cache_creation_tokens}"
+    )
+    return lines
 
 
 def _cache_read_proportion(

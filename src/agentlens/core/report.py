@@ -14,7 +14,6 @@ import logging
 from pathlib import Path
 
 from agentlens.core.ingest_run import PreparedIngestBatch, prepare_ingest_batch
-from agentlens.core.session import FORMAT_JSON
 from agentlens.models.protocols import Clock
 from agentlens.models.report_document import REPORT_SCHEMA_VERSION, ReportDocument, ReportSpawn
 from agentlens.models.windows import ResolvedWindow
@@ -24,6 +23,8 @@ from agentlens.render.summary import build_report_summary
 from agentlens.store import Store, open_disposable_clone
 
 logger = logging.getLogger(__name__)
+
+FORMAT_JSON = "json"
 
 
 def generate_report(

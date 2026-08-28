@@ -3,16 +3,21 @@
 from dataclasses import asdict
 from datetime import UTC, datetime
 
+from agentlens.models.judging import VERDICT_PROVENANCE, RubricDimension
 from agentlens.models.report_aggregates import TrendStatus
 from agentlens.render.document import build_report_document_json, build_session_document
 from tests.factories import (
     build_agent_rollup,
+    build_dimension_score,
     build_fact_session,
+    build_fact_verdict,
     build_report_document,
     build_report_spawn,
     build_resolved_window,
     build_session_facts,
     build_session_skill_signal,
+    build_suggested_fix,
+    build_verdict,
     build_window_selector,
 )
 from tests.fakes import FakeClock
@@ -36,7 +41,7 @@ def test_document_carries_schema_version_and_unscored_marker() -> None:
 
     document = build_session_document(facts, clock=clock)
 
-    assert document["schema_version"] == 1
+    assert document["schema_version"] == 2
     assert document["scoring_status"] == "unscored"
 
 
@@ -106,6 +111,80 @@ def test_no_score_verdict_or_fix_key_appears_anywhere_in_the_document() -> None:
     document = build_session_document(facts, clock=clock)
 
     _assert_no_scoring_keys(document)
+
+
+def test_scored_row_carries_every_field_the_spec_names() -> None:
+    facts = build_session_facts()
+    clock = FakeClock(instant=datetime(2026, 1, 1, tzinfo=UTC))
+    scored = build_verdict(
+        overall_score=3,
+        dimensions={
+            dimension: build_dimension_score(score=3, evidence=("Evidence.",))
+            for dimension in RubricDimension
+        },
+        suggested_fixes=(build_suggested_fix(),),
+    )
+    fact_verdict = build_fact_verdict(
+        verdict=scored,
+        rubric_version="v1",
+        judge_model="claude-sonnet-5",
+        judge_cost_usd=0.02,
+        judge_input_tokens=100,
+        judge_output_tokens=20,
+        scored_at=datetime(2026, 1, 1, 1, tzinfo=UTC),
+    )
+
+    document = build_session_document(facts, clock=clock, verdict=fact_verdict)
+
+    row = document["spawns"][0]  # type: ignore[index]
+    verdict_row = row["verdict"]
+    assert verdict_row["rubric_version"] == "v1"
+    assert verdict_row["judge_model"] == "claude-sonnet-5"
+    assert verdict_row["judge_cost_usd"] == 0.02
+    assert verdict_row["judge_input_tokens"] == 100
+    assert verdict_row["judge_output_tokens"] == 20
+    assert verdict_row["scored_at"] == datetime(2026, 1, 1, 1, tzinfo=UTC).isoformat()
+    assert verdict_row["overall_score"] == 3
+    for dimension in RubricDimension:
+        dimension_row = verdict_row["dimensions"][dimension.value]
+        assert dimension_row["score"] == 3
+        assert dimension_row["evidence"] == ["Evidence."]
+    assert verdict_row["suggested_fixes"] == [
+        {
+            "dimension": "efficiency",
+            "target": "the retry loop in ingest/session.py",
+            "recommendation": "Cap the retry count instead of retrying unconditionally.",
+            "rationale": "The transcript shows five retries of the same read.",
+        }
+    ]
+    assert document["scoring_status"] == "scored"
+
+
+def test_document_built_without_verdict_matches_pre_scoring_shape_except_schema_version() -> None:
+    facts = build_session_facts()
+    clock = FakeClock(instant=datetime(2026, 1, 1, tzinfo=UTC))
+
+    document = build_session_document(facts, clock=clock, verdict=None)
+
+    assert document["schema_version"] == 2
+    assert document["scoring_status"] == "unscored"
+    row = document["spawns"][0]  # type: ignore[index]
+    assert "verdict" not in row
+
+
+def test_provenance_in_document_exposes_exactly_verdict_provenances_two_lists() -> None:
+    facts = build_session_facts()
+    clock = FakeClock(instant=datetime(2026, 1, 1, tzinfo=UTC))
+    fact_verdict = build_fact_verdict()
+
+    document = build_session_document(facts, clock=clock, verdict=fact_verdict)
+
+    row = document["spawns"][0]  # type: ignore[index]
+    provenance = row["verdict"]["provenance"]
+    assert provenance == {
+        "locally_derived": list(VERDICT_PROVENANCE.locally_derived),
+        "untrusted_model_output": list(VERDICT_PROVENANCE.untrusted_model_output),
+    }
 
 
 def test_report_document_json_carries_schema_version_generated_at_and_window() -> None:

@@ -129,6 +129,11 @@ source_modules = [
     "agentlens.utils",
 ]
 forbidden_modules = ["subprocess"]
+# Direct imports only: cli is the composition root and legitimately constructs
+# the real JudgeBackend, which reaches subprocess transitively. What the rule
+# forbids is a subprocess type or import statement escaping the judge package
+# itself, mirroring the same allowance above for store/sqlite3.
+allow_indirect_imports = "true"
 
 [[tool.importlinter.contracts]]
 name = "Only render templates output"

@@ -5,6 +5,9 @@
 together with its ordinal position within that session. ``dim_agent`` holds
 one row per versioned, content-addressed agent definition. ``bridge_session_skill``
 holds one row per qualified session and skill name, keyed on that pair.
+``fact_verdict`` holds one row per scored identity, keyed on the session
+together with the judge-input hash, the rubric version, and the resolved
+judge model.
 
 Each table states its column order exactly once, in the declaration tuples
 below. The DDL here and the column lists in ``operations`` are generated from
@@ -109,10 +112,30 @@ _BRIDGE_SESSION_SKILL_COLUMNS = (
     _Column("fired", "INTEGER"),
 )
 
+_FACT_VERDICT_COLUMNS = (
+    _Column("session_id", "TEXT"),
+    _Column("judge_input_hash", "TEXT"),
+    _Column("rubric_version", "TEXT"),
+    _Column("judge_model", "TEXT"),
+    _Column("overall_score", "INTEGER"),
+    _Column("task_completion_score", "INTEGER"),
+    _Column("honesty_score", "INTEGER"),
+    _Column("efficiency_score", "INTEGER"),
+    _Column("scope_adherence_score", "INTEGER"),
+    _Column("dimension_evidence", "TEXT"),
+    _Column("suggested_fixes", "TEXT"),
+    _Column("provenance", "TEXT"),
+    _Column("judge_cost_usd", "REAL"),
+    _Column("judge_input_tokens", "INTEGER"),
+    _Column("judge_output_tokens", "INTEGER"),
+    _Column("scored_at", "TEXT"),
+)
+
 FACT_SESSION_COLUMN_NAMES = tuple(column.name for column in _FACT_SESSION_COLUMNS)
 FACT_TOOL_EVENT_COLUMN_NAMES = tuple(column.name for column in _FACT_TOOL_EVENT_COLUMNS)
 DIM_AGENT_COLUMN_NAMES = tuple(column.name for column in _DIM_AGENT_COLUMNS)
 BRIDGE_SESSION_SKILL_COLUMN_NAMES = tuple(column.name for column in _BRIDGE_SESSION_SKILL_COLUMNS)
+FACT_VERDICT_COLUMN_NAMES = tuple(column.name for column in _FACT_VERDICT_COLUMNS)
 
 
 def _column_ddl(column: _Column) -> str:
@@ -153,6 +176,12 @@ CREATE_BRIDGE_SESSION_SKILL_SQL = _create_table_sql(
     composite_primary_key=("session_id", "skill_name"),
 )
 
+CREATE_FACT_VERDICT_SQL = _create_table_sql(
+    "fact_verdict",
+    _FACT_VERDICT_COLUMNS,
+    composite_primary_key=("session_id", "judge_input_hash", "rubric_version", "judge_model"),
+)
+
 
 def ensure_schema(connection: sqlite3.Connection) -> None:
     """Create every fact, dimension, and bridge table if it does not already exist."""
@@ -160,4 +189,5 @@ def ensure_schema(connection: sqlite3.Connection) -> None:
     connection.execute(CREATE_FACT_TOOL_EVENT_SQL)
     connection.execute(CREATE_DIM_AGENT_SQL)
     connection.execute(CREATE_BRIDGE_SESSION_SKILL_SQL)
+    connection.execute(CREATE_FACT_VERDICT_SQL)
     connection.commit()

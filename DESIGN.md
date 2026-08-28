@@ -162,7 +162,7 @@ The report header: agent name, window dates, overall score as a large mono numer
 
 ### Fix-proposal card
 
-A surface-colored block with: target (file/agent/rubric), dimension tag, recommendation text (marked as untrusted model output per ADR 0011), and rationale. Left-aligned, no decorative border. The dimension tag uses the score-tier color.
+A surface-colored block with: target (file/agent/rubric), dimension tag, recommendation text (marked as untrusted model output per ADR 0002's provenance-split argument), and rationale. Left-aligned, no decorative border. The dimension tag uses the score-tier color.
 
 ### Tool-sequence timeline
 
