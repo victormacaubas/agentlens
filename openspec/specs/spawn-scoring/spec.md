@@ -10,8 +10,8 @@ result are trustworthy enough to compute on versus merely display.
 
 ### Requirement: Scoring is requested explicitly, one spawn at a time
 
-Scoring SHALL happen only when a caller asks for it, and a single request SHALL
-produce at most one judge call and at most one verdict.
+Scoring SHALL happen only when a caller asks for it. A run SHALL score spawns one at
+a time rather than concurrently, and SHALL produce at most one verdict per spawn.
 
 #### Scenario: Scoring is not requested
 
@@ -26,7 +26,25 @@ spends money on a command users already run for facts is a trap.
 
 - **WHEN** scoring is requested for a spawn that has been ingested successfully and no
   verdict exists for its identity
-- **THEN** exactly one judge call is made and exactly one verdict is recorded for it
+- **THEN** at most one judge call succeeds for it and exactly one verdict is recorded
+
+#### Scenario: Scoring is requested for a window of spawns
+
+- **WHEN** scoring is requested for a window rather than for one spawn
+- **THEN** each qualifying spawn in it is scored, and each has at most one verdict
+  recorded for its identity
+
+Rationale: what widened is how many spawns one request covers. What did not widen is
+the per-spawn invariant, which is what every later comparison depends on.
+
+#### Scenario: Spawns are scored one at a time
+
+- **WHEN** a run covers more than one spawn needing a judge call
+- **THEN** no two judge calls are in flight at once
+
+Rationale: a run's spend ceiling is checked between calls, so calls that overlap
+could each pass the check and collectively blow through it. Sequential calls are what
+makes the ceiling mean anything.
 
 #### Scenario: Scoring is requested twice for the same unchanged spawn
 
@@ -216,7 +234,9 @@ Rationale: the observable risk is a call that hangs, which no spend limit addres
 
 When the judge cannot be used, the run SHALL stop promptly with a message
 identifying which cause applies, and SHALL NOT silently continue as though scoring
-had been declined.
+had been declined. A run covering many spawns SHALL reach that stop through its own
+failure bound rather than by ending on the first failed call, so that one spawn's
+failure is not mistaken for an unusable judge.
 
 #### Scenario: Judge is not installed
 
@@ -245,6 +265,23 @@ the wrong thing.
 - **WHEN** a spawn is ingested successfully and its scoring attempt then fails
 - **THEN** the deterministic facts for that spawn remain recorded and the failure is
   reported as a scoring failure rather than an ingest failure
+
+#### Scenario: One spawn's failure is not an unusable judge
+
+- **WHEN** a spawn fails during a run over many spawns while the judge answers for
+  others
+- **THEN** the run does not report the judge as unusable, does not exit with the judge
+  failure code, and reports that spawn as failed
+
+Rationale: an unusable judge and an unlucky spawn produce the same exception at the
+call site. What separates them is whether the next spawn also fails, which is
+knowable only by trying it.
+
+#### Scenario: An unusable judge is named once, not per spawn
+
+- **WHEN** a run stops because the judge is unusable
+- **THEN** the cause is reported as the run's stop reason rather than repeated as a
+  distinct failure for every spawn it did not attempt
 
 ### Requirement: agentlens reports its own cost, and only its own
 
