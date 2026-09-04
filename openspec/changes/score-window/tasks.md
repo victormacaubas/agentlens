@@ -77,9 +77,10 @@
 
 ## 4. The command and its surfaces
 
-- [x] 4.1 Add the `score` command to `cli.py` as the composition root: the window
-  selectors declared as a mutually exclusive group rather than hand-validated, `--agent`,
-  `--judge-model`, `--max-run-cost-usd`, `--store`, `--format json`, and `--dryrun`. It
+- [x] 4.1 Add the `score` command to `cli/score.py` within the CLI composition-root
+  package: the window selectors declared as a mutually exclusive group rather than
+  hand-validated, `--agent`, `--judge-model`, `--max-run-cost-usd`, `--store`,
+  `--format json`, and `--dryrun`. It
   constructs the judge with its per-call bound and passes that same figure into the run's
   request, which needs it for the dry-run bound. Exit 0 when a run covered its window
   whatever its spawns did, exit with the judge failure code when a run stopped on the
@@ -93,8 +94,8 @@
   naming the cause; a ceiling-stopped run exiting 0; and the resolved arguments —
   window, filter, requested model, ceiling — logged once on the diagnostic stream.
   Verify by calling the parsing function and `main` directly rather than through flag
-  strings, and verify the exit-code mapping is still the single one in `cli.py` rather
-  than a second copy for this command.
+  strings, and verify the exit-code mapping is still the single one in
+  `cli/exit_codes.py` rather than a second copy for this command.
 
 - [x] 4.2 Add the run summary to `render` in both the thin terminal form and the JSON
   form, keeping stdout to the machine-readable surface and everything about how the run

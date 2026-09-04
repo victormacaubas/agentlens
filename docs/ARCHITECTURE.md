@@ -36,7 +36,8 @@ store except by way of `core`. Every cross-stage flow therefore passes through
 windows. `core` orchestrates; it does not compute. `cli` parses arguments, maps
 exit codes, and wires the program together. `models` and `utils` sit at the
 bottom holding domain types, Protocols, and leaf helpers, with no in-project
-dependencies of their own.
+dependencies of their own. Root `main.py` is the installed console-script target
+and only forwards to `cli`.
 
 A package that owns an external technology owns its types, so nothing
 `sqlite3`-shaped leaves `store`, nothing `subprocess`-shaped leaves `judge`, and
@@ -77,8 +78,8 @@ threading one `now` argument down through three layers is the tell that a value
 wants injecting instead.
 
 Injection is required, never defaulted, so a test that forgets to inject fails
-loudly instead of quietly constructing a real, paid judge. `cli.py` is the only
-composition root; nothing below it constructs its own collaborators.
+loudly instead of quietly constructing a real, paid judge. The `cli` package is
+the only composition root; nothing below it constructs its own collaborators.
 
 The filesystem, the store, and `subprocess` were each considered and rejected as
 seams. ADR 0004 carries the rule that decides membership, and a new candidate
@@ -94,10 +95,10 @@ tool branch on them.
 
 Each package translates foreign exceptions at its own boundary: `store` catches
 `sqlite3.Error`, `judge` catches process and JSON decoding failures, `ingest`
-catches `OSError` and malformed records. The signal that this has eroded is
-`cli.py` catching a driver exception, at which point that driver has become part
-of the CLI's own contract. Exit-code mapping lives in exactly one place in
-`cli.py`, never per command.
+catches `OSError` and malformed records. The signal that this has eroded is the
+`cli` package catching a driver exception, at which point that driver has become
+part of the CLI's own contract. Exit-code mapping lives in exactly one place in
+`cli/exit_codes.py`, never per command.
 
 Not every failure is an exception. A stale snapshot is a decision to skip a
 replacement, so it is a return value.

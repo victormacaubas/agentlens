@@ -1,9 +1,9 @@
-"""``SpawnScoringRun.check_reusable``: a read-only reuse probe, no claim, no judge."""
+"""``SpawnScoringPreview.check_reusable`` reads reusable verdicts without a judge."""
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from agentlens.core.spawn_scoring import SpawnScoringRun
+from agentlens.core.spawn_scoring import SpawnScoringPreview
 from agentlens.ingest.context import SubagentContextCache
 from agentlens.ingest.identity import SubagentSourceBundle
 from agentlens.ingest.narrative import build_spawn_narrative
@@ -54,9 +54,9 @@ def _request() -> ScoringRequest:
 def test_check_reusable_returns_none_when_the_store_does_not_exist_yet(tmp_path: Path) -> None:
     store_path = tmp_path / "store" / "agentlens.db"
     bundle, stored = _bundle_and_stored(tmp_path)
-    run = SpawnScoringRun(store_path=store_path, clock=_CLOCK, judge=None, request=_request())
+    preview = SpawnScoringPreview(store_path=store_path, clock=_CLOCK, request=_request())
 
-    assert run.check_reusable(bundle, stored) is None
+    assert preview.check_reusable(bundle, stored) is None
 
 
 def test_check_reusable_returns_none_when_no_matching_verdict_is_stored(tmp_path: Path) -> None:
@@ -64,9 +64,9 @@ def test_check_reusable_returns_none_when_no_matching_verdict_is_stored(tmp_path
     bundle, stored = _bundle_and_stored(tmp_path)
     with Store(store_path, clock=_CLOCK):
         pass
-    run = SpawnScoringRun(store_path=store_path, clock=_CLOCK, judge=None, request=_request())
+    preview = SpawnScoringPreview(store_path=store_path, clock=_CLOCK, request=_request())
 
-    assert run.check_reusable(bundle, stored) is None
+    assert preview.check_reusable(bundle, stored) is None
 
 
 def test_check_reusable_returns_the_stored_verdict_for_a_matching_identity(
@@ -84,9 +84,9 @@ def test_check_reusable_returns_the_stored_verdict_for_a_matching_identity(
     )
     with Store(store_path, clock=_CLOCK) as store:
         store.upsert_verdict(stored_verdict)
-    run = SpawnScoringRun(store_path=store_path, clock=_CLOCK, judge=None, request=_request())
+    preview = SpawnScoringPreview(store_path=store_path, clock=_CLOCK, request=_request())
 
-    reusable = run.check_reusable(bundle, stored)
+    reusable = preview.check_reusable(bundle, stored)
 
     assert reusable == stored_verdict
 
@@ -98,9 +98,9 @@ def test_check_reusable_never_acquires_a_claim(tmp_path: Path) -> None:
     judge_input_hash = hash_text(_prompt(bundle))
     with Store(store_path, clock=_CLOCK):
         pass
-    run = SpawnScoringRun(store_path=store_path, clock=_CLOCK, judge=None, request=_request())
+    preview = SpawnScoringPreview(store_path=store_path, clock=_CLOCK, request=_request())
 
-    run.check_reusable(bundle, stored)
+    preview.check_reusable(bundle, stored)
 
     identity = build_verdict_claim_identity(
         session_id=session_id,

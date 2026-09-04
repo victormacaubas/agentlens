@@ -50,7 +50,7 @@ matches the convention `click` already uses for usage failures.
 | `ingest` | `OSError`, `json.JSONDecodeError` | `SourceError` subclasses |
 | `render` | `jinja2` errors | `AgentlensError` (no family earned yet) |
 
-The tell that this rule has eroded is `cli.py` catching `sqlite3.Error` or
+The tell that this rule has eroded is the `cli` package catching `sqlite3.Error` or
 `subprocess.CalledProcessError`. If that appears, the driver's exception
 hierarchy has become part of the CLI's contract, and ADR 0002's claim that the
 store could be swapped is no longer true.
@@ -60,8 +60,8 @@ store could be swapped is no longer true.
 exception: `assert` or a bare raise is fine for "this cannot happen," because
 those are not for callers to catch.
 
-**Exit-code mapping lives in exactly one place:** a single decorator or `try`
-around command dispatch in `cli.py`, never repeated per command.
+**Exit-code mapping lives in exactly one place:** the command-dispatch `try`
+and its mapping live in the `cli` package, never repeated per command.
 
 **Not created yet, deliberately:** no `RenderError`, no
 `StaleSnapshotError`. A stale snapshot is a decision to skip a replacement, not a

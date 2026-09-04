@@ -9,8 +9,8 @@ import logging
 from collections.abc import Sequence
 from pathlib import Path
 
-from agentlens.core.spawn_scoring import SpawnScoringRun
-from agentlens.errors import StoreError
+from agentlens.core.spawn_scoring import SpawnScoringPreview, SpawnScoringRun
+from agentlens.errors import ConfigError, StoreError
 from agentlens.ingest.context import SubagentContextCache
 from agentlens.ingest.identity import build_subagent_source_bundle
 from agentlens.ingest.transcript import parse_transcript
@@ -93,12 +93,20 @@ def analyze_session(
 
     scoring_outcome: ScoringOutcome | None = None
     if scoring is not None:
-        scoring_outcome = SpawnScoringRun(
-            store_path=store_path,
-            clock=clock,
-            judge=judge,
-            request=scoring,
-        ).score(bundle, stored, dry_run=dry_run)
+        if dry_run:
+            SpawnScoringPreview(store_path=store_path, clock=clock, request=scoring).preview(
+                bundle,
+                stored,
+            )
+        else:
+            if judge is None:
+                raise ConfigError("Scoring was requested but no judge backend was configured.")
+            scoring_outcome = SpawnScoringRun(
+                store_path=store_path,
+                clock=clock,
+                judge=judge,
+                request=scoring,
+            ).score(bundle, stored)
 
     document = build_session_document(stored, clock=clock, scoring_outcome=scoring_outcome)
     if output_format == FORMAT_JSON:

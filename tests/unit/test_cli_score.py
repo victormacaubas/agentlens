@@ -52,8 +52,12 @@ def _write_subagent_transcript(
 
 
 def _install_fake_claude(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, envelopes: Sequence[Mapping[str, object]]
-) -> None:
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    envelopes: Sequence[Mapping[str, object]],
+    directory_name: str = "fake-bin",
+) -> Path:
     """Put a fake ``claude`` executable on ``PATH`` that plays back ``envelopes`` in order.
 
     Once ``envelopes`` is exhausted, its last entry repeats for every further
@@ -61,7 +65,7 @@ def _install_fake_claude(
     ``ClaudeCliJudge`` run end to end through a real ``subprocess.run``, only
     substituting the binary it finds on ``PATH``.
     """
-    bin_dir = tmp_path / "fake-bin"
+    bin_dir = tmp_path / directory_name
     bin_dir.mkdir()
     counter_path = tmp_path / "fake-claude-calls.txt"
     counter_path.write_text("0")
@@ -80,6 +84,7 @@ def _install_fake_claude(
     )
     script.chmod(0o755)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    return counter_path
 
 
 def _scored_envelope() -> dict[str, object]:
@@ -119,11 +124,17 @@ def _stored_verdict_count(store_path: Path) -> int:
         return sum(len(store.read_verdicts_for_session(row.identity.session_id)) for row in rows)
 
 
-def _forbid_subprocess(monkeypatch: pytest.MonkeyPatch) -> None:
-    def _fail(*args: object, **kwargs: object) -> None:
-        raise AssertionError("subprocess.run must not be called")
+def _install_dry_run_canary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    return _install_fake_claude(
+        tmp_path,
+        monkeypatch,
+        envelopes=[_scored_envelope()],
+        directory_name="dryrun-canary-bin",
+    )
 
-    monkeypatch.setattr("subprocess.run", _fail)
+
+def _assert_dry_run_canary_untouched(counter_path: Path) -> None:
+    assert counter_path.read_text() == "0"
 
 
 def test_score_help_exits_0_without_a_traceback(capsys: pytest.CaptureFixture[str]) -> None:
@@ -360,7 +371,7 @@ def test_dryrun_over_an_unscored_window_reports_counts_with_no_judge_process_sta
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path))
-    _forbid_subprocess(monkeypatch)
+    canary_counter = _install_dry_run_canary(tmp_path, monkeypatch)
     now = datetime.now(UTC)
     for raw_id in ("a", "b"):
         path = build_transcript_path(tmp_path, project="project-one", raw_session_id=raw_id)
@@ -379,6 +390,7 @@ def test_dryrun_over_an_unscored_window_reports_counts_with_no_judge_process_sta
     assert document["cost_upper_bound_usd"] == pytest.approx(1.0)
     assert _stored_verdict_count(store_path) == 0
     assert "skip" in captured.err.lower()
+    _assert_dry_run_canary_untouched(canary_counter)
 
 
 def test_dryrun_over_a_fully_reused_window_contributes_nothing_to_the_bound(
@@ -408,7 +420,7 @@ def test_dryrun_over_a_fully_reused_window_contributes_nothing_to_the_bound(
     capsys.readouterr()
     verdicts_before = _stored_verdict_count(store_path)
 
-    _forbid_subprocess(monkeypatch)
+    canary_counter = _install_dry_run_canary(tmp_path, monkeypatch)
     exit_code = main(
         [
             "score",
@@ -431,6 +443,7 @@ def test_dryrun_over_a_fully_reused_window_contributes_nothing_to_the_bound(
     assert document["would_reuse"] == 2
     assert document["cost_upper_bound_usd"] == pytest.approx(0.0)
     assert _stored_verdict_count(store_path) == verdicts_before == 2
+    _assert_dry_run_canary_untouched(canary_counter)
 
 
 def test_dryrun_cost_bound_is_capped_by_the_ceiling_when_the_spawn_count_dominates(
@@ -438,7 +451,7 @@ def test_dryrun_cost_bound_is_capped_by_the_ceiling_when_the_spawn_count_dominat
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path))
-    _forbid_subprocess(monkeypatch)
+    canary_counter = _install_dry_run_canary(tmp_path, monkeypatch)
     now = datetime.now(UTC)
     for i in range(10):
         path = build_transcript_path(tmp_path, project="project-one", raw_session_id=f"s-{i}")
@@ -465,6 +478,7 @@ def test_dryrun_cost_bound_is_capped_by_the_ceiling_when_the_spawn_count_dominat
     document = json.loads(captured.out)
     assert document["would_score"] == 10
     assert document["cost_upper_bound_usd"] == pytest.approx(0.51)
+    _assert_dry_run_canary_untouched(canary_counter)
 
 
 def test_dryrun_bound_reads_as_a_bound_not_an_estimate(
@@ -472,7 +486,7 @@ def test_dryrun_bound_reads_as_a_bound_not_an_estimate(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path))
-    _forbid_subprocess(monkeypatch)
+    canary_counter = _install_dry_run_canary(tmp_path, monkeypatch)
     now = datetime.now(UTC)
     transcript_path = build_transcript_path(tmp_path)
     _write_subagent_transcript(transcript_path, timestamp=_iso(now - timedelta(hours=1)))
@@ -485,6 +499,7 @@ def test_dryrun_bound_reads_as_a_bound_not_an_estimate(
     assert "bound" in captured.out.lower()
     assert "estimate" not in captured.out.lower()
     assert "predict" not in captured.out.lower()
+    _assert_dry_run_canary_untouched(canary_counter)
 
 
 def test_dryrun_writes_neither_a_verdict_nor_a_claim(
@@ -492,7 +507,7 @@ def test_dryrun_writes_neither_a_verdict_nor_a_claim(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path))
-    _forbid_subprocess(monkeypatch)
+    canary_counter = _install_dry_run_canary(tmp_path, monkeypatch)
     now = datetime.now(UTC)
     transcript_path = build_transcript_path(tmp_path)
     _write_subagent_transcript(transcript_path, timestamp=_iso(now - timedelta(hours=1)))
@@ -504,6 +519,7 @@ def test_dryrun_writes_neither_a_verdict_nor_a_claim(
 
     assert exit_code == EXIT_OK
     assert verdicts_before == verdicts_after == 0
+    _assert_dry_run_canary_untouched(canary_counter)
 
 
 def test_dryrun_over_a_never_ingested_transcript_never_writes_the_real_store(
@@ -511,7 +527,7 @@ def test_dryrun_over_a_never_ingested_transcript_never_writes_the_real_store(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path))
-    _forbid_subprocess(monkeypatch)
+    canary_counter = _install_dry_run_canary(tmp_path, monkeypatch)
     now = datetime.now(UTC)
     transcript_path = build_transcript_path(tmp_path)
     _write_subagent_transcript(transcript_path, timestamp=_iso(now - timedelta(hours=1)))
@@ -525,3 +541,4 @@ def test_dryrun_over_a_never_ingested_transcript_never_writes_the_real_store(
         "a dry run over a never-before-ingested transcript must not write its "
         "deterministic facts to the real store, only to a disposable clone"
     )
+    _assert_dry_run_canary_untouched(canary_counter)

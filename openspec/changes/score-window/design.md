@@ -169,7 +169,7 @@ stated order also makes a partial run's result reproducible in a test.
 
 ### The run's spend ceiling and the per-call bound are both set at the composition root
 
-`cli.py` constructs the backend with its per-call bound and passes the same figure
+`cli/score.py` constructs the backend with its per-call bound and passes the same figure
 into the run's request, which needs it to compute the dry-run upper bound.
 
 *Alternative considered:* have `core` read the per-call default from `judge`.

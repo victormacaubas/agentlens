@@ -15,8 +15,8 @@ class ScoringRequest:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class RunJudgeUsage:
-    """Judge usage attributable to one scoring run."""
+class SpawnJudgeUsage:
+    """Judge usage attributable to one spawn scoring attempt."""
 
     cost_usd: float
     input_tokens: int
@@ -49,7 +49,7 @@ class ScoringOutcome:
 
     status: ScoringStatus
     verdict: FactVerdict | None
-    run_judge_usage: RunJudgeUsage
+    spawn_judge_usage: SpawnJudgeUsage
     is_behind_current_input: bool
 
 
@@ -57,12 +57,10 @@ class ScoringOutcome:
 class WindowJudgeUsage:
     """Judge usage aggregated across every spawn one window run attempted.
 
-    Distinct from :class:`RunJudgeUsage`, which despite its name is the
-    usage attributable to a single spawn's own scoring request. A reused or
-    claimed-elsewhere spawn adds nothing, since neither one calls the judge.
-    A failed spawn adds whatever its own call had already spent before its
-    verdict was rejected or its attempt could not reach the judge; that
-    figure is zero unless the judge actually answered.
+    A reused or claimed-elsewhere spawn adds nothing, since neither one calls
+    the judge. A failed spawn adds whatever its own call had already spent
+    before its verdict was rejected or its attempt could not reach the judge;
+    that figure is zero unless the judge actually answered.
     """
 
     cost_usd: float

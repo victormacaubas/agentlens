@@ -8,9 +8,9 @@ from agentlens.models.protocols import Clock
 from agentlens.models.report_aggregates import AgentRollup
 from agentlens.models.report_document import ReportDocument, ReportSpawn
 from agentlens.models.scoring import (
-    RunJudgeUsage,
     ScoringOutcome,
     ScoringStatus,
+    SpawnJudgeUsage,
     WindowJudgeUsage,
     WindowScoringOutcome,
     WindowScoringPreview,
@@ -91,7 +91,7 @@ def _build_spawn_row(
         "unreadable_line_count": session.unreadable_line_count,
     }
     if scoring_outcome is not None:
-        row["run_judge_usage"] = _build_run_judge_usage(scoring_outcome.run_judge_usage)
+        row["run_judge_usage"] = _build_spawn_judge_usage(scoring_outcome.spawn_judge_usage)
         if scoring_outcome.status is ScoringStatus.REUSED:
             row["is_reused"] = True
         if scoring_outcome.is_behind_current_input:
@@ -101,11 +101,11 @@ def _build_spawn_row(
     return row
 
 
-def _build_run_judge_usage(run_judge_usage: RunJudgeUsage) -> dict[str, float | int]:
+def _build_spawn_judge_usage(spawn_judge_usage: SpawnJudgeUsage) -> dict[str, float | int]:
     return {
-        "cost_usd": run_judge_usage.cost_usd,
-        "input_tokens": run_judge_usage.input_tokens,
-        "output_tokens": run_judge_usage.output_tokens,
+        "cost_usd": spawn_judge_usage.cost_usd,
+        "input_tokens": spawn_judge_usage.input_tokens,
+        "output_tokens": spawn_judge_usage.output_tokens,
     }
 
 

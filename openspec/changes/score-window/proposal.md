@@ -66,7 +66,8 @@ Code:
   rather than replacing it.
 - `models/scoring.py`: a run outcome type and a stop-reason enum alongside the
   existing `ScoringStatus` and `ScoringOutcome`.
-- `cli.py`: the new command, its flags, and its place in the single exit-code map.
+- `cli/score.py`: the new command and its flags; `cli/exit_codes.py` keeps the
+  single exit-code map.
 - `render`: the run summary and its JSON form.
 
 Deliberately unaffected:

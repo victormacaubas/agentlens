@@ -59,7 +59,7 @@ three, and stops rather than attempting the rest of the window once that
 bound is reached.** The counter increments on any spawn that ends failed
 (whether from exhausting its retry budget or from an unretried rejected
 verdict) and resets to zero on any spawn that ends scored; a reused or
-claimed-elsewhere spawn touches the counter at all, since neither one calls
+claimed-elsewhere spawn touches neither counter at all, since neither one calls
 the judge and so neither carries any signal about the judge's health. This is
 a behavioral bound, not a classification of causes: it learns "the judge is
 unusable" from the same evidence a human would — the next spawn failing too —

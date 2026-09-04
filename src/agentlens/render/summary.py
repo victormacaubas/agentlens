@@ -4,9 +4,9 @@ from agentlens.models.facts import FactSession, FactVerdict
 from agentlens.models.judging import RubricDimension
 from agentlens.models.report_document import ReportDocument
 from agentlens.models.scoring import (
-    RunJudgeUsage,
     ScoringOutcome,
     ScoringStatus,
+    SpawnJudgeUsage,
     WindowJudgeUsage,
     WindowScoringOutcome,
     WindowScoringPreview,
@@ -88,7 +88,7 @@ def _scoring_lines(
     verdict = scoring_outcome.verdict
     if verdict is not None:
         lines.extend(_verdict_lines(verdict, artifact_path=artifact_path))
-    lines.append(_this_run_judge_usage_line(scoring_outcome.run_judge_usage))
+    lines.append(_this_run_judge_usage_line(scoring_outcome.spawn_judge_usage))
     if verdict is not None:
         lines.append(_analyzed_tokens_line(session))
     return lines
@@ -104,11 +104,11 @@ def _verdict_lines(fact_verdict: FactVerdict, *, artifact_path: Path) -> list[st
     return lines
 
 
-def _this_run_judge_usage_line(run_judge_usage: RunJudgeUsage) -> str:
+def _this_run_judge_usage_line(spawn_judge_usage: SpawnJudgeUsage) -> str:
     return (
-        f"this_run_judge_cost=${run_judge_usage.cost_usd} "
-        f"this_run_judge_input_tokens={run_judge_usage.input_tokens} "
-        f"this_run_judge_output_tokens={run_judge_usage.output_tokens}"
+        f"this_run_judge_cost=${spawn_judge_usage.cost_usd} "
+        f"this_run_judge_input_tokens={spawn_judge_usage.input_tokens} "
+        f"this_run_judge_output_tokens={spawn_judge_usage.output_tokens}"
     )
 
 

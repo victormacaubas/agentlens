@@ -25,7 +25,7 @@ Homepage = "https://github.com/victormacaubas/agentlens"
 Repository = "https://github.com/victormacaubas/agentlens"
 
 [project.scripts]
-agentlens = "agentlens.cli:main"
+agentlens = "agentlens.main:main"
 
 [dependency-groups]
 dev = [
@@ -91,6 +91,7 @@ type = "layers"
 # "|" = independent siblings, ":" = non-independent. Silent footgun: with ":" the
 # four stage packages can import each other and the contract still reports KEPT.
 layers = [
+    "agentlens.main",
     "agentlens.cli",
     "agentlens.core",
     "agentlens.ingest | agentlens.store | agentlens.judge | agentlens.render",
@@ -102,6 +103,7 @@ layers = [
 name = "Only store touches the database driver"
 type = "forbidden"
 source_modules = [
+    "agentlens.main",
     "agentlens.cli",
     "agentlens.core",
     "agentlens.ingest",
@@ -120,6 +122,7 @@ allow_indirect_imports = "true"
 name = "Only judge spawns processes"
 type = "forbidden"
 source_modules = [
+    "agentlens.main",
     "agentlens.cli",
     "agentlens.core",
     "agentlens.ingest",
@@ -139,6 +142,7 @@ allow_indirect_imports = "true"
 name = "Only render templates output"
 type = "forbidden"
 source_modules = [
+    "agentlens.main",
     "agentlens.cli",
     "agentlens.core",
     "agentlens.ingest",
@@ -167,6 +171,7 @@ forbidden_modules = ["agentlens.judge"]
 name = "Only cli parses arguments"
 type = "forbidden"
 source_modules = [
+    "agentlens.main",
     "agentlens.core",
     "agentlens.ingest",
     "agentlens.store",
@@ -176,3 +181,6 @@ source_modules = [
     "agentlens.utils",
 ]
 forbidden_modules = ["click", "argparse"]
+# Direct imports only: main is the public launcher and legitimately reaches Click
+# through cli. Argument parsing still cannot be declared outside the cli package.
+allow_indirect_imports = "true"
