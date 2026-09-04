@@ -39,7 +39,7 @@
 
 ## 3. Bounding the run
 
-- [ ] 3.1 Add the per-spawn attempt budget for a judge that could not be reached, above
+- [x] 3.1 Add the per-spawn attempt budget for a judge that could not be reached, above
   the judge seam so `JudgeBackend.score` stays one invocation and a fake cannot disagree
   with the real backend about how many calls happened. No backoff. Cover: a call that
   fails to reach the judge and then succeeds on a further attempt reporting the spawn as
@@ -51,7 +51,7 @@
   starve the next. Verify the fake records the expected number of invocations for each
   case, since attempt counting is the whole behavior and is invisible in the outcome.
 
-- [ ] 3.2 Add the consecutive-failure bound that stops a run whose judge is unusable,
+- [x] 3.2 Add the consecutive-failure bound that stops a run whose judge is unusable,
   and report the cause once as the run's stop reason rather than as a failure per
   unattempted spawn. Cover: a large window against an absent judge stopping at the bound
   instead of attempting every spawn, and naming that the judge could not be found;
@@ -62,7 +62,7 @@
   that one success resets the counter, which is the property separating an unusable judge
   from an unlucky window and the only reason this bound is safe to set low.
 
-- [ ] 3.3 Accrue completed-call spend against the run ceiling and refuse to start a
+- [x] 3.3 Accrue completed-call spend against the run ceiling and refuse to start a
   further call once it is reached, defaulting the ceiling to $2.00 with
   `--max-run-cost-usd` overriding it. Cover: a run reaching its ceiling with spawns
   remaining, naming the ceiling as the stop reason and reporting the unattempted count;

@@ -48,6 +48,7 @@ from agentlens.models.scoring import (
     ScoringStatus,
     WindowJudgeUsage,
     WindowScoringOutcome,
+    WindowStopReason,
 )
 from agentlens.models.session_facts import SessionFacts
 from agentlens.models.skill_signals import KnownState, SessionSkillSignal
@@ -1223,7 +1224,7 @@ def build_window_scoring_outcome(
     skipped: int = 0,
     failed: int = 0,
     judge_usage: WindowJudgeUsage | None = None,
-    stop_reason: None = None,
+    stop_reason: WindowStopReason | None = None,
     unattempted: int = 0,
 ) -> WindowScoringOutcome:
     return WindowScoringOutcome(

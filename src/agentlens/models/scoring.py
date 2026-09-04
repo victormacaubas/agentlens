@@ -32,6 +32,17 @@ class ScoringStatus(StrEnum):
     FAILED = "failed"
 
 
+class WindowStopReason(StrEnum):
+    """Why a window run stopped before attempting every spawn in its window.
+
+    ``None`` on :class:`WindowScoringOutcome` means the run attempted every
+    spawn it covered; one of these members means it stopped early instead.
+    """
+
+    JUDGE_UNUSABLE = "judge_unusable"
+    COST_CEILING_REACHED = "cost_ceiling_reached"
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ScoringOutcome:
     """The modeled result and spend attributable to one scoring request."""
@@ -61,13 +72,14 @@ class WindowJudgeUsage:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class WindowScoringOutcome:
-    """What happened to every spawn one window run covered.
+    """What happened to every spawn one window run attempted.
 
     ``scored``, ``reused``, ``skipped``, and ``failed`` are counts of
     spawns, never sessions or agent types, and sum to the number of spawns
-    the run covered. ``skipped`` counts ``ScoringStatus.CLAIMED_ELSEWHERE``.
-    Nothing stops a run before it covers its whole window yet, so
-    ``stop_reason`` is always ``None`` and ``unattempted`` is always ``0``.
+    the run attempted. ``skipped`` counts ``ScoringStatus.CLAIMED_ELSEWHERE``.
+    ``stop_reason`` is ``None`` when the run attempted every spawn in its
+    window; otherwise it names why the run stopped early, and
+    ``unattempted`` counts the spawns the run never reached.
     """
 
     scored: int
@@ -75,5 +87,5 @@ class WindowScoringOutcome:
     skipped: int
     failed: int
     judge_usage: WindowJudgeUsage
-    stop_reason: None
+    stop_reason: WindowStopReason | None
     unattempted: int
