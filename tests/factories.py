@@ -42,7 +42,14 @@ from agentlens.models.report_aggregates import (
     WeightedProportion,
 )
 from agentlens.models.report_document import REPORT_SCHEMA_VERSION, ReportDocument, ReportSpawn
-from agentlens.models.scoring import RunJudgeUsage, ScoringOutcome, ScoringStatus
+from agentlens.models.scoring import (
+    ScoringOutcome,
+    ScoringStatus,
+    SpawnJudgeUsage,
+    WindowJudgeUsage,
+    WindowScoringOutcome,
+    WindowStopReason,
+)
 from agentlens.models.session_facts import SessionFacts
 from agentlens.models.skill_signals import KnownState, SessionSkillSignal
 from agentlens.models.windows import DEFAULT_MIN_SESSIONS_FOR_TREND, ResolvedWindow, WindowSelector
@@ -1151,13 +1158,13 @@ def build_fact_verdict(
     )
 
 
-def build_run_judge_usage(
+def build_spawn_judge_usage(
     *,
     cost_usd: float = 0.011002,
     input_tokens: int = 675,
     output_tokens: int = 52,
-) -> RunJudgeUsage:
-    return RunJudgeUsage(
+) -> SpawnJudgeUsage:
+    return SpawnJudgeUsage(
         cost_usd=cost_usd,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
@@ -1168,7 +1175,7 @@ def build_scoring_outcome(
     *,
     status: ScoringStatus = ScoringStatus.SCORED,
     verdict: FactVerdict | None = None,
-    run_judge_usage: RunJudgeUsage | None = None,
+    spawn_judge_usage: SpawnJudgeUsage | None = None,
     is_behind_current_input: bool = False,
 ) -> ScoringOutcome:
     resolved_verdict = (
@@ -1176,12 +1183,12 @@ def build_scoring_outcome(
         if verdict is None and status in {ScoringStatus.SCORED, ScoringStatus.REUSED}
         else verdict
     )
-    resolved_run_judge_usage = (
-        run_judge_usage
-        if run_judge_usage is not None
-        else build_run_judge_usage(cost_usd=0.0, input_tokens=0, output_tokens=0)
+    resolved_spawn_judge_usage = (
+        spawn_judge_usage
+        if spawn_judge_usage is not None
+        else build_spawn_judge_usage(cost_usd=0.0, input_tokens=0, output_tokens=0)
         if status in {ScoringStatus.REUSED, ScoringStatus.CLAIMED_ELSEWHERE}
-        else build_run_judge_usage(
+        else build_spawn_judge_usage(
             cost_usd=resolved_verdict.judge_cost_usd if resolved_verdict is not None else 0.011002,
             input_tokens=resolved_verdict.judge_input_tokens if resolved_verdict is not None else 0,
             output_tokens=resolved_verdict.judge_output_tokens
@@ -1192,8 +1199,42 @@ def build_scoring_outcome(
     return ScoringOutcome(
         status=status,
         verdict=resolved_verdict,
-        run_judge_usage=resolved_run_judge_usage,
+        spawn_judge_usage=resolved_spawn_judge_usage,
         is_behind_current_input=is_behind_current_input,
+    )
+
+
+def build_window_judge_usage(
+    *,
+    cost_usd: float = 0.0,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+) -> WindowJudgeUsage:
+    return WindowJudgeUsage(
+        cost_usd=cost_usd,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+    )
+
+
+def build_window_scoring_outcome(
+    *,
+    scored: int = 0,
+    reused: int = 0,
+    skipped: int = 0,
+    failed: int = 0,
+    judge_usage: WindowJudgeUsage | None = None,
+    stop_reason: WindowStopReason | None = None,
+    unattempted: int = 0,
+) -> WindowScoringOutcome:
+    return WindowScoringOutcome(
+        scored=scored,
+        reused=reused,
+        skipped=skipped,
+        failed=failed,
+        judge_usage=judge_usage if judge_usage is not None else build_window_judge_usage(),
+        stop_reason=stop_reason,
+        unattempted=unattempted,
     )
 
 

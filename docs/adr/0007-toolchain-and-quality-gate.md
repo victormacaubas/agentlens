@@ -47,7 +47,7 @@ One config file (`pyproject.toml`), no overlapping tools: no Black, no isort.
 - pytest `--strict-markers`, so a typo'd marker is an error rather than a test
   that silently never runs, and `-m 'not integration'` by default.
 
-**Five import contracts** encode ADR 0001 and ADR 0002:
+**Six import contracts** encode ADR 0001 and ADR 0002:
 
 | Contract | Encodes |
 |---|---|
@@ -55,6 +55,7 @@ One config file (`pyproject.toml`), no overlapping tools: no Black, no isort.
 | `Only store touches the database driver` | `sqlite3` confined to `store` |
 | `Only judge spawns processes` | `subprocess` confined to `judge` |
 | `Only render templates output` | `jinja2` confined to `render` |
+| `The deterministic report path never reaches the judge` | report generation remains measured-only |
 | `Only cli parses arguments` | `click` and `argparse` confined to `cli` |
 
 **One gate command: `make check`.** Five steps, cheapest first, so a formatting

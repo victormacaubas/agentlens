@@ -17,10 +17,10 @@ from tests.factories import (
     build_report_document,
     build_report_spawn,
     build_resolved_window,
-    build_run_judge_usage,
     build_scoring_outcome,
     build_session_facts,
     build_session_skill_signal,
+    build_spawn_judge_usage,
     build_suggested_fix,
     build_verdict,
     build_window_selector,
@@ -236,7 +236,7 @@ def test_failed_document_serializes_its_run_usage_without_a_verdict() -> None:
         clock=FakeClock(instant=datetime(2026, 1, 1, tzinfo=UTC)),
         scoring_outcome=build_scoring_outcome(
             status=ScoringStatus.FAILED,
-            run_judge_usage=build_run_judge_usage(
+            spawn_judge_usage=build_spawn_judge_usage(
                 cost_usd=0.045,
                 input_tokens=200,
                 output_tokens=40,

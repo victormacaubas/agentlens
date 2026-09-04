@@ -63,8 +63,8 @@ fallback. A defaulted seam means a test that forgets to inject silently
 constructs the real thing, and for a paid judge that is a bill you discover
 later.
 
-**One composition root:** `cli.py`. It is the only module that constructs
-concrete implementations. Nothing below it builds its own collaborators.
+**One composition root:** the `cli` package. It is the only package that
+constructs concrete implementations. Nothing below it builds its own collaborators.
 
 **A Protocol earns its place by having two implementations.** This ADR declares
 the Protocols; the change that writes each real implementation writes its fake in
@@ -72,10 +72,10 @@ the Protocols; the change that writes each real implementation writes its fake i
 
 ## Consequences
 
-- **`cli.py` knows about every concrete implementation.** That is the point, one
-  place to read to learn what the program is actually made of, and it is also
-  the thing that gets unwieldy first. When it does, the fix is a `build_*` factory
-  that `cli.py` calls, not letting `core` construct its own judge.
+- **The `cli` package knows about every concrete implementation.** That is the
+  point, one place to read to learn what the program is actually made of, and it
+  is also the thing that gets unwieldy first. When it does, the fix is a
+  `build_*` factory inside `cli`, not letting `core` construct its own judge.
 - **The `claude` CLI contract is verified by exactly one test that needs the real
   binary.** If that canary is skipped in CI (no `claude` installed, no auth), the
   execution wrapper is effectively untested and a flag-name change in the CLI

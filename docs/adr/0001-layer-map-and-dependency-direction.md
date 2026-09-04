@@ -36,6 +36,7 @@ architecture diagram and the import contract say the same thing.
 
 | Package | May import | Owns |
 |---|---|---|
+| `main` | `cli` | public console-script target; no application logic |
 | `cli` | everything below | command definitions, exit-code mapping, composition root |
 | `core` | `ingest`, `store`, `judge`, `render`, `models`, `utils` | orchestration: the ingest run, the scoring run, report assembly, window resolution |
 | `ingest` | `models`, `utils` | `.claude/` discovery, JSONL parsing, snapshot integrity, name resolution |
@@ -66,8 +67,9 @@ contracts in `pyproject.toml`, checked by `import-linter` via `make check`.
 Per-technology ownership is enforced by the forbidden contracts in the same
 file.
 
-`cli` starts as a single module (`cli.py`) rather than a package. It becomes a
-package when it exceeds a few hundred lines; the contract holds either way.
+`main.py` is the public console-script target and imports only from `cli`. The `cli`
+package owns command definitions, concrete construction, and dispatch; keeping that
+policy out of `main.py` preserves one composition root.
 
 ## Consequences
 

@@ -1,8 +1,4 @@
-"""The ``report`` subcommand's argument parser.
-
-Not yet reachable from ``agentlens.cli.main``; that wiring belongs to a later
-change slice. These tests exercise ``parse_report_args`` directly.
-"""
+"""The ``report`` subcommand's argument parser."""
 
 from pathlib import Path
 

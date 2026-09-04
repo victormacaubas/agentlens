@@ -19,6 +19,7 @@ Product intent is in `docs/agentlens-design.md`. Architectural decisions are in
 
 | Package | May import | Owns |
 |---|---|---|
+| `main` | `cli` | public console-script target; no application logic |
 | `cli` | everything below | command definitions, exit-code mapping, composition root |
 | `core` | `ingest`, `store`, `judge`, `render`, `models`, `utils` | orchestration: the ingest run, the scoring run, report assembly, window resolution |
 | `ingest` | `models`, `utils` | `.claude/` discovery, JSONL parsing, snapshot integrity, name resolution |
@@ -73,7 +74,7 @@ too. Judge new candidates by the rule, not by comparison to the list.
   `judge: JudgeBackend | None = None` with a fallback. A defaulted seam means a
   test that forgets to inject silently constructs the real thing, and the judge
   costs money.
-- **`cli.py` is the only composition root.** Nothing below it constructs its own
+- **The `cli` package is the only composition root.** Nothing below it constructs its own
   collaborators.
 - **A Protocol earns its place by having two implementations.** The change that
   writes a real implementation writes its fake in `tests/fakes.py` in the same
@@ -96,12 +97,13 @@ breaking.
   A bare builtin forces callers into `except ValueError`, which catches every
   unrelated failure in the stack and reports it as the expected one. Programmer
   errors that should crash are the exception; those are not for callers to catch.
-- **Exit-code mapping lives in exactly one place** in `cli.py`, never per command.
+- **Exit-code mapping lives in exactly one place** in `cli/exit_codes.py`, never per command.
 
 ## CLI entrypoint
 
-`cli.py` parses arguments, builds config, and hands off. A branch that decides
-*what work happens* belongs in `core`.
+Root `main.py` only exposes the CLI's `main` function as the installed console-script
+target. The `cli` package parses arguments, builds config, and hands off. A branch that
+decides *what work happens* belongs in `core`.
 
 - **`main(argv: list[str] | None = None) -> int`**, with `sys.exit(main())` at the
   bottom. Returning a code keeps `main` testable; calling `sys.exit` from inside

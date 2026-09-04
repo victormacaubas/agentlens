@@ -36,7 +36,8 @@ store except by way of `core`. Every cross-stage flow therefore passes through
 windows. `core` orchestrates; it does not compute. `cli` parses arguments, maps
 exit codes, and wires the program together. `models` and `utils` sit at the
 bottom holding domain types, Protocols, and leaf helpers, with no in-project
-dependencies of their own.
+dependencies of their own. Root `main.py` is the installed console-script target
+and only forwards to `cli`.
 
 A package that owns an external technology owns its types, so nothing
 `sqlite3`-shaped leaves `store`, nothing `subprocess`-shaped leaves `judge`, and
@@ -77,8 +78,8 @@ threading one `now` argument down through three layers is the tell that a value
 wants injecting instead.
 
 Injection is required, never defaulted, so a test that forgets to inject fails
-loudly instead of quietly constructing a real, paid judge. `cli.py` is the only
-composition root; nothing below it constructs its own collaborators.
+loudly instead of quietly constructing a real, paid judge. The `cli` package is
+the only composition root; nothing below it constructs its own collaborators.
 
 The filesystem, the store, and `subprocess` were each considered and rejected as
 seams. ADR 0004 carries the rule that decides membership, and a new candidate
@@ -94,10 +95,10 @@ tool branch on them.
 
 Each package translates foreign exceptions at its own boundary: `store` catches
 `sqlite3.Error`, `judge` catches process and JSON decoding failures, `ingest`
-catches `OSError` and malformed records. The signal that this has eroded is
-`cli.py` catching a driver exception, at which point that driver has become part
-of the CLI's own contract. Exit-code mapping lives in exactly one place in
-`cli.py`, never per command.
+catches `OSError` and malformed records. The signal that this has eroded is the
+`cli` package catching a driver exception, at which point that driver has become
+part of the CLI's own contract. Exit-code mapping lives in exactly one place in
+`cli/exit_codes.py`, never per command.
 
 Not every failure is an exception. A stale snapshot is a decision to skip a
 replacement, so it is a return value.
@@ -115,3 +116,4 @@ replacement, so it is a return value.
 | [0007. Toolchain and quality gate](adr/0007-toolchain-and-quality-gate.md) | The single gate command, the import contracts that encode ADRs 0001 and 0002, strict typing over `src` and `tests`, and why a new contract must be proven to fail before it is trusted to pass. Also why passing the gate is not the same as being done. |
 | [0008. Session row derivation](adr/0008-session-row-derivation.md) | `fact_session` rows are derived wholly in Python inside `ingest`, never partly in SQL. Open this before adding a derived session field or considering a backfill query. |
 | [0009. Judge invocation bounds and model resolution](adr/0009-judge-invocation-bounds-and-model-resolution.md) | The hardened `claude -p` invocation as verified against a real CLI: `--settings` for auth under `--bare`, `--max-budget-usd` in place of the nonexistent `--max-turns`, why the timeout and spend ceiling live on `ClaudeCliJudge` rather than the `JudgeBackend` Protocol, and why the resolved model is read from `modelUsage` rather than the requested alias. Open this before touching the invocation or re-verifying it against a new CLI release. |
+| [0010. Window-run retry policy, consecutive-failure breaker, and spend ceiling](adr/0010-window-run-retry-breaker-and-spend-ceiling.md) | Why `agentlens score` retries an unreachable judge per spawn but never a rejected verdict, the consecutive-failure bound that stops a run whose judge looks unusable, and the run-level cost ceiling that is a stop signal rather than a guarantee. Supersedes #26's "no retry policy." Open this before changing any of the three bounds or adding backoff. |

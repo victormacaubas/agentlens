@@ -16,9 +16,9 @@ from tests.factories import (
     build_report_document,
     build_report_spawn,
     build_resolved_window,
-    build_run_judge_usage,
     build_scoring_outcome,
     build_session_facts,
+    build_spawn_judge_usage,
     build_suggested_fix,
     build_verdict,
 )
@@ -138,7 +138,7 @@ def test_scored_summary_reports_judge_cost_and_tokens() -> None:
         artifact_path=Path("reports/session_x.json"),
         scoring_outcome=build_scoring_outcome(
             verdict=fact_verdict,
-            run_judge_usage=build_run_judge_usage(
+            spawn_judge_usage=build_spawn_judge_usage(
                 cost_usd=0.0123,
                 input_tokens=200,
                 output_tokens=40,
@@ -157,7 +157,7 @@ def test_failed_summary_formats_its_run_usage_without_a_verdict() -> None:
         artifact_path=Path("reports/session_x.json"),
         scoring_outcome=build_scoring_outcome(
             status=ScoringStatus.FAILED,
-            run_judge_usage=build_run_judge_usage(
+            spawn_judge_usage=build_spawn_judge_usage(
                 cost_usd=0.045,
                 input_tokens=200,
                 output_tokens=40,
