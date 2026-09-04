@@ -42,7 +42,13 @@ from agentlens.models.report_aggregates import (
     WeightedProportion,
 )
 from agentlens.models.report_document import REPORT_SCHEMA_VERSION, ReportDocument, ReportSpawn
-from agentlens.models.scoring import RunJudgeUsage, ScoringOutcome, ScoringStatus
+from agentlens.models.scoring import (
+    RunJudgeUsage,
+    ScoringOutcome,
+    ScoringStatus,
+    WindowJudgeUsage,
+    WindowScoringOutcome,
+)
 from agentlens.models.session_facts import SessionFacts
 from agentlens.models.skill_signals import KnownState, SessionSkillSignal
 from agentlens.models.windows import DEFAULT_MIN_SESSIONS_FOR_TREND, ResolvedWindow, WindowSelector
@@ -1194,6 +1200,40 @@ def build_scoring_outcome(
         verdict=resolved_verdict,
         run_judge_usage=resolved_run_judge_usage,
         is_behind_current_input=is_behind_current_input,
+    )
+
+
+def build_window_judge_usage(
+    *,
+    cost_usd: float = 0.0,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+) -> WindowJudgeUsage:
+    return WindowJudgeUsage(
+        cost_usd=cost_usd,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+    )
+
+
+def build_window_scoring_outcome(
+    *,
+    scored: int = 0,
+    reused: int = 0,
+    skipped: int = 0,
+    failed: int = 0,
+    judge_usage: WindowJudgeUsage | None = None,
+    stop_reason: None = None,
+    unattempted: int = 0,
+) -> WindowScoringOutcome:
+    return WindowScoringOutcome(
+        scored=scored,
+        reused=reused,
+        skipped=skipped,
+        failed=failed,
+        judge_usage=judge_usage if judge_usage is not None else build_window_judge_usage(),
+        stop_reason=stop_reason,
+        unattempted=unattempted,
     )
 
 
