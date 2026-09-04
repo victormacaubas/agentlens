@@ -3,7 +3,14 @@ from pathlib import Path
 from agentlens.models.facts import FactSession, FactVerdict
 from agentlens.models.judging import RubricDimension
 from agentlens.models.report_document import ReportDocument
-from agentlens.models.scoring import RunJudgeUsage, ScoringOutcome, ScoringStatus
+from agentlens.models.scoring import (
+    RunJudgeUsage,
+    ScoringOutcome,
+    ScoringStatus,
+    WindowJudgeUsage,
+    WindowScoringOutcome,
+    WindowScoringPreview,
+)
 from agentlens.models.session_facts import SessionFacts
 
 UNSCORED_NOTICE = "scoring: unscored, no judge has run for this spawn"
@@ -155,3 +162,50 @@ def build_report_summary(document: ReportDocument, *, artifact_path: Path) -> st
     )
     lines.append(f"artifact: {artifact_path}")
     return "\n".join(lines)
+
+
+def build_window_scoring_summary(outcome: WindowScoringOutcome) -> str:
+    """Build the readable terminal summary of one window scoring run.
+
+    Names how many spawns the run covered, the four per-status counts, and
+    the run's own judge spend in dollars and tokens -- the run's real spend,
+    distinct from an analyzed spawn's own token usage, which never carries a
+    currency figure. Names the stop reason and unattempted count only when
+    the run stopped before covering its whole window. Carries no per-spawn
+    verdict content: evidence, fixes, and scores stay on the single-spawn
+    surface.
+    """
+    total_covered = outcome.scored + outcome.reused + outcome.skipped + outcome.failed
+    lines = [
+        f"covered: {total_covered} spawn(s)",
+        (
+            f"scored={outcome.scored} reused={outcome.reused} "
+            f"skipped={outcome.skipped} failed={outcome.failed}"
+        ),
+        _window_judge_usage_line(outcome.judge_usage),
+    ]
+    if outcome.stop_reason is not None:
+        lines.append(
+            f"stop_reason: {outcome.stop_reason.value} (unattempted={outcome.unattempted})"
+        )
+    return "\n".join(lines)
+
+
+def _window_judge_usage_line(judge_usage: WindowJudgeUsage) -> str:
+    return (
+        f"run_judge_cost=${judge_usage.cost_usd} "
+        f"run_judge_input_tokens={judge_usage.input_tokens} "
+        f"run_judge_output_tokens={judge_usage.output_tokens}"
+    )
+
+
+def build_window_scoring_preview_summary(preview: WindowScoringPreview) -> str:
+    """Build the readable terminal summary of a window scoring dry run.
+
+    Presents ``cost_bound_usd`` as an upper bound a real run could reach,
+    never as an estimate or a prediction of what it would actually spend.
+    """
+    return (
+        f"would_score={preview.would_score} would_reuse={preview.would_reuse}\n"
+        f"cost_upper_bound_usd=${preview.cost_bound_usd}"
+    )

@@ -29,11 +29,12 @@ from agentlens.models.scoring import (
     ScoringStatus,
     WindowJudgeUsage,
     WindowScoringOutcome,
+    WindowScoringPreview,
     WindowStopReason,
 )
 from agentlens.models.session_facts import SessionFacts
 from agentlens.models.windows import ResolvedWindow
-from agentlens.store import Store
+from agentlens.store import Store, open_disposable_clone
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +140,7 @@ def score_window(
         clock=clock,
         window=window,
         agent_type=agent_type,
+        dry_run=False,
     )
     ordered_rows = sorted(rows, key=lambda row: (row.started_at, row.identity.session_id))
     logger.info(
@@ -174,6 +176,12 @@ def score_window(
             bundle, stored, store_path=store_path, clock=clock, judge=judge, request=request
         )
         tally.record(outcome)
+        logger.info(
+            "Scored spawn session_id=%s agent_type=%s status=%s",
+            session_id,
+            stored.session.agent_type,
+            outcome.status.value,
+        )
 
         if outcome.status is ScoringStatus.FAILED:
             consecutive_failures += 1
@@ -204,6 +212,88 @@ def score_window(
     return tally.to_outcome()
 
 
+def preview_window_scoring(
+    *,
+    projects_root: Path,
+    claude_root: Path,
+    store_path: Path,
+    clock: Clock,
+    request: ScoringRequest,
+    agent_type: str | None,
+    window: ResolvedWindow,
+    per_call_cost_usd_bound: float,
+    max_run_cost_usd: float = DEFAULT_MAX_RUN_COST_USD,
+) -> WindowScoringPreview:
+    """Preview a scoring run over ``window`` without a judge or a rejected write.
+
+    Discovers, parses, and ingests every subagent source exactly as
+    :func:`score_window` does, except the batch is applied to a disposable
+    clone of ``store_path`` rather than ``store_path`` itself, so a newly
+    discovered transcript's deterministic facts are never written to the
+    real store during a preview. Existing verdicts are read from the real
+    store, since they already exist regardless of this preview and are
+    exactly what a real run would also find. Decides would-score versus
+    would-reuse for each spawn through :meth:`SpawnScoringRun.check_reusable`,
+    which only reads: no claim is acquired and no judge is constructed or
+    called. ``cost_bound_usd`` is the smaller of ``would_score`` times
+    ``per_call_cost_usd_bound`` and ``max_run_cost_usd`` plus one call's own
+    bound, presented as an upper bound the run could reach rather than an
+    estimate of what it would actually spend.
+
+    Raises:
+        ~agentlens.errors.SourceError: A discovered transcript or a shaping
+            input it depends on could not be read soundly.
+        ~agentlens.errors.StoreError: The store could not be opened or read,
+            or a windowed spawn matched no discovered source.
+    """
+    session_id_to_bundle, rows = _ingest_and_read_window(
+        projects_root=projects_root,
+        claude_root=claude_root,
+        store_path=store_path,
+        clock=clock,
+        window=window,
+        agent_type=agent_type,
+        dry_run=True,
+    )
+    ordered_rows = sorted(rows, key=lambda row: (row.started_at, row.identity.session_id))
+
+    would_score = 0
+    would_reuse = 0
+    checker = SpawnScoringRun(store_path=store_path, clock=clock, judge=None, request=request)
+    for row in ordered_rows:
+        session_id = row.identity.session_id
+        bundle = session_id_to_bundle.get(session_id)
+        if bundle is None:
+            raise StoreError(
+                f"windowed spawn {session_id!r} matches no source bundle discovered "
+                f"under {projects_root}"
+            )
+        stored = SessionFacts(session=row, tool_events=(), skill_signals=())
+        if checker.check_reusable(bundle, stored) is not None:
+            would_reuse += 1
+        else:
+            would_score += 1
+
+    cost_bound_usd = min(
+        would_score * per_call_cost_usd_bound, max_run_cost_usd + per_call_cost_usd_bound
+    )
+    logger.info(
+        "Dry run over window [%s, %s) agent_type=%s skips writing %d verdict(s) and "
+        "%d claim(s); would_score=%d would_reuse=%d cost_upper_bound_usd=%.2f",
+        window.current_start,
+        window.current_end,
+        agent_type,
+        would_score,
+        would_score,
+        would_score,
+        would_reuse,
+        cost_bound_usd,
+    )
+    return WindowScoringPreview(
+        would_score=would_score, would_reuse=would_reuse, cost_bound_usd=cost_bound_usd
+    )
+
+
 def _ingest_and_read_window(
     *,
     projects_root: Path,
@@ -212,6 +302,7 @@ def _ingest_and_read_window(
     clock: Clock,
     window: ResolvedWindow,
     agent_type: str | None,
+    dry_run: bool,
 ) -> tuple[dict[str, SubagentSourceBundle], tuple[FactSession, ...]]:
     bundles = discover_subagent_sources(projects_root)
     context_cache = SubagentContextCache(claude_root)
@@ -221,11 +312,18 @@ def _ingest_and_read_window(
         for bundle, fact in zip(bundles, facts, strict=True)
     }
 
-    with Store(store_path, clock=clock) as store:
-        outcomes = store.upsert_batch(
-            definitions=context_cache.discovered_definitions(), facts=facts
-        )
-        rows = store.read_spawns_in_window(window.current_start, window.current_end, agent_type)
+    if dry_run:
+        with open_disposable_clone(store_path, clock=clock) as store:
+            outcomes = store.upsert_batch(
+                definitions=context_cache.discovered_definitions(), facts=facts
+            )
+            rows = store.read_spawns_in_window(window.current_start, window.current_end, agent_type)
+    else:
+        with Store(store_path, clock=clock) as store:
+            outcomes = store.upsert_batch(
+                definitions=context_cache.discovered_definitions(), facts=facts
+            )
+            rows = store.read_spawns_in_window(window.current_start, window.current_end, agent_type)
     logger.info("Window scoring ingest applied %d subagent source(s)", len(outcomes))
     return session_id_to_bundle, rows
 

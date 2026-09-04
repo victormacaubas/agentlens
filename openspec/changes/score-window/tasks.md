@@ -77,7 +77,7 @@
 
 ## 4. The command and its surfaces
 
-- [ ] 4.1 Add the `score` command to `cli.py` as the composition root: the window
+- [x] 4.1 Add the `score` command to `cli.py` as the composition root: the window
   selectors declared as a mutually exclusive group rather than hand-validated, `--agent`,
   `--judge-model`, `--max-run-cost-usd`, `--store`, `--format json`, and `--dryrun`. It
   constructs the judge with its per-call bound and passes that same figure into the run's
@@ -96,7 +96,7 @@
   strings, and verify the exit-code mapping is still the single one in `cli.py` rather
   than a second copy for this command.
 
-- [ ] 4.2 Add the run summary to `render` in both the thin terminal form and the JSON
+- [x] 4.2 Add the run summary to `render` in both the thin terminal form and the JSON
   form, keeping stdout to the machine-readable surface and everything about how the run
   went on the diagnostic stream. Cover: the four statuses distinguishable from each other
   without inferring from cost, since reused and claimed-elsewhere both spent zero; counts
@@ -112,7 +112,7 @@
   branch for `FAILED` that has never executed; check it against what 2.1 actually
   produces rather than assuming it was written correctly against a dead path.
 
-- [ ] 4.3 Extend `--dryrun` to the run, reporting the count it would score, the count it
+- [x] 4.3 Extend `--dryrun` to the run, reporting the count it would score, the count it
   would reuse, and an upper bound on cost derived from the per-call and run bounds,
   presented as a bound rather than an estimate. Cover: a dry run over an unscored window
   reporting both counts with no judge process started; a dry run over a fully reused

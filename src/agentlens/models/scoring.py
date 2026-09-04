@@ -89,3 +89,18 @@ class WindowScoringOutcome:
     judge_usage: WindowJudgeUsage
     stop_reason: WindowStopReason | None
     unattempted: int
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class WindowScoringPreview:
+    """What a scoring run over a window would do, without calling the judge.
+
+    ``cost_bound_usd`` is an upper bound a real run over the same window
+    could reach, never an estimate of what it would actually spend: the
+    smaller of ``would_score`` times the per-call spend bound and the run
+    ceiling plus one call's own bound.
+    """
+
+    would_score: int
+    would_reuse: int
+    cost_bound_usd: float

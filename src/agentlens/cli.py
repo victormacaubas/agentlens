@@ -12,6 +12,11 @@ import click
 
 from agentlens.core.report import generate_report
 from agentlens.core.session import FORMAT_JSON, analyze_session
+from agentlens.core.window_scoring import (
+    DEFAULT_MAX_RUN_COST_USD,
+    preview_window_scoring,
+    score_window,
+)
 from agentlens.core.windows import resolve_local_timezone, resolve_window
 from agentlens.errors import (
     AgentlensError,
@@ -20,11 +25,24 @@ from agentlens.errors import (
     SourceError,
     StoreError,
 )
-from agentlens.judge.cli_backend import DEFAULT_TIMEOUT_S, ClaudeCliJudge
+from agentlens.judge.cli_backend import (
+    DEFAULT_SPEND_CEILING_USD,
+    DEFAULT_TIMEOUT_S,
+    ClaudeCliJudge,
+)
 from agentlens.models.claims import CLAIM_LEASE_MARGIN_S
 from agentlens.models.protocols import JudgeBackend
-from agentlens.models.scoring import ScoringRequest
+from agentlens.models.scoring import ScoringRequest, WindowStopReason
 from agentlens.models.windows import NAMED_WINDOW_THIS_WEEK, WindowSelector
+from agentlens.render.document import (
+    build_window_scoring_document_json,
+    build_window_scoring_preview_document_json,
+    render_document_json,
+)
+from agentlens.render.summary import (
+    build_window_scoring_preview_summary,
+    build_window_scoring_summary,
+)
 from agentlens.utils.clock import SystemClock
 
 logger = logging.getLogger(__name__)
@@ -42,6 +60,7 @@ EXIT_CODES: dict[type[AgentlensError], int] = {
 }
 SESSION_SUBCOMMAND = "session"
 REPORT_SUBCOMMAND = "report"
+SCORE_SUBCOMMAND = "score"
 _STORE_DB_FILENAME = "agentlens.db"
 _SCORING_OWNER_TOKEN_BYTES: Final = 16
 
@@ -450,6 +469,263 @@ def parse_report_args(argv: Sequence[str]) -> ReportArgs:
         raise click.UsageError(f"expected the {REPORT_SUBCOMMAND!r} subcommand")
     context = _REPORT_COMMAND.make_context("agentlens report", list(argv[1:]))
     return _report_args_from_params(context.params)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ScoreArgs:
+    """The parsed arguments for the ``score`` subcommand."""
+
+    selector: WindowSelector
+    agent: str | None
+    requested_model: str
+    max_run_cost_usd: float
+    store_path: Path | None
+    output_format: str | None
+    dry_run: bool
+
+
+def _run_score(args: ScoreArgs) -> int:
+    """Resolve concrete collaborators for one ``score`` run and execute it.
+
+    Resolves the local timezone and the requested window once at this
+    CLI/core boundary, logs the resolved arguments once at INFO, then either
+    previews the run (``args.dry_run``) or scores it for real and prints the
+    rendered outcome.
+
+    A completed run, or one that stopped at its cost ceiling, exits
+    ``EXIT_OK`` regardless of how many spawns it scored, reused, skipped, or
+    failed: the failed count in the printed outcome is what a caller
+    branches on. A run that stopped because the judge was unusable exits
+    with the judge failure code instead.
+
+    Raises:
+        ~agentlens.errors.AgentlensError: Propagated from the core workflow
+            so ``main`` can map it to the corresponding exit code.
+    """
+    store_path = args.store_path if args.store_path is not None else default_store_path()
+    claude_root = default_claude_root()
+    projects_root = claude_root / "projects"
+    clock = SystemClock()
+    local_timezone = resolve_local_timezone(clock=clock)
+    window = resolve_window(args.selector, clock=clock, local_timezone=local_timezone)
+    scoring_owner = secrets.token_urlsafe(_SCORING_OWNER_TOKEN_BYTES)
+    request = ScoringRequest(
+        requested_model=args.requested_model,
+        owner=scoring_owner,
+        claim_lease=timedelta(seconds=DEFAULT_TIMEOUT_S + CLAIM_LEASE_MARGIN_S),
+    )
+
+    logger.info(
+        "Resolved score arguments: %s",
+        json.dumps(
+            {
+                "selector": {
+                    "since_duration": args.selector.since_duration,
+                    "named_window": args.selector.named_window,
+                    "range_from": args.selector.range_from,
+                    "range_to": args.selector.range_to,
+                },
+                "current_start": window.current_start.isoformat(),
+                "current_end": window.current_end.isoformat(),
+                "agent": args.agent,
+                "requested_model": args.requested_model,
+                "max_run_cost_usd": args.max_run_cost_usd,
+                "store": str(store_path),
+                "format": args.output_format,
+                "dry_run": args.dry_run,
+                "owner": scoring_owner,
+            }
+        ),
+    )
+
+    if args.dry_run:
+        preview = preview_window_scoring(
+            projects_root=projects_root,
+            claude_root=claude_root,
+            store_path=store_path,
+            clock=clock,
+            request=request,
+            agent_type=args.agent,
+            window=window,
+            per_call_cost_usd_bound=DEFAULT_SPEND_CEILING_USD,
+            max_run_cost_usd=args.max_run_cost_usd,
+        )
+        if args.output_format == FORMAT_JSON:
+            print(render_document_json(build_window_scoring_preview_document_json(preview)))
+        else:
+            print(build_window_scoring_preview_summary(preview))
+        return EXIT_OK
+
+    judge = ClaudeCliJudge(timeout_s=DEFAULT_TIMEOUT_S)
+    outcome = score_window(
+        projects_root=projects_root,
+        claude_root=claude_root,
+        store_path=store_path,
+        clock=clock,
+        judge=judge,
+        request=request,
+        agent_type=args.agent,
+        window=window,
+        max_run_cost_usd=args.max_run_cost_usd,
+    )
+    if args.output_format == FORMAT_JSON:
+        print(render_document_json(build_window_scoring_document_json(outcome)))
+    else:
+        print(build_window_scoring_summary(outcome))
+
+    if outcome.stop_reason is WindowStopReason.JUDGE_UNUSABLE:
+        return EXIT_CODES[JudgeError]
+    return EXIT_OK
+
+
+def _score_args_from_params(params: Mapping[str, object]) -> ScoreArgs:
+    """Build a validated ``ScoreArgs`` from a ``score`` command's parsed parameters.
+
+    Shared by :func:`parse_score_args`, which reads parameters off a
+    manually built context, and :func:`_score_callback`, which receives them
+    as keyword arguments from Click's own dispatch, so the single-window-form
+    validation is enforced identically on both paths.
+    """
+    selector = WindowSelector(
+        since_duration=cast("str | None", params["since_duration"]),
+        named_window=cast("str | None", params["named_window"]),
+        range_from=cast("str | None", params["range_from"]),
+        range_to=cast("str | None", params["range_to"]),
+    )
+    _require_single_window_form(selector)
+    return ScoreArgs(
+        selector=selector,
+        agent=cast("str | None", params["agent"]),
+        requested_model=cast(str, params["requested_model"]),
+        max_run_cost_usd=cast(float, params["max_run_cost_usd"]),
+        store_path=cast("Path | None", params["store_path"]),
+        output_format=cast("str | None", params["output_format"]),
+        dry_run=cast(bool, params["dry_run"]),
+    )
+
+
+def _score_callback(
+    *,
+    since_duration: str | None,
+    named_window: str | None,
+    range_from: str | None,
+    range_to: str | None,
+    agent: str | None,
+    requested_model: str,
+    max_run_cost_usd: float,
+    store_path: Path | None,
+    output_format: str | None,
+    dry_run: bool,
+) -> int:
+    args = _score_args_from_params(
+        {
+            "since_duration": since_duration,
+            "named_window": named_window,
+            "range_from": range_from,
+            "range_to": range_to,
+            "agent": agent,
+            "requested_model": requested_model,
+            "max_run_cost_usd": max_run_cost_usd,
+            "store_path": store_path,
+            "output_format": output_format,
+            "dry_run": dry_run,
+        }
+    )
+    return _run_score(args)
+
+
+_SCORE_COMMAND = click.Command(
+    name=SCORE_SUBCOMMAND,
+    callback=_score_callback,
+    help="Score every subagent spawn in a resolved window through the judge.",
+    params=[
+        _MutuallyExclusiveOption(
+            ["--since", "since_duration"],
+            mutually_exclusive=frozenset({"named_window", "range_from", "range_to"}),
+            type=str,
+            default=None,
+            help="Score a relative duration ending now, for example 7d.",
+        ),
+        _MutuallyExclusiveOption(
+            ["--window", "named_window"],
+            mutually_exclusive=frozenset({"since_duration", "range_from", "range_to"}),
+            type=click.Choice([NAMED_WINDOW_THIS_WEEK]),
+            default=None,
+            help="Score a named local-calendar window.",
+        ),
+        _MutuallyExclusiveOption(
+            ["--from", "range_from"],
+            mutually_exclusive=frozenset({"since_duration", "named_window"}),
+            type=str,
+            default=None,
+            help="Explicit range lower bound (ISO-8601), paired with --to.",
+        ),
+        _MutuallyExclusiveOption(
+            ["--to", "range_to"],
+            mutually_exclusive=frozenset({"since_duration", "named_window"}),
+            type=str,
+            default=None,
+            help="Explicit range upper bound (ISO-8601), paired with --from.",
+        ),
+        click.Option(
+            ["--agent", "agent"],
+            type=str,
+            default=None,
+            help="Restrict scoring to spawns of one agent type.",
+        ),
+        click.Option(
+            ["--judge-model", "requested_model"],
+            type=str,
+            default="sonnet",
+            help="The model alias or id to request each verdict from.",
+        ),
+        click.Option(
+            ["--max-run-cost-usd", "max_run_cost_usd"],
+            type=float,
+            default=DEFAULT_MAX_RUN_COST_USD,
+            help="Stop starting further judge calls once the run's accrued spend "
+            "reaches this ceiling.",
+        ),
+        click.Option(
+            ["--store", "store_path"],
+            type=click.Path(path_type=Path),
+            default=None,
+            help="Override the default store location.",
+        ),
+        click.Option(
+            ["--format", "output_format"],
+            type=click.Choice([FORMAT_JSON]),
+            default=None,
+            help="Emit the run's outcome as JSON instead of a terminal summary.",
+        ),
+        click.Option(
+            ["--dryrun", "dry_run"],
+            is_flag=True,
+            default=False,
+            help="Preview the run's scope and an upper bound on its cost "
+            "without calling the judge or writing a verdict or claim.",
+        ),
+    ],
+)
+_ROOT.add_command(_SCORE_COMMAND)
+
+
+def parse_score_args(argv: Sequence[str]) -> ScoreArgs:
+    """Parse the ``score`` subcommand's arguments.
+
+    Testable directly against a plain argument list, independent of
+    ``sys.argv`` and of the CLI's own dispatch, by building a context off
+    ``_SCORE_COMMAND`` without invoking it.
+
+    Raises:
+        click.ClickException: ``argv`` does not start with the ``score``
+            subcommand, the window selectors are missing, conflicting, or an
+            incomplete range, or another flag is malformed.
+    """
+    if not argv or argv[0] != SCORE_SUBCOMMAND:
+        raise click.UsageError(f"expected the {SCORE_SUBCOMMAND!r} subcommand")
+    context = _SCORE_COMMAND.make_context("agentlens score", list(argv[1:]))
+    return _score_args_from_params(context.params)
 
 
 def _configure_logging() -> None:

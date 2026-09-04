@@ -7,7 +7,14 @@ from agentlens.models.judging import RubricDimension
 from agentlens.models.protocols import Clock
 from agentlens.models.report_aggregates import AgentRollup
 from agentlens.models.report_document import ReportDocument, ReportSpawn
-from agentlens.models.scoring import RunJudgeUsage, ScoringOutcome, ScoringStatus
+from agentlens.models.scoring import (
+    RunJudgeUsage,
+    ScoringOutcome,
+    ScoringStatus,
+    WindowJudgeUsage,
+    WindowScoringOutcome,
+    WindowScoringPreview,
+)
 from agentlens.models.session_facts import SessionFacts
 from agentlens.models.skill_signals import SessionSkillSignal
 from agentlens.models.windows import ResolvedWindow
@@ -221,6 +228,47 @@ def _build_skill_signal_row(signal: SessionSkillSignal) -> dict[str, object]:
         "declared": signal.declared,
         "available": signal.available,
         "fired": signal.fired,
+    }
+
+
+def build_window_scoring_document_json(outcome: WindowScoringOutcome) -> dict[str, object]:
+    """Convert one window scoring run's outcome into its JSON-safe mapping.
+
+    ``stop_reason`` is present only when the run stopped before covering its
+    whole window, so a completed run's mapping never carries the key with a
+    ``null`` value. Serialize the result with :func:`render_document_json`.
+    """
+    document: dict[str, object] = {
+        "scored": outcome.scored,
+        "reused": outcome.reused,
+        "skipped": outcome.skipped,
+        "failed": outcome.failed,
+        "judge_usage": _build_window_judge_usage_row(outcome.judge_usage),
+        "unattempted": outcome.unattempted,
+    }
+    if outcome.stop_reason is not None:
+        document["stop_reason"] = outcome.stop_reason.value
+    return document
+
+
+def _build_window_judge_usage_row(judge_usage: WindowJudgeUsage) -> dict[str, float | int]:
+    return {
+        "cost_usd": judge_usage.cost_usd,
+        "input_tokens": judge_usage.input_tokens,
+        "output_tokens": judge_usage.output_tokens,
+    }
+
+
+def build_window_scoring_preview_document_json(preview: WindowScoringPreview) -> dict[str, object]:
+    """Convert one window scoring dry run's preview into its JSON-safe mapping.
+
+    ``cost_upper_bound_usd`` is named as a bound rather than an estimate, to
+    match the wording the terminal surface uses for the same figure.
+    """
+    return {
+        "would_score": preview.would_score,
+        "would_reuse": preview.would_reuse,
+        "cost_upper_bound_usd": preview.cost_bound_usd,
     }
 
 

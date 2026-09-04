@@ -85,6 +85,18 @@ class SpawnScoringRun:
             return self._claimed_elsewhere_outcome(inputs, stored)
         return self._score_claimed(bundle, inputs, stored, judge=self._judge)
 
+    def check_reusable(
+        self, bundle: SubagentSourceBundle, stored: SessionFacts
+    ) -> FactVerdict | None:
+        """Return the reusable verdict for one spawn, or ``None`` if it has none.
+
+        A read-only query: it never claims, never calls the judge, and never
+        writes. Lets a caller decide would-score versus would-reuse for a
+        preview without taking on any of :meth:`score`'s side effects.
+        """
+        inputs = self._build_scoring_inputs(bundle, stored)
+        return self._read_existing_verdict(inputs.claim_identity)
+
     def _build_scoring_inputs(
         self, bundle: SubagentSourceBundle, stored: SessionFacts
     ) -> _ScoringInputs:
