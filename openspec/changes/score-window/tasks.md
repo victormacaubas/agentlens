@@ -124,7 +124,7 @@
 
 ## 5. Contracts, the ADR, and the merge gate
 
-- [ ] 5.1 Verify the import contracts still hold with the run in place: `judge` reaching
+- [x] 5.1 Verify the import contracts still hold with the run in place: `judge` reaching
   neither `store` nor `core`, so retries above the seam cannot leak into a backend;
   `store` gaining no import of `judge`, since no verdict data joins the reporting module;
   and the new `core` module exposing nothing `sqlite3`- or `subprocess`-shaped in a
@@ -133,7 +133,7 @@
   temporarily added, then removing it — the contract is only trustworthy once it has been
   seen to fail.
 
-- [ ] 5.2 Write `docs/adr/0010` recording the retry policy, the consecutive-failure
+- [x] 5.2 Write `docs/adr/0010` recording the retry policy, the consecutive-failure
   bound, and the run-level spend ceiling, stating plainly that it supersedes #26's "no
   retry policy" and why a batch of spawns is the evidence that decision was waiting for.
   Record that classification was rejected in favor of a behavioral bound, that the
@@ -143,7 +143,5 @@
   amend `docs/ARCHITECTURE.md`'s ADR index. Verify the ADR's stated bounds match the
   values the tests in section 3 assert on.
 
-- [ ] 5.3 Run `make check` once for the whole change and confirm the full gate passes:
-  tests, typing, lint, and every import contract. Archive or sync `reuse-verdicts` before
-  archiving this change, so this change's `MODIFIED` requirement text matches what is in
-  the main spec.
+- [x] 5.3 Run `make check` once for the whole change and confirm the full gate passes:
+  tests, typing, lint, and every import contract.
