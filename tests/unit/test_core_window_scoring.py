@@ -53,6 +53,15 @@ def _valid_structured_output() -> dict[str, object]:
     }
 
 
+def _structured_output_missing_a_dimension() -> dict[str, object]:
+    dimensions = {
+        dimension.value: {"score": 4, "evidence": ["Evidence."]}
+        for dimension in RubricDimension
+        if dimension is not RubricDimension.HONESTY
+    }
+    return {"overall_score": 4, "dimensions": dimensions, "suggested_fixes": []}
+
+
 def _scoring_request(
     *,
     requested_model: str = _DEFAULT_REQUESTED_MODEL,
@@ -481,3 +490,199 @@ def test_spawns_are_scored_oldest_first(tmp_path: Path) -> None:
 
     order = [_label_from_prompt(prompt) for prompt, _ in judge.calls]
     assert order == ["first", "second", "third"]
+
+
+def test_a_spawn_failing_mid_window_does_not_stop_the_spawns_after_it(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    claude_root = home / ".claude"
+    store_path = tmp_path / "store" / "agentlens.db"
+    for raw_session_id in ("a", "b", "c"):
+        write_transcript(build_transcript_path(home, raw_session_id=raw_session_id))
+    response = build_judge_response(structured_output=_valid_structured_output())
+    judge = FakeJudgeBackend(
+        responses=[JudgeUnavailableError("judge did not respond"), response, response]
+    )
+
+    outcome = score_window(
+        projects_root=claude_root / "projects",
+        claude_root=claude_root,
+        store_path=store_path,
+        clock=_CLOCK,
+        judge=judge,
+        request=_scoring_request(),
+        agent_type=None,
+        window=_window(),
+    )
+
+    assert outcome.scored == 2
+    assert outcome.reused == 0
+    assert outcome.skipped == 0
+    assert outcome.failed == 1
+    assert outcome.unattempted == 0
+    assert outcome.stop_reason is None
+    assert len(judge.calls) == 3
+
+
+def test_a_failed_spawns_deterministic_facts_remain_recorded(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    claude_root = home / ".claude"
+    store_path = tmp_path / "store" / "agentlens.db"
+    transcript_path = build_transcript_path(home, raw_session_id="only")
+    write_transcript(transcript_path)
+    session_id = _source_session_id(transcript_path, claude_root)
+    judge = FakeJudgeBackend(error=JudgeUnavailableError("judge did not respond"))
+
+    outcome = score_window(
+        projects_root=claude_root / "projects",
+        claude_root=claude_root,
+        store_path=store_path,
+        clock=_CLOCK,
+        judge=judge,
+        request=_scoring_request(),
+        agent_type=None,
+        window=_window(),
+    )
+
+    assert outcome.failed == 1
+    assert outcome.scored == 0
+    with Store(store_path, clock=_CLOCK) as store:
+        assert store.read_session(session_id) is not None
+        assert store.read_verdicts_for_session(session_id) == ()
+
+
+def test_a_failed_spawn_holds_no_claim_afterward(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    claude_root = home / ".claude"
+    store_path = tmp_path / "store" / "agentlens.db"
+    transcript_path = build_transcript_path(home, raw_session_id="only")
+    write_transcript(transcript_path)
+    session_id = _source_session_id(transcript_path, claude_root)
+    request = _scoring_request()
+    judge = FakeJudgeBackend(error=JudgeUnavailableError("judge did not respond"))
+
+    score_window(
+        projects_root=claude_root / "projects",
+        claude_root=claude_root,
+        store_path=store_path,
+        clock=_CLOCK,
+        judge=judge,
+        request=request,
+        agent_type=None,
+        window=_window(),
+    )
+
+    identity = build_verdict_claim_identity(
+        session_id=session_id,
+        judge_input_hash=hash_text(_source_prompt(transcript_path)),
+        rubric_version=RUBRIC_VERSION,
+        requested_model=request.requested_model,
+    )
+    with Store(store_path, clock=_CLOCK) as store:
+        assert store.read_verdict_claim(identity) is None
+
+
+def test_a_failed_spawn_records_no_verdict_and_is_attempted_again_by_a_later_run(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    claude_root = home / ".claude"
+    store_path = tmp_path / "store" / "agentlens.db"
+    write_transcript(build_transcript_path(home, raw_session_id="only"))
+    request = _scoring_request()
+    failing_judge = FakeJudgeBackend(error=JudgeUnavailableError("judge did not respond"))
+
+    first_outcome = score_window(
+        projects_root=claude_root / "projects",
+        claude_root=claude_root,
+        store_path=store_path,
+        clock=_CLOCK,
+        judge=failing_judge,
+        request=request,
+        agent_type=None,
+        window=_window(),
+    )
+
+    assert first_outcome.failed == 1
+    assert first_outcome.scored == 0
+
+    response = build_judge_response(structured_output=_valid_structured_output())
+    succeeding_judge = FakeJudgeBackend(response=response)
+    second_outcome = score_window(
+        projects_root=claude_root / "projects",
+        claude_root=claude_root,
+        store_path=store_path,
+        clock=_CLOCK,
+        judge=succeeding_judge,
+        request=request,
+        agent_type=None,
+        window=_window(),
+    )
+
+    assert second_outcome.scored == 1
+    assert second_outcome.reused == 0
+    assert second_outcome.skipped == 0
+    assert second_outcome.failed == 0
+    assert len(succeeding_judge.calls) == 1
+
+
+def test_a_rejected_verdicts_already_spent_cost_appears_in_the_runs_total(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    claude_root = home / ".claude"
+    store_path = tmp_path / "store" / "agentlens.db"
+    write_transcript(build_transcript_path(home, raw_session_id="only"))
+    response = build_judge_response(
+        structured_output=_structured_output_missing_a_dimension(),
+        cost_usd=0.05,
+        input_tokens=10,
+        output_tokens=5,
+    )
+    judge = FakeJudgeBackend(response=response)
+
+    outcome = score_window(
+        projects_root=claude_root / "projects",
+        claude_root=claude_root,
+        store_path=store_path,
+        clock=_CLOCK,
+        judge=judge,
+        request=_scoring_request(),
+        agent_type=None,
+        window=_window(),
+    )
+
+    assert outcome.failed == 1
+    assert outcome.scored == 0
+    assert outcome.judge_usage.cost_usd == pytest.approx(0.05)
+    assert outcome.judge_usage.input_tokens == 10
+    assert outcome.judge_usage.output_tokens == 5
+
+
+def test_a_window_whose_every_spawn_fails_still_reports_counts_without_raising(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    claude_root = home / ".claude"
+    store_path = tmp_path / "store" / "agentlens.db"
+    for raw_session_id in ("a", "b", "c"):
+        write_transcript(build_transcript_path(home, raw_session_id=raw_session_id))
+    judge = FakeJudgeBackend(error=JudgeUnavailableError("judge did not respond"))
+
+    outcome = score_window(
+        projects_root=claude_root / "projects",
+        claude_root=claude_root,
+        store_path=store_path,
+        clock=_CLOCK,
+        judge=judge,
+        request=_scoring_request(),
+        agent_type=None,
+        window=_window(),
+    )
+
+    assert outcome.scored == 0
+    assert outcome.reused == 0
+    assert outcome.skipped == 0
+    assert outcome.failed == 3
+    assert outcome.unattempted == 0
+    assert outcome.stop_reason is None
+    assert len(judge.calls) == 3

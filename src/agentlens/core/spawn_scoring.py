@@ -201,7 +201,7 @@ class SpawnScoringRun:
         response = judge.score(inputs.prompt, model=self._request.requested_model)
         try:
             verdict = validate_verdict(response.structured_output)
-        except JudgeResponseError:
+        except JudgeResponseError as error:
             logger.exception(
                 "Judge call for session_id=%s agent_type=%s identity=%s spent "
                 "cost_usd=%s input_tokens=%s output_tokens=%s before verdict rejection",
@@ -212,7 +212,12 @@ class SpawnScoringRun:
                 response.input_tokens,
                 response.output_tokens,
             )
-            raise
+            raise JudgeResponseError(
+                str(error),
+                cost_usd=response.cost_usd if response.cost_usd is not None else 0.0,
+                input_tokens=response.input_tokens if response.input_tokens is not None else 0,
+                output_tokens=response.output_tokens if response.output_tokens is not None else 0,
+            ) from error
 
         if response.cost_usd is None:
             raise JudgeResponseError(

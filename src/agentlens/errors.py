@@ -39,4 +39,25 @@ class JudgeUnavailableError(JudgeError):
 
 
 class JudgeResponseError(JudgeError):
-    """The judge responded, but it reported an error or failed validation."""
+    """The judge responded, but it reported an error or failed validation.
+
+    ``cost_usd``, ``input_tokens``, and ``output_tokens`` carry whatever a
+    completed call had already spent before this error was raised, so that
+    spend is not lost when the call propagates past the point where it was
+    known. They default to zero, which stands for both "no call happened"
+    and "the call reported no cost" -- there is no spend to carry in either
+    case, so the two are not distinguished here.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        cost_usd: float = 0.0,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+    ) -> None:
+        super().__init__(message)
+        self.cost_usd = cost_usd
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens

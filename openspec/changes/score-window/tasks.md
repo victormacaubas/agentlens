@@ -21,7 +21,7 @@
 
 ## 2. Surviving a spawn that fails
 
-- [ ] 2.1 Capture a judge failure as that spawn's outcome and continue the run, leaving
+- [x] 2.1 Capture a judge failure as that spawn's outcome and continue the run, leaving
   `SpawnScoringRun` raising as it does today so `session --file` keeps its fail-fast
   exit. This is what makes `ScoringStatus.FAILED` reachable for the first time. Carry
   the spend of a call that completed and then failed local validation out to the run, so

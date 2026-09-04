@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import cast
 
 from agentlens.core.spawn_scoring import SpawnScoringRun
-from agentlens.errors import StoreError
+from agentlens.errors import JudgeError, JudgeResponseError, StoreError
 from agentlens.ingest.context import SubagentContextCache
 from agentlens.ingest.discovery import discover_subagent_sources
 from agentlens.ingest.identity import SubagentSourceBundle
@@ -23,6 +23,7 @@ from agentlens.ingest.transcript import parse_transcript
 from agentlens.models.facts import FactSession
 from agentlens.models.protocols import Clock, JudgeBackend
 from agentlens.models.scoring import (
+    RunJudgeUsage,
     ScoringOutcome,
     ScoringRequest,
     ScoringStatus,
@@ -51,15 +52,15 @@ class _Tally:
     def record(self, outcome: ScoringOutcome) -> None:
         if outcome.status is ScoringStatus.SCORED:
             self.scored += 1
-            self.cost_usd += outcome.run_judge_usage.cost_usd
-            self.input_tokens += outcome.run_judge_usage.input_tokens
-            self.output_tokens += outcome.run_judge_usage.output_tokens
         elif outcome.status is ScoringStatus.REUSED:
             self.reused += 1
         elif outcome.status is ScoringStatus.CLAIMED_ELSEWHERE:
             self.skipped += 1
         else:
             self.failed += 1
+        self.cost_usd += outcome.run_judge_usage.cost_usd
+        self.input_tokens += outcome.run_judge_usage.input_tokens
+        self.output_tokens += outcome.run_judge_usage.output_tokens
 
     def to_outcome(self) -> WindowScoringOutcome:
         return WindowScoringOutcome(
@@ -99,9 +100,11 @@ def score_window(
     or none matching ``agent_type``, succeeds with every count at zero and no
     judge call.
 
-    A judge failure for one spawn is not caught here and aborts the run
-    immediately, so this function's own return value carries no partial
-    result for that case.
+    A judge failure for one spawn is recorded as that spawn's failed outcome
+    rather than raised, and the run continues with the spawns that remain.
+    A rejected verdict's already-spent cost is carried into the run's
+    aggregated ``judge_usage`` rather than dropped along with the exception
+    that reported it.
 
     Raises:
         ~agentlens.errors.SourceError: A discovered transcript or a shaping
@@ -110,8 +113,6 @@ def score_window(
             or read back, or a windowed spawn matched no discovered source.
         ~agentlens.errors.ConfigError: Scoring was requested without a judge
             backend.
-        ~agentlens.errors.JudgeError: A judge call, or the verdict it
-            returned, could not be used.
     """
     session_id_to_bundle, rows = _ingest_and_read_window(
         projects_root=projects_root,
@@ -140,9 +141,18 @@ def score_window(
                 f"under {projects_root}"
             )
         stored = _read_stored_session(store_path, clock=clock, session_id=session_id)
-        outcome = _score_spawn(
-            bundle, stored, store_path=store_path, clock=clock, judge=judge, request=request
-        )
+        try:
+            outcome = _score_spawn(
+                bundle, stored, store_path=store_path, clock=clock, judge=judge, request=request
+            )
+        except JudgeError as error:
+            logger.exception(
+                "Scoring failed for session_id=%s agent_type=%s; continuing with "
+                "the rest of the window",
+                session_id,
+                stored.session.agent_type,
+            )
+            outcome = _failed_outcome(error)
         tally.record(outcome)
 
     logger.info(
@@ -210,3 +220,27 @@ def _score_spawn(
         store_path=store_path, clock=clock, judge=judge, request=request
     ).score(bundle, stored, dry_run=False)
     return cast(ScoringOutcome, outcome)
+
+
+def _failed_outcome(error: JudgeError) -> ScoringOutcome:
+    """Build the ``FAILED`` outcome for a spawn whose judge call could not be used.
+
+    Carries whatever cost a rejected verdict's call had already spent, read
+    off ``error`` when it is a :class:`JudgeResponseError`, so a validation
+    failure after a completed call is not reported as free. Any other
+    ``JudgeError`` carries no cost, since no call completed.
+    """
+    if isinstance(error, JudgeResponseError):
+        run_judge_usage = RunJudgeUsage(
+            cost_usd=error.cost_usd,
+            input_tokens=error.input_tokens,
+            output_tokens=error.output_tokens,
+        )
+    else:
+        run_judge_usage = RunJudgeUsage(cost_usd=0.0, input_tokens=0, output_tokens=0)
+    return ScoringOutcome(
+        status=ScoringStatus.FAILED,
+        verdict=None,
+        run_judge_usage=run_judge_usage,
+        is_behind_current_input=False,
+    )
