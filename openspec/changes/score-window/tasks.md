@@ -1,6 +1,6 @@
 ## 1. The run over a window
 
-- [ ] 1.1 Add the run outcome to `models` — the four per-spawn statuses already exist,
+- [x] 1.1 Add the run outcome to `models` — the four per-spawn statuses already exist,
   so what is new is the run-level shape: counts per status, the run's own aggregated
   judge usage, a stop reason, and how many spawns went unattempted. Build the run in a
   responsibility-named `core` module that resolves the window, ingests, reads the
